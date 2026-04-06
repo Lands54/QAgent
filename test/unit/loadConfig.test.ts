@@ -1,0 +1,95 @@
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { loadRuntimeConfig } from "../../src/config/loadConfig.js";
+
+const originalEnv = { ...process.env };
+
+async function makeTempDir(prefix: string) {
+  return mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+afterEach(() => {
+  process.env = { ...originalEnv };
+  vi.restoreAllMocks();
+});
+
+describe("loadRuntimeConfig", () => {
+  it("按 global -> project -> env -> cli 的顺序合并配置", async () => {
+    const tempHome = await makeTempDir("qagent-home-");
+    const tempProject = await makeTempDir("qagent-project-");
+    vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+
+    await mkdir(path.join(tempHome, ".agent"), { recursive: true });
+    await mkdir(path.join(tempProject, ".agent"), { recursive: true });
+    await writeFile(
+      path.join(tempHome, ".agent", "config.json"),
+      JSON.stringify({
+        model: {
+          baseUrl: "https://global.example/v1",
+          model: "global-model",
+        },
+        runtime: {
+          maxAgentSteps: 3,
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(tempProject, ".agent", "config.json"),
+      JSON.stringify({
+        model: {
+          model: "project-model",
+        },
+        tool: {
+          approvalMode: "risky",
+        },
+      }),
+      "utf8",
+    );
+
+    process.env.HOME = tempHome;
+    process.env.QAGENT_MODEL = "env-model";
+    process.env.QAGENT_SHELL_TIMEOUT_MS = "3333";
+
+    const config = await loadRuntimeConfig({
+      cwd: tempProject,
+      model: "cli-model",
+    });
+
+    expect(config.model.provider).toBe("openai");
+    expect(config.model.baseUrl).toBe("https://global.example/v1");
+    expect(config.model.model).toBe("cli-model");
+    expect(config.runtime.maxAgentSteps).toBe(3);
+    expect(config.runtime.shellCommandTimeoutMs).toBe(3333);
+    expect(config.tool.approvalMode).toBe("risky");
+    expect(config.resolvedPaths.projectAgentDir).toBe(
+      path.join(tempProject, ".agent"),
+    );
+    expect(config.resolvedPaths.globalAgentDir).toBe(path.join(tempHome, ".agent"));
+  });
+
+  it("支持通过 OpenRouter 环境变量自动切换 provider 与默认配置", async () => {
+    const tempHome = await makeTempDir("qagent-home-");
+    const tempProject = await makeTempDir("qagent-project-");
+    vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+    await mkdir(path.join(tempHome, ".agent"), { recursive: true });
+    await mkdir(path.join(tempProject, ".agent"), { recursive: true });
+
+    process.env.OPENROUTER_API_KEY = "or-key";
+    process.env.OPENROUTER_APP_NAME = "QAgent Test";
+    process.env.OPENROUTER_SITE_URL = "https://example.com/qagent";
+
+    const config = await loadRuntimeConfig({
+      cwd: tempProject,
+    });
+
+    expect(config.model.provider).toBe("openrouter");
+    expect(config.model.baseUrl).toBe("https://openrouter.ai/api/v1");
+    expect(config.model.apiKey).toBe("or-key");
+    expect(config.model.appName).toBe("QAgent Test");
+    expect(config.model.appUrl).toBe("https://example.com/qagent");
+  });
+});

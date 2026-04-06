@@ -1,0 +1,33 @@
+{
+  "name": "qagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "qagent": "./bin/qagent.js"
+  },
+  "scripts": {
+    "dev": "tsx src/cli/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node ./bin/qagent.js",
+    "test": "vitest run",
+    "test:architecture": "vitest run test/architecture",
+    "test:watch": "vitest",
+    "check": "npm run build && npm run test"
+  },
+  "dependencies": {
+    "gray-matter": "^4.0.3",
+    "ink": "^5.2.1",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "@types/react": "^18.3.12",
+    "ink-testing-library": "^4.0.0",
+    "react-test-renderer": "^18.3.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.8"
+  }
+}

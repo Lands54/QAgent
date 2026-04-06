@@ -1,0 +1,110 @@
+import path from "node:path";
+import { readdir } from "node:fs/promises";
+
+import type {
+  SessionBranchRef,
+  SessionNode,
+  SessionRepoState,
+  SessionTagRef,
+} from "../types.js";
+import { ensureDir, pathExists, readJsonIfExists, writeJson } from "../utils/index.js";
+
+export class SessionGraphStore {
+  private readonly repoRoot: string;
+  private readonly nodesRoot: string;
+
+  public constructor(private readonly sessionRoot: string) {
+    this.repoRoot = path.join(sessionRoot, "__repo");
+    this.nodesRoot = path.join(this.repoRoot, "nodes");
+  }
+
+  public async repoExists(): Promise<boolean> {
+    return pathExists(this.getStatePath());
+  }
+
+  public async initializeRepo(input: {
+    state: SessionRepoState;
+    branches: SessionBranchRef[];
+    tags: SessionTagRef[];
+    nodes: SessionNode[];
+  }): Promise<void> {
+    await ensureDir(this.nodesRoot);
+    await this.saveState(input.state);
+    await this.saveBranches(input.branches);
+    await this.saveTags(input.tags);
+    await Promise.all(input.nodes.map(async (node) => this.saveNode(node)));
+  }
+
+  public async loadState(): Promise<SessionRepoState | undefined> {
+    return readJsonIfExists<SessionRepoState>(this.getStatePath());
+  }
+
+  public async saveState(state: SessionRepoState): Promise<void> {
+    await writeJson(this.getStatePath(), state);
+  }
+
+  public async loadBranches(): Promise<SessionBranchRef[]> {
+    return (await readJsonIfExists<SessionBranchRef[]>(this.getBranchesPath())) ?? [];
+  }
+
+  public async saveBranches(branches: SessionBranchRef[]): Promise<void> {
+    await writeJson(
+      this.getBranchesPath(),
+      [...branches].sort((left, right) => left.name.localeCompare(right.name)),
+    );
+  }
+
+  public async loadTags(): Promise<SessionTagRef[]> {
+    return (await readJsonIfExists<SessionTagRef[]>(this.getTagsPath())) ?? [];
+  }
+
+  public async saveTags(tags: SessionTagRef[]): Promise<void> {
+    await writeJson(
+      this.getTagsPath(),
+      [...tags].sort((left, right) => left.name.localeCompare(right.name)),
+    );
+  }
+
+  public async loadNode(nodeId: string): Promise<SessionNode | undefined> {
+    return readJsonIfExists<SessionNode>(this.getNodePath(nodeId));
+  }
+
+  public async saveNode(node: SessionNode): Promise<void> {
+    await writeJson(this.getNodePath(node.id), node);
+  }
+
+  public async listNodes(): Promise<SessionNode[]> {
+    try {
+      const entries = await readdir(this.nodesRoot, { withFileTypes: true });
+      const nodes = await Promise.all(
+        entries
+          .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+          .map(async (entry) => {
+            return this.loadNode(entry.name.replace(/\.json$/u, ""));
+          }),
+      );
+
+      return nodes
+        .filter((node): node is SessionNode => Boolean(node))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    } catch {
+      return [];
+    }
+  }
+
+  private getStatePath(): string {
+    return path.join(this.repoRoot, "state.json");
+  }
+
+  private getBranchesPath(): string {
+    return path.join(this.repoRoot, "branches.json");
+  }
+
+  private getTagsPath(): string {
+    return path.join(this.repoRoot, "tags.json");
+  }
+
+  private getNodePath(nodeId: string): string {
+    return path.join(this.nodesRoot, `${nodeId}.json`);
+  }
+}

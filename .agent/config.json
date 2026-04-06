@@ -1,0 +1,15 @@
+{
+  "model": {
+    "provider": "openrouter",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "model": "gpt-4o",
+    "temperature": 0.2
+  },
+  "runtime": {
+    "maxAgentSteps": 8,
+    "shellCommandTimeoutMs": 120000
+  },
+  "tool": {
+    "approvalMode": "always"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules
+dist
+.DS_Store
+coverage
+.idea
+.agent/sessions
+.agent/memory/*.json
