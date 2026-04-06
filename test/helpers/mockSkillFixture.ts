@@ -63,6 +63,8 @@ export function buildMockSkillRuntimeConfig(
       shellCommandTimeoutMs: 15_000,
       maxToolOutputChars: 12_000,
       maxConversationSummaryMessages: 10,
+      autoCompactThresholdTokens: 120_000,
+      compactRecentKeepGroups: 8,
       ...overrides.runtime,
     },
     tool: {

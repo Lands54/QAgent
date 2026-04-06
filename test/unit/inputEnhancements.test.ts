@@ -120,6 +120,12 @@ describe("inputEnhancements", () => {
     expect(result.hint).toContain("/tool confirm never");
   });
 
+  it("会包含新的 memory save 命令模板", () => {
+    const candidates = buildAutocompleteCandidates([]);
+
+    expect(candidates).toContain("/memory save --name= --description=");
+  });
+
   it("会把 skill 名称加入动态补全候选", () => {
     const skills = [
       createSkill("pdf-processing", "处理 PDF"),

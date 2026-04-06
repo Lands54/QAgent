@@ -2,33 +2,45 @@ import type {
   InstructionLayer,
   LlmMessage,
   MemoryRecord,
+  PromptProfile,
   RuntimeConfig,
   SkillManifest,
+  ToolMode,
 } from "../types.js";
 import { createId, truncate } from "../utils/index.js";
 
 interface AssemblePromptInput {
   config: RuntimeConfig;
+  profile?: PromptProfile;
   agentLayers: InstructionLayer[];
   availableSkills: SkillManifest[];
   relevantMemories: MemoryRecord[];
   modelMessages: LlmMessage[];
   shellCwd: string;
+  toolMode?: ToolMode;
 }
 
-function baseInstruction(config: RuntimeConfig, shellCwd: string): InstructionLayer {
-  const content = [
+function baseInstruction(
+  config: RuntimeConfig,
+  toolMode: ToolMode,
+): InstructionLayer {
+  const sharedLines = [
     config.model.systemPrompt ?? "",
     "工作方式约束：",
     "- 你是运行在终端中的 Agent。",
-    "- 你只能使用一个名为 shell 的工具。",
-    "- shell 仅适用于非交互式命令；不要请求需要全屏 TTY、持续 stdin 或编辑器的命令。",
-    "- 在没有必要时，优先直接回答，不要滥用工具。",
-    `- 当前 shell 工作目录：${shellCwd}`,
-    `- 当前工具审批模式：${config.tool.approvalMode}`,
-    `- 当前最大自治步数：${config.runtime.maxAgentSteps}`,
-    `- 当前时间：${new Date().toISOString()}`,
-  ]
+  ];
+  const toolLines =
+    toolMode === "none"
+      ? [
+          "- 当前回合不暴露任何工具。",
+          "- 你必须仅根据已有上下文直接输出文本结果。",
+        ]
+      : [
+          "- 你只能使用一个名为 shell 的工具。",
+          "- shell 仅适用于非交互式命令；不要请求需要全屏 TTY、持续 stdin 或编辑器的命令。",
+          "- 在没有必要时，优先直接回答，不要滥用工具。",
+        ];
+  const content = [...sharedLines, ...toolLines]
     .filter(Boolean)
     .join("\n");
 
@@ -77,18 +89,22 @@ function memoryLayers(relevantMemories: MemoryRecord[]): InstructionLayer[] {
   return relevantMemories.map((memory, index) => ({
     id: createId("instruction"),
     source: "memory",
-    title: `Memory: ${memory.title}`,
+    title: `Memory: ${memory.name}`,
     content: [
-      `标题：${memory.title}`,
-      `标签：${memory.tags.join(", ") || "无"}`,
-      "内容：",
-      memory.content,
+      "以下是与当前任务相关的 memory 索引与摘要，不会自动注入完整正文。",
+      `name: ${memory.name}`,
+      `description: ${memory.description}`,
+      `scope: ${memory.scope}`,
+      `path: ${memory.path}`,
+      "摘要：",
+      truncate(memory.content || "(empty)", 240),
+      "如需完整内容或附属资产，请使用 shell 读取该 memory 目录中的 `MEMORY.md` 与其他文件。",
     ].join("\n"),
     priority: 70 - index,
   }));
 }
 
-function sessionSummaryLayer(
+function sessionDigestLayer(
   messages: LlmMessage[],
   maxMessages: number,
 ): InstructionLayer | undefined {
@@ -97,7 +113,7 @@ function sessionSummaryLayer(
     return undefined;
   }
 
-  const summary = relevant
+  const digest = relevant
     .map((message) => {
       if (message.role === "tool") {
         return `[tool:${message.name}] ${truncate(message.content, 800)}`;
@@ -108,9 +124,9 @@ function sessionSummaryLayer(
 
   return {
     id: createId("instruction"),
-    source: "session-summary",
-    title: "Recent Session Summary",
-    content: summary,
+    source: "session-digest",
+    title: "Recent Session Digest",
+    content: digest,
     priority: 60,
   };
 }
@@ -122,15 +138,13 @@ export interface AssembledPrompt {
 
 export class PromptAssembler {
   public assemble(input: AssemblePromptInput): AssembledPrompt {
+    const profile = input.profile ?? "default";
     const layers = [
-      baseInstruction(input.config, input.shellCwd),
+      baseInstruction(input.config, input.toolMode ?? "shell"),
       ...input.agentLayers,
-      skillCatalogLayer(input.availableSkills, input.config),
-      ...memoryLayers(input.relevantMemories),
-      sessionSummaryLayer(
-        input.modelMessages,
-        input.config.runtime.maxConversationSummaryMessages,
-      ),
+      profile === "default"
+        ? skillCatalogLayer(input.availableSkills, input.config)
+        : undefined,
     ]
       .filter((layer): layer is InstructionLayer => Boolean(layer))
       .sort((left, right) => right.priority - left.priority);

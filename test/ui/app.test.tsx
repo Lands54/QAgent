@@ -21,6 +21,8 @@ class FakeController {
       ...this.state,
       sessionId: "session_demo",
       shellCwd: "/tmp/project",
+      currentTokenEstimate: 2400,
+      autoCompactThresholdTokens: 120000,
       status: {
         mode: "idle",
         detail: "等待输入",
@@ -68,6 +70,7 @@ describe("App", () => {
     expect(view.lastFrame()).toContain("branch=main");
     expect(view.lastFrame()).toContain("history: ↑/↓");
     expect(view.lastFrame()).toContain("complete: Tab");
+    expect(view.lastFrame()).toContain("tokens: 2400/120000 (2.0%)");
   });
 
   it("在审批态显示明确的等待提示", () => {
@@ -122,5 +125,63 @@ describe("App", () => {
     const view = render(<App controller={controller as never} />);
 
     expect(view.lastFrame()).toContain("skills=2");
+  });
+
+  it("当 fetch/save helper 正在运行时，会显示 fetching / saving 提示", () => {
+    const controller = new FakeController();
+    const state = controller.getState();
+    state.agents = [
+      {
+        id: "head_main",
+        headId: "head_main",
+        sessionId: "session_demo",
+        name: "main",
+        kind: "interactive",
+        status: "idle",
+        autoMemoryFork: true,
+        retainOnCompletion: true,
+        detail: "等待输入",
+        shellCwd: "/tmp/project",
+        dirty: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: "head_fetch",
+        headId: "head_fetch",
+        sessionId: "session_fetch",
+        name: "fetch-memory-1",
+        kind: "task",
+        helperType: "fetch-memory",
+        status: "running",
+        autoMemoryFork: false,
+        retainOnCompletion: true,
+        detail: "正在筛选候选 memory",
+        shellCwd: "/tmp/project",
+        dirty: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: "head_save",
+        headId: "head_save",
+        sessionId: "session_save",
+        name: "auto-memory-1",
+        kind: "task",
+        helperType: "save-memory",
+        status: "running",
+        autoMemoryFork: false,
+        retainOnCompletion: true,
+        detail: "正在整理长期记忆",
+        shellCwd: "/tmp/project",
+        dirty: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+
+    const view = render(<App controller={controller as never} />);
+
+    expect(view.lastFrame()).toContain("helper: fetching memory... | saving memory...");
   });
 });

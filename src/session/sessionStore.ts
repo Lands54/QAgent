@@ -10,7 +10,8 @@ import {
   writeJson,
 } from "../utils/index.js";
 
-interface InitializeSessionInput {
+interface InitializeHeadSessionInput {
+  workingHeadId: string;
   sessionId?: string;
   cwd: string;
   shellCwd: string;
@@ -20,21 +21,20 @@ interface InitializeSessionInput {
 export class SessionStore {
   public constructor(private readonly sessionRoot: string) {}
 
-  public async initializeSession(
-    input: InitializeSessionInput,
+  public async initializeHeadSession(
+    input: InitializeHeadSessionInput,
   ): Promise<SessionSnapshot> {
-    await ensureDir(this.sessionRoot);
+    await ensureDir(this.getHeadsRoot());
 
-    if (input.sessionId) {
-      const existing = await this.load(input.sessionId);
-      if (existing) {
-        return existing;
-      }
+    const existing = await this.load(input.workingHeadId);
+    if (existing) {
+      return existing;
     }
 
     const sessionId = input.sessionId ?? createId("session");
     const now = new Date().toISOString();
     const snapshot: SessionSnapshot = {
+      workingHeadId: input.workingHeadId,
       sessionId,
       createdAt: now,
       updatedAt: now,
@@ -47,6 +47,7 @@ export class SessionStore {
     await this.saveSnapshot(snapshot);
     await this.appendEvent({
       id: createId("event"),
+      workingHeadId: input.workingHeadId,
       sessionId,
       type: "session.created",
       timestamp: now,
@@ -59,17 +60,16 @@ export class SessionStore {
     return snapshot;
   }
 
-  public async load(sessionId: string): Promise<SessionSnapshot | undefined> {
-    const snapshotPath = this.getSnapshotPath(sessionId);
-    return readJsonIfExists<SessionSnapshot>(snapshotPath);
+  public async load(workingHeadId: string): Promise<SessionSnapshot | undefined> {
+    return readJsonIfExists<SessionSnapshot>(this.getSnapshotPath(workingHeadId));
   }
 
   public async loadMostRecent(): Promise<SessionSnapshot | undefined> {
-    await ensureDir(this.sessionRoot);
+    await ensureDir(this.getHeadsRoot());
 
-    const sessionDirs = await readdir(this.sessionRoot, { withFileTypes: true });
+    const headDirs = await readdir(this.getHeadsRoot(), { withFileTypes: true });
     const snapshots = await Promise.all(
-      sessionDirs
+      headDirs
         .filter((entry) => entry.isDirectory())
         .map(async (entry) => {
           return this.load(entry.name);
@@ -82,29 +82,30 @@ export class SessionStore {
   }
 
   public async appendEvent(event: SessionEvent): Promise<void> {
-    const logPath = this.getEventLogPath(event.sessionId);
-    await appendNdjson(logPath, event);
+    await appendNdjson(this.getEventLogPath(event.workingHeadId), event);
   }
 
   public async saveSnapshot(snapshot: SessionSnapshot): Promise<void> {
-    const sessionDir = this.getSessionDir(snapshot.sessionId);
-    await ensureDir(sessionDir);
-    const nextSnapshot: SessionSnapshot = {
+    await ensureDir(this.getHeadDir(snapshot.workingHeadId));
+    await writeJson(this.getSnapshotPath(snapshot.workingHeadId), {
       ...snapshot,
       updatedAt: new Date().toISOString(),
-    };
-    await writeJson(this.getSnapshotPath(snapshot.sessionId), nextSnapshot);
+    });
   }
 
-  private getSessionDir(sessionId: string): string {
-    return path.join(this.sessionRoot, sessionId);
+  private getHeadsRoot(): string {
+    return path.join(this.sessionRoot, "__heads");
   }
 
-  private getSnapshotPath(sessionId: string): string {
-    return path.join(this.getSessionDir(sessionId), "snapshot.json");
+  private getHeadDir(workingHeadId: string): string {
+    return path.join(this.getHeadsRoot(), workingHeadId);
   }
 
-  private getEventLogPath(sessionId: string): string {
-    return path.join(this.getSessionDir(sessionId), "events.ndjson");
+  private getSnapshotPath(workingHeadId: string): string {
+    return path.join(this.getHeadDir(workingHeadId), "snapshot.json");
+  }
+
+  private getEventLogPath(workingHeadId: string): string {
+    return path.join(this.getHeadDir(workingHeadId), "events.ndjson");
   }
 }

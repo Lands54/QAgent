@@ -9,6 +9,7 @@ import type {
   SessionRepoState,
   SessionSnapshot,
   SessionTagRef,
+  SessionWorkingHead,
 } from "../../src/types.js";
 import { SessionGraphStore } from "../../src/session/index.js";
 
@@ -16,8 +17,9 @@ async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-function buildSnapshot(sessionId: string): SessionSnapshot {
+function buildSnapshot(sessionId: string, workingHeadId: string): SessionSnapshot {
   return {
+    workingHeadId,
     sessionId,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
@@ -35,11 +37,11 @@ describe("SessionGraphStore", () => {
     const root = await makeTempDir("qagent-session-graph-");
     const store = new SessionGraphStore(root);
     const state: SessionRepoState = {
-      version: 1,
-      currentBranchName: "main",
-      headNodeId: "node_main",
-      workingSessionId: "session_demo",
+      version: 2,
+      activeWorkingHeadId: "head_main",
       defaultBranchName: "main",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
     };
     const branches: SessionBranchRef[] = [
       {
@@ -60,18 +62,43 @@ describe("SessionGraphStore", () => {
       id: "node_main",
       parentNodeIds: [],
       kind: "root",
-      workingSessionId: "session_demo",
-      snapshot: buildSnapshot("session_demo"),
+      snapshot: buildSnapshot("session_demo", "head_main"),
       abstractAssets: [],
       snapshotHash: "hash_main",
       createdAt: "2026-01-01T00:00:00.000Z",
     };
+    const heads: SessionWorkingHead[] = [
+      {
+        id: "head_main",
+        name: "main",
+        currentNodeId: "node_main",
+        sessionId: "session_demo",
+        attachment: {
+          mode: "branch",
+          name: "main",
+          nodeId: "node_main",
+        },
+        writerLease: {
+          branchName: "main",
+          acquiredAt: "2026-01-01T00:00:00.000Z",
+        },
+        runtimeState: {
+          shellCwd: "/tmp/project",
+          status: "idle",
+        },
+        assetState: {},
+        status: "idle",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ];
 
     await store.initializeRepo({
       state,
       branches,
       tags,
       nodes: [node],
+      heads,
     });
 
     expect(await store.repoExists()).toBe(true);
@@ -80,5 +107,7 @@ describe("SessionGraphStore", () => {
     expect(await store.loadTags()).toEqual(tags);
     expect(await store.loadNode("node_main")).toEqual(node);
     expect(await store.listNodes()).toEqual([node]);
+    expect(await store.loadHead("head_main")).toEqual(heads[0]);
+    expect(await store.listHeads()).toEqual(heads);
   });
 });

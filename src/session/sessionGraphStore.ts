@@ -6,16 +6,19 @@ import type {
   SessionNode,
   SessionRepoState,
   SessionTagRef,
+  SessionWorkingHead,
 } from "../types.js";
 import { ensureDir, pathExists, readJsonIfExists, writeJson } from "../utils/index.js";
 
 export class SessionGraphStore {
   private readonly repoRoot: string;
   private readonly nodesRoot: string;
+  private readonly headsRoot: string;
 
   public constructor(private readonly sessionRoot: string) {
     this.repoRoot = path.join(sessionRoot, "__repo");
     this.nodesRoot = path.join(this.repoRoot, "nodes");
+    this.headsRoot = path.join(this.repoRoot, "heads");
   }
 
   public async repoExists(): Promise<boolean> {
@@ -27,12 +30,16 @@ export class SessionGraphStore {
     branches: SessionBranchRef[];
     tags: SessionTagRef[];
     nodes: SessionNode[];
+    heads: SessionWorkingHead[];
   }): Promise<void> {
-    await ensureDir(this.nodesRoot);
+    await Promise.all([ensureDir(this.nodesRoot), ensureDir(this.headsRoot)]);
     await this.saveState(input.state);
     await this.saveBranches(input.branches);
     await this.saveTags(input.tags);
-    await Promise.all(input.nodes.map(async (node) => this.saveNode(node)));
+    await Promise.all([
+      ...input.nodes.map(async (node) => this.saveNode(node)),
+      ...input.heads.map(async (head) => this.saveHead(head)),
+    ]);
   }
 
   public async loadState(): Promise<SessionRepoState | undefined> {
@@ -92,6 +99,33 @@ export class SessionGraphStore {
     }
   }
 
+  public async loadHead(headId: string): Promise<SessionWorkingHead | undefined> {
+    return readJsonIfExists<SessionWorkingHead>(this.getHeadPath(headId));
+  }
+
+  public async saveHead(head: SessionWorkingHead): Promise<void> {
+    await writeJson(this.getHeadPath(head.id), head);
+  }
+
+  public async listHeads(): Promise<SessionWorkingHead[]> {
+    try {
+      const entries = await readdir(this.headsRoot, { withFileTypes: true });
+      const heads = await Promise.all(
+        entries
+          .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+          .map(async (entry) => {
+            return this.loadHead(entry.name.replace(/\.json$/u, ""));
+          }),
+      );
+
+      return heads
+        .filter((head): head is SessionWorkingHead => Boolean(head))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    } catch {
+      return [];
+    }
+  }
+
   private getStatePath(): string {
     return path.join(this.repoRoot, "state.json");
   }
@@ -106,5 +140,9 @@ export class SessionGraphStore {
 
   private getNodePath(nodeId: string): string {
     return path.join(this.nodesRoot, `${nodeId}.json`);
+  }
+
+  private getHeadPath(headId: string): string {
+    return path.join(this.headsRoot, `${headId}.json`);
   }
 }

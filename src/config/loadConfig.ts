@@ -129,6 +129,8 @@ function mergeConfig(
 function fromEnv(provider: ModelProvider): PartialRuntimeConfig {
   const maxSteps = process.env.QAGENT_MAX_AGENT_STEPS;
   const shellTimeout = process.env.QAGENT_SHELL_TIMEOUT_MS;
+  const autoCompactThreshold = process.env.QAGENT_AUTO_COMPACT_THRESHOLD_TOKENS;
+  const compactRecentKeepGroups = process.env.QAGENT_COMPACT_RECENT_KEEP_GROUPS;
   const envProvider =
     process.env.QAGENT_PROVIDER ?? process.env.QAGENT_MODEL_PROVIDER;
   const apiKey =
@@ -161,6 +163,8 @@ function fromEnv(provider: ModelProvider): PartialRuntimeConfig {
     runtime: {
       maxAgentSteps: maxSteps ? Number(maxSteps) : undefined,
       shellCommandTimeoutMs: shellTimeout ? Number(shellTimeout) : undefined,
+      autoCompactThresholdTokens: autoCompactThreshold ? Number(autoCompactThreshold) : undefined,
+      compactRecentKeepGroups: compactRecentKeepGroups ? Number(compactRecentKeepGroups) : undefined,
     },
     tool: {
       approvalMode: process.env.QAGENT_APPROVAL_MODE as RuntimeConfig["tool"]["approvalMode"] | undefined,
@@ -213,6 +217,8 @@ export async function loadRuntimeConfig(
       shellCommandTimeoutMs: 120_000,
       maxToolOutputChars: 12_000,
       maxConversationSummaryMessages: 10,
+      autoCompactThresholdTokens: 120_000,
+      compactRecentKeepGroups: 8,
     },
     tool: {
       approvalMode: "always",

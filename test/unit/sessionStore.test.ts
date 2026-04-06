@@ -14,7 +14,8 @@ describe("SessionStore", () => {
   it("能初始化、保存并恢复会话快照", async () => {
     const root = await makeTempDir("qagent-session-");
     const store = new SessionStore(root);
-    const snapshot = await store.initializeSession({
+    const snapshot = await store.initializeHeadSession({
+      workingHeadId: "head_demo",
       cwd: "/tmp/project",
       shellCwd: "/tmp/project",
       approvalMode: "always",
@@ -28,15 +29,16 @@ describe("SessionStore", () => {
     });
     await store.saveSnapshot(snapshot);
 
-    const loaded = await store.load(snapshot.sessionId);
+    const loaded = await store.load(snapshot.workingHeadId);
     const latest = await store.loadMostRecent();
-    const snapshotPath = path.join(root, snapshot.sessionId, "snapshot.json");
+    const snapshotPath = path.join(root, "__heads", snapshot.workingHeadId, "snapshot.json");
     const rawSnapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
       string,
       unknown
     >;
 
     expect(loaded?.sessionId).toBe(snapshot.sessionId);
+    expect(loaded?.workingHeadId).toBe(snapshot.workingHeadId);
     expect(loaded?.uiMessages[0]?.content).toBe("hello");
     expect(latest?.sessionId).toBe(snapshot.sessionId);
     expect(rawSnapshot).not.toHaveProperty("activeSkillIds");

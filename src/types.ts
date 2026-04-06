@@ -2,6 +2,22 @@ export type ApprovalMode = "always" | "risky" | "never";
 export type SkillScope = "project" | "global";
 export type ToolName = "shell";
 export type ModelProvider = "openai" | "openrouter";
+export type AgentKind = "interactive" | "task";
+export type PromptProfile =
+  | "default"
+  | "auto-memory"
+  | "fetch-memory"
+  | "compact-session";
+export type ToolMode = "shell" | "none";
+export type AgentLifecycleStatus =
+  | "booting"
+  | "idle"
+  | "running"
+  | "awaiting-approval"
+  | "interrupted"
+  | "error"
+  | "completed"
+  | "closed";
 
 export interface ResolvedPaths {
   cwd: string;
@@ -38,6 +54,8 @@ export interface RuntimeConfig {
     shellCommandTimeoutMs: number;
     maxToolOutputChars: number;
     maxConversationSummaryMessages: number;
+    autoCompactThresholdTokens: number;
+    compactRecentKeepGroups: number;
   };
   tool: {
     approvalMode: ApprovalMode;
@@ -68,7 +86,7 @@ export interface InstructionLayer {
     | "project-agent"
     | "skill-catalog"
     | "memory"
-    | "session-summary";
+    | "session-digest";
   title: string;
   content: string;
   priority: number;
@@ -86,14 +104,15 @@ export interface SkillManifest {
 
 export interface MemoryRecord {
   id: string;
-  title: string;
+  name: string;
+  description: string;
   content: string;
-  tags: string[];
   keywords: string[];
   scope: SkillScope;
   createdAt: string;
   updatedAt: string;
   lastAccessedAt?: string;
+  directoryPath: string;
   path: string;
 }
 
@@ -169,6 +188,7 @@ export type LlmMessage =
 
 export interface SessionEvent {
   id: string;
+  workingHeadId: string;
   sessionId: string;
   type: string;
   timestamp: string;
@@ -176,6 +196,7 @@ export interface SessionEvent {
 }
 
 export interface SessionSnapshot {
+  workingHeadId: string;
   sessionId: string;
   createdAt: string;
   updatedAt: string;
@@ -200,8 +221,7 @@ export interface SessionAbstractAsset {
 export interface SessionNode {
   id: string;
   parentNodeIds: string[];
-  kind: "root" | "checkpoint" | "merge";
-  workingSessionId: string;
+  kind: "root" | "checkpoint" | "compact" | "merge";
   snapshot: SessionSnapshot;
   abstractAssets: SessionAbstractAsset[];
   snapshotHash: string;
@@ -221,14 +241,60 @@ export interface SessionTagRef {
   createdAt: string;
 }
 
+export type SessionAttachmentMode = "branch" | "tag" | "detached-node";
+
+export type SessionHeadAttachment =
+  | {
+      mode: "branch";
+      name: string;
+      nodeId: string;
+    }
+  | {
+      mode: "tag";
+      name: string;
+      nodeId: string;
+    }
+  | {
+      mode: "detached-node";
+      name: string;
+      nodeId: string;
+    };
+
+export interface SessionWriterLease {
+  branchName: string;
+  acquiredAt: string;
+}
+
+export interface SessionRuntimeState {
+  shellCwd: string;
+  agentKind?: AgentKind;
+  autoMemoryFork?: boolean;
+  retainOnCompletion?: boolean;
+  promptProfile?: PromptProfile;
+  toolMode?: ToolMode;
+  status?: "idle" | "running" | "awaiting-approval" | "interrupted" | "error" | "closed";
+}
+
+export interface SessionWorkingHead {
+  id: string;
+  name: string;
+  currentNodeId: string;
+  sessionId: string;
+  attachment: SessionHeadAttachment;
+  writerLease?: SessionWriterLease;
+  runtimeState: SessionRuntimeState;
+  assetState: Record<string, unknown>;
+  status: "idle" | "running" | "awaiting-approval" | "interrupted" | "error" | "closed";
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface SessionRepoState {
-  version: 1;
-  currentBranchName?: string;
-  detachedTagName?: string;
-  detachedNodeId?: string;
-  headNodeId: string;
-  workingSessionId: string;
+  version: 2;
+  activeWorkingHeadId: string;
   defaultBranchName: "main";
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface SessionRefInfo {
@@ -236,7 +302,11 @@ export interface SessionRefInfo {
   name: string;
   label: string;
   headNodeId: string;
-  workingSessionId: string;
+  workingHeadId: string;
+  workingHeadName: string;
+  sessionId: string;
+  writerLeaseBranch?: string;
+  active: boolean;
   dirty: boolean;
 }
 
@@ -251,6 +321,47 @@ export interface SessionListItem {
 export interface SessionListView {
   branches: SessionListItem[];
   tags: SessionListItem[];
+}
+
+export interface SessionHeadListItem {
+  id: string;
+  name: string;
+  sessionId: string;
+  attachmentLabel: string;
+  currentNodeId: string;
+  writerLeaseBranch?: string;
+  active: boolean;
+  status: SessionWorkingHead["status"];
+  dirty: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SessionHeadListView {
+  heads: SessionHeadListItem[];
+}
+
+export interface AgentRecord {
+  id: string;
+  headId: string;
+  sessionId: string;
+  name: string;
+  kind: AgentKind;
+  helperType?: "fetch-memory" | "save-memory" | "compact-session";
+  status: AgentLifecycleStatus;
+  autoMemoryFork: boolean;
+  retainOnCompletion: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentViewState extends AgentRecord {
+  detail: string;
+  sessionRefLabel?: string;
+  shellCwd: string;
+  dirty: boolean;
+  pendingApproval?: ApprovalRequest;
+  lastUserPrompt?: string;
 }
 
 export interface SessionLogEntry {
@@ -292,6 +403,50 @@ export interface ModelClient {
     hooks?: ModelStreamHooks,
     signal?: AbortSignal,
   ): Promise<ModelTurnResult>;
+}
+
+export interface SessionAssetForkInput {
+  head: SessionWorkingHead;
+  sessionRoot: string;
+  snapshot: SessionSnapshot;
+  sourceHead?: SessionWorkingHead;
+  sourceState?: unknown;
+}
+
+export interface SessionAssetCheckpointInput {
+  head: SessionWorkingHead;
+  state: unknown;
+  snapshot: SessionSnapshot;
+  sessionRoot: string;
+}
+
+export interface SessionAssetRestoreInput {
+  head: SessionWorkingHead;
+  state: unknown;
+  sessionRoot: string;
+}
+
+export interface SessionAssetMergeInput {
+  targetHead: SessionWorkingHead;
+  sourceHead: SessionWorkingHead;
+  targetState: unknown;
+  sourceState: unknown;
+  targetSnapshot: SessionSnapshot;
+  sourceSnapshot: SessionSnapshot;
+  sessionRoot: string;
+}
+
+export interface SessionAssetMergeResult {
+  targetState: unknown;
+  mergeAssets?: SessionAbstractAsset[];
+}
+
+export interface SessionAssetProvider {
+  kind: string;
+  fork(input: SessionAssetForkInput): Promise<unknown>;
+  checkpoint(input: SessionAssetCheckpointInput): Promise<unknown>;
+  restore?(input: SessionAssetRestoreInput): Promise<void>;
+  merge(input: SessionAssetMergeInput): Promise<SessionAssetMergeResult>;
 }
 
 export interface SlashCommandResult {

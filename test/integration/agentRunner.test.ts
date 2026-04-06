@@ -17,7 +17,10 @@ import type {
   ToolResult,
 } from "../../src/types.js";
 import { PromptAssembler } from "../../src/context/promptAssembler.js";
+import { createMemorySessionAssetProvider } from "../../src/memory/index.js";
+import { AgentManager } from "../../src/runtime/index.js";
 import { AgentRunner } from "../../src/runtime/agentRunner.js";
+import { SessionService } from "../../src/session/index.js";
 import { SkillRegistry } from "../../src/skills/skillRegistry.js";
 import { ApprovalPolicy } from "../../src/tool/approvalPolicy.js";
 import {
@@ -283,5 +286,471 @@ describe("AgentRunner", () => {
     }
     expect(systemPrompt).not.toContain("PROJECT BODY MARKER: pdf-processing");
     expect(systemPrompt).not.toContain("GLOBAL BODY MARKER: api-testing");
+  });
+
+  it("default agent 会把动态运行时信息放到 user message 前缀，而不是 system prompt", async () => {
+    const projectDir = await makeTempDir("qagent-default-prompt-");
+    const config: RuntimeConfig = {
+      cwd: projectDir,
+      resolvedPaths: {
+        cwd: projectDir,
+        homeDir: projectDir,
+        globalAgentDir: path.join(projectDir, ".global"),
+        projectRoot: projectDir,
+        projectAgentDir: path.join(projectDir, ".agent"),
+        globalConfigPath: path.join(projectDir, ".global", "config.json"),
+        projectConfigPath: path.join(projectDir, ".agent", "config.json"),
+        globalMemoryDir: path.join(projectDir, ".global", "memory"),
+        projectMemoryDir: path.join(projectDir, ".agent", "memory"),
+        globalSkillsDir: path.join(projectDir, ".global", "skills"),
+        projectSkillsDir: path.join(projectDir, ".agent", "skills"),
+        sessionRoot: path.join(projectDir, ".agent", "sessions"),
+      },
+      model: {
+        provider: "openai",
+        baseUrl: "https://example.invalid/v1",
+        model: "test-model",
+        temperature: 0,
+        systemPrompt: "你是一个终端 Agent。",
+      },
+      runtime: {
+        maxAgentSteps: 4,
+        shellCommandTimeoutMs: 10_000,
+        maxToolOutputChars: 2_000,
+        maxConversationSummaryMessages: 10,
+      },
+      tool: {
+        approvalMode: "always",
+        shellExecutable: "/bin/zsh",
+      },
+      cli: {},
+    };
+    const capturedRequests: ModelTurnRequest[] = [];
+
+    class InspectingModelClient implements ModelClient {
+      public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
+        capturedRequests.push(request);
+        return {
+          assistantText: "已处理",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      }
+    }
+
+    const sessionService = new SessionService(config.resolvedPaths.sessionRoot, [
+      createMemorySessionAssetProvider({
+        projectMemoryDir: config.resolvedPaths.projectMemoryDir,
+        globalMemoryDir: config.resolvedPaths.globalMemoryDir,
+      }),
+    ]);
+    const agentManager = new AgentManager(
+      config,
+      new InspectingModelClient(),
+      new PromptAssembler(),
+      sessionService,
+      new ApprovalPolicy("always"),
+      () => [],
+    );
+    await agentManager.initialize({
+      cwd: projectDir,
+      shellCwd: projectDir,
+      approvalMode: "always",
+    });
+    const taskAgent = await agentManager.spawnTaskAgent({
+      name: "prompt-checker",
+      autoMemoryFork: false,
+      retainOnCompletion: true,
+      promptProfile: "default",
+    });
+
+    await agentManager.submitInputToAgent(taskAgent.id, "请看看当前目录");
+
+    const request = capturedRequests[0];
+    const lastMessage = request?.messages.at(-1);
+
+    expect(request?.systemPrompt).toContain("你是一个终端 Agent。");
+    expect(request?.systemPrompt).not.toContain("当前时间：");
+    expect(request?.systemPrompt).not.toContain(projectDir);
+    expect(request?.systemPrompt).not.toContain("Recent Session Digest");
+    expect(request?.systemPrompt).not.toContain("## Memory:");
+    expect(lastMessage?.role).toBe("user");
+    expect(lastMessage?.content).toContain("当前时间：");
+    expect(lastMessage?.content).toContain(`当前 shell 工作目录：${projectDir}`);
+    expect(lastMessage?.content).toContain("当前工具审批模式：always");
+    expect(lastMessage?.content).toContain("当前最大自治步数：4");
+    expect(lastMessage?.content).toContain("请看看当前目录");
+  });
+
+  it("会在进入 runLoop 前通过 fetch-memory 子 agent 追加未出现在历史中的 Memory.md", async () => {
+    const projectDir = await makeTempDir("qagent-fetch-memory-");
+    const config: RuntimeConfig = {
+      cwd: projectDir,
+      resolvedPaths: {
+        cwd: projectDir,
+        homeDir: projectDir,
+        globalAgentDir: path.join(projectDir, ".global"),
+        projectRoot: projectDir,
+        projectAgentDir: path.join(projectDir, ".agent"),
+        globalConfigPath: path.join(projectDir, ".global", "config.json"),
+        projectConfigPath: path.join(projectDir, ".agent", "config.json"),
+        globalMemoryDir: path.join(projectDir, ".global", "memory"),
+        projectMemoryDir: path.join(projectDir, ".agent", "memory"),
+        globalSkillsDir: path.join(projectDir, ".global", "skills"),
+        projectSkillsDir: path.join(projectDir, ".agent", "skills"),
+        sessionRoot: path.join(projectDir, ".agent", "sessions"),
+      },
+      model: {
+        provider: "openai",
+        baseUrl: "https://example.invalid/v1",
+        model: "test-model",
+        temperature: 0,
+        systemPrompt: "你是一个终端 Agent。",
+      },
+      runtime: {
+        maxAgentSteps: 4,
+        shellCommandTimeoutMs: 10_000,
+        maxToolOutputChars: 2_000,
+        maxConversationSummaryMessages: 10,
+      },
+      tool: {
+        approvalMode: "always",
+        shellExecutable: "/bin/zsh",
+      },
+      cli: {},
+    };
+    const mainRequests: ModelTurnRequest[] = [];
+    const fetchRequests: ModelTurnRequest[] = [];
+
+    class FetchAwareModelClient implements ModelClient {
+      public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
+        if (request.systemPrompt.includes("fetch-memory 子任务")) {
+          fetchRequests.push(request);
+          return {
+            assistantText: JSON.stringify({
+              selectedMemoryNames: ["reply-language"],
+            }),
+            toolCalls: [],
+            finishReason: "stop",
+          };
+        }
+
+        mainRequests.push(request);
+        return {
+          assistantText: "已处理",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      }
+    }
+
+    const sessionService = new SessionService(config.resolvedPaths.sessionRoot, [
+      createMemorySessionAssetProvider({
+        projectMemoryDir: config.resolvedPaths.projectMemoryDir,
+        globalMemoryDir: config.resolvedPaths.globalMemoryDir,
+      }),
+    ]);
+    const agentManager = new AgentManager(
+      config,
+      new FetchAwareModelClient(),
+      new PromptAssembler(),
+      sessionService,
+      new ApprovalPolicy("always"),
+      () => [],
+    );
+    await agentManager.initialize({
+      cwd: projectDir,
+      shellCwd: projectDir,
+      approvalMode: "always",
+    });
+    await agentManager.saveMemory({
+      name: "reply-language",
+      description: "回复语言偏好",
+      content: "请默认使用中文回复。",
+    });
+    const taskAgent = await agentManager.spawnTaskAgent({
+      name: "main-task",
+      autoMemoryFork: false,
+      retainOnCompletion: true,
+      promptProfile: "default",
+    });
+
+    await agentManager.submitInputToAgent(taskAgent.id, "帮我写一个答复");
+
+    const fetchRequest = fetchRequests[0];
+    const mainRequest = mainRequests[0];
+    const mainLastMessage = mainRequest?.messages.at(-1);
+
+    expect(fetchRequest?.systemPrompt).toContain("fetch-memory 子任务");
+    expect(fetchRequest?.messages.at(-1)?.content).toContain("当前用户请求：");
+    expect(fetchRequest?.messages.at(-1)?.content).toContain("reply-language");
+    expect(mainLastMessage?.role).toBe("user");
+    expect(mainLastMessage?.content).toContain("帮我写一个答复");
+    expect(mainLastMessage?.content).toContain(
+      "以下是系统自动补充的 Memory.md 参考",
+    );
+    expect(mainLastMessage?.content).toContain("### MEMORY.md: reply-language");
+    expect(mainLastMessage?.content).toContain("description: 回复语言偏好");
+    expect(mainLastMessage?.content).toContain("请默认使用中文回复。");
+    expect(
+      agentManager.listAgents().some((agent) => agent.name.startsWith("fetch-memory-")),
+    ).toBe(false);
+  });
+
+  it("关闭 fetch-memory hook 后，不会再创建 fetch-memory 子 agent", async () => {
+    const projectDir = await makeTempDir("qagent-fetch-memory-off-");
+    const config: RuntimeConfig = {
+      cwd: projectDir,
+      resolvedPaths: {
+        cwd: projectDir,
+        homeDir: projectDir,
+        globalAgentDir: path.join(projectDir, ".global"),
+        projectRoot: projectDir,
+        projectAgentDir: path.join(projectDir, ".agent"),
+        globalConfigPath: path.join(projectDir, ".global", "config.json"),
+        projectConfigPath: path.join(projectDir, ".agent", "config.json"),
+        globalMemoryDir: path.join(projectDir, ".global", "memory"),
+        projectMemoryDir: path.join(projectDir, ".agent", "memory"),
+        globalSkillsDir: path.join(projectDir, ".global", "skills"),
+        projectSkillsDir: path.join(projectDir, ".agent", "skills"),
+        sessionRoot: path.join(projectDir, ".agent", "sessions"),
+      },
+      model: {
+        provider: "openai",
+        baseUrl: "https://example.invalid/v1",
+        model: "test-model",
+        temperature: 0,
+        systemPrompt: "你是一个终端 Agent。",
+      },
+      runtime: {
+        maxAgentSteps: 4,
+        shellCommandTimeoutMs: 10_000,
+        maxToolOutputChars: 2_000,
+        maxConversationSummaryMessages: 10,
+      },
+      tool: {
+        approvalMode: "always",
+        shellExecutable: "/bin/zsh",
+      },
+      cli: {},
+    };
+    const capturedRequests: ModelTurnRequest[] = [];
+
+    class InspectingModelClient implements ModelClient {
+      public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
+        capturedRequests.push(request);
+        return {
+          assistantText: "已处理",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      }
+    }
+
+    const sessionService = new SessionService(config.resolvedPaths.sessionRoot, [
+      createMemorySessionAssetProvider({
+        projectMemoryDir: config.resolvedPaths.projectMemoryDir,
+        globalMemoryDir: config.resolvedPaths.globalMemoryDir,
+      }),
+    ]);
+    const agentManager = new AgentManager(
+      config,
+      new InspectingModelClient(),
+      new PromptAssembler(),
+      sessionService,
+      new ApprovalPolicy("always"),
+      () => [],
+    );
+    await agentManager.initialize({
+      cwd: projectDir,
+      shellCwd: projectDir,
+      approvalMode: "always",
+    });
+    agentManager.setFetchMemoryHookEnabled(false);
+    await agentManager.saveMemory({
+      name: "reply-language",
+      description: "回复语言偏好",
+      content: "请默认使用中文回复。",
+    });
+    const taskAgent = await agentManager.spawnTaskAgent({
+      name: "main-task-off",
+      autoMemoryFork: false,
+      retainOnCompletion: true,
+      promptProfile: "default",
+    });
+
+    await agentManager.submitInputToAgent(taskAgent.id, "帮我写一个答复");
+
+    expect(capturedRequests).toHaveLength(1);
+    expect(capturedRequests[0]?.systemPrompt).not.toContain("fetch-memory 子任务");
+    expect(capturedRequests[0]?.messages.at(-1)?.content).not.toContain(
+      "以下是系统自动补充的 Memory.md 参考",
+    );
+    expect(agentManager.listAgents().some((agent) => agent.name.startsWith("fetch-memory-"))).toBe(false);
+  });
+
+  it("关闭 save-memory hook 后，interactive agent 完成时不会触发 auto memory fork", async () => {
+    const projectDir = await makeTempDir("qagent-save-memory-off-");
+    const config: RuntimeConfig = {
+      cwd: projectDir,
+      resolvedPaths: {
+        cwd: projectDir,
+        homeDir: projectDir,
+        globalAgentDir: path.join(projectDir, ".global"),
+        projectRoot: projectDir,
+        projectAgentDir: path.join(projectDir, ".agent"),
+        globalConfigPath: path.join(projectDir, ".global", "config.json"),
+        projectConfigPath: path.join(projectDir, ".agent", "config.json"),
+        globalMemoryDir: path.join(projectDir, ".global", "memory"),
+        projectMemoryDir: path.join(projectDir, ".agent", "memory"),
+        globalSkillsDir: path.join(projectDir, ".global", "skills"),
+        projectSkillsDir: path.join(projectDir, ".agent", "skills"),
+        sessionRoot: path.join(projectDir, ".agent", "sessions"),
+      },
+      model: {
+        provider: "openai",
+        baseUrl: "https://example.invalid/v1",
+        model: "test-model",
+        temperature: 0,
+        systemPrompt: "你是一个终端 Agent。",
+      },
+      runtime: {
+        maxAgentSteps: 4,
+        shellCommandTimeoutMs: 10_000,
+        maxToolOutputChars: 2_000,
+        maxConversationSummaryMessages: 10,
+      },
+      tool: {
+        approvalMode: "always",
+        shellExecutable: "/bin/zsh",
+      },
+      cli: {},
+    };
+    const capturedRequests: ModelTurnRequest[] = [];
+
+    class InspectingModelClient implements ModelClient {
+      public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
+        capturedRequests.push(request);
+        return {
+          assistantText: "已完成主任务",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      }
+    }
+
+    const sessionService = new SessionService(config.resolvedPaths.sessionRoot, [
+      createMemorySessionAssetProvider({
+        projectMemoryDir: config.resolvedPaths.projectMemoryDir,
+        globalMemoryDir: config.resolvedPaths.globalMemoryDir,
+      }),
+    ]);
+    const agentManager = new AgentManager(
+      config,
+      new InspectingModelClient(),
+      new PromptAssembler(),
+      sessionService,
+      new ApprovalPolicy("always"),
+      () => [],
+    );
+    await agentManager.initialize({
+      cwd: projectDir,
+      shellCwd: projectDir,
+      approvalMode: "always",
+    });
+    agentManager.setFetchMemoryHookEnabled(false);
+    agentManager.setSaveMemoryHookEnabled(false);
+
+    await agentManager.submitInputToActiveAgent("帮我完成这个任务");
+
+    expect(capturedRequests).toHaveLength(1);
+    expect(capturedRequests[0]?.systemPrompt).not.toContain("自动 memory fork 子任务");
+    expect(agentManager.listAgents().some((agent) => agent.name.startsWith("auto-memory-"))).toBe(false);
+  });
+
+  it("主 agent 完成后会自动清理 auto-memory 子 agent", async () => {
+    const projectDir = await makeTempDir("qagent-auto-memory-visible-");
+    const config: RuntimeConfig = {
+      cwd: projectDir,
+      resolvedPaths: {
+        cwd: projectDir,
+        homeDir: projectDir,
+        globalAgentDir: path.join(projectDir, ".global"),
+        projectRoot: projectDir,
+        projectAgentDir: path.join(projectDir, ".agent"),
+        globalConfigPath: path.join(projectDir, ".global", "config.json"),
+        projectConfigPath: path.join(projectDir, ".agent", "config.json"),
+        globalMemoryDir: path.join(projectDir, ".global", "memory"),
+        projectMemoryDir: path.join(projectDir, ".agent", "memory"),
+        globalSkillsDir: path.join(projectDir, ".global", "skills"),
+        projectSkillsDir: path.join(projectDir, ".agent", "skills"),
+        sessionRoot: path.join(projectDir, ".agent", "sessions"),
+      },
+      model: {
+        provider: "openai",
+        baseUrl: "https://example.invalid/v1",
+        model: "test-model",
+        temperature: 0,
+        systemPrompt: "你是一个终端 Agent。",
+      },
+      runtime: {
+        maxAgentSteps: 4,
+        shellCommandTimeoutMs: 10_000,
+        maxToolOutputChars: 2_000,
+        maxConversationSummaryMessages: 10,
+      },
+      tool: {
+        approvalMode: "always",
+        shellExecutable: "/bin/zsh",
+      },
+      cli: {},
+    };
+    const capturedRequests: ModelTurnRequest[] = [];
+
+    class InspectingModelClient implements ModelClient {
+      public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
+        capturedRequests.push(request);
+        if (request.systemPrompt.includes("自动 memory fork 子任务")) {
+          return {
+            assistantText: "没有新增记忆，本轮只做了检查。",
+            toolCalls: [],
+            finishReason: "stop",
+          };
+        }
+        return {
+          assistantText: "主任务已完成",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      }
+    }
+
+    const sessionService = new SessionService(config.resolvedPaths.sessionRoot, [
+      createMemorySessionAssetProvider({
+        projectMemoryDir: config.resolvedPaths.projectMemoryDir,
+        globalMemoryDir: config.resolvedPaths.globalMemoryDir,
+      }),
+    ]);
+    const agentManager = new AgentManager(
+      config,
+      new InspectingModelClient(),
+      new PromptAssembler(),
+      sessionService,
+      new ApprovalPolicy("always"),
+      () => [],
+    );
+    await agentManager.initialize({
+      cwd: projectDir,
+      shellCwd: projectDir,
+      approvalMode: "always",
+    });
+    agentManager.setFetchMemoryHookEnabled(false);
+
+    await agentManager.submitInputToActiveAgent("帮我完成这个任务");
+
+    expect(capturedRequests.some((request) => request.systemPrompt.includes("自动 memory fork 子任务"))).toBe(true);
+    expect(
+      agentManager.listAgents().some((agent) => agent.name.startsWith("auto-memory-")),
+    ).toBe(false);
   });
 });

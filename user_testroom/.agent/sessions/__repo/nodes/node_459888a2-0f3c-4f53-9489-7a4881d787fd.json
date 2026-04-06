@@ -1,0 +1,56 @@
+{
+  "id": "node_459888a2-0f3c-4f53-9489-7a4881d787fd",
+  "parentNodeIds": [
+    "node_9db6b2a5-89b8-42e3-8dc2-4bbf7442c0f4"
+  ],
+  "kind": "checkpoint",
+  "snapshot": {
+    "workingHeadId": "head_364e5fff-83fa-4266-85d4-d6accb8ee56e",
+    "sessionId": "session_bce56820-ef3e-414a-9983-2a0b88eb041e",
+    "createdAt": "2026-04-06T01:52:17.416Z",
+    "updatedAt": "2026-04-06T01:55:40.781Z",
+    "cwd": "/Users/qiuboyu/CodeLearning/QAgent/user_testroom",
+    "shellCwd": "/Users/qiuboyu/CodeLearning/QAgent/user_testroom",
+    "approvalMode": "always",
+    "uiMessages": [
+      {
+        "id": "ui_7bdf3623-7751-4ba1-ac90-73492b943cb4",
+        "role": "user",
+        "content": "123",
+        "createdAt": "2026-04-06T01:53:20.045Z"
+      },
+      {
+        "id": "ui_b34ab8cd-a071-4b47-a863-b72c7204f55e",
+        "role": "error",
+        "content": "模型请求失败：HTTP 401 Unauthorized\n{\n  \"error\": {\n    \"message\": \"Incorrect API key provided: sk-or-v1*************************************************************1838. You can find your API key at https://platform.openai.com/account/api-keys.\",\n    \"type\": \"invalid_request_error\",\n    \"code\": \"invalid_api_key\",\n    \"param\": null\n  },\n  \"status\": 401\n}",
+        "createdAt": "2026-04-06T01:53:20.963Z"
+      }
+    ],
+    "modelMessages": [
+      {
+        "id": "llm_12a0e277-985d-4ba7-b689-07d21eb89dd4",
+        "role": "user",
+        "content": "123",
+        "createdAt": "2026-04-06T01:53:20.045Z"
+      }
+    ],
+    "lastUserPrompt": "123"
+  },
+  "abstractAssets": [
+    {
+      "id": "asset_13838bd3-3daf-4637-aa9d-7081749564f1",
+      "title": "checkpoint:node_459888a2-0f3c-4f53-9489-7a4881d787fd",
+      "content": "user: 123\nassistant: 无\nshell: 无",
+      "tags": [
+        "checkpoint",
+        "summary"
+      ],
+      "sourceNodeIds": [
+        "node_9db6b2a5-89b8-42e3-8dc2-4bbf7442c0f4"
+      ],
+      "createdAt": "2026-04-06T01:55:40.781Z"
+    }
+  ],
+  "snapshotHash": "6f087538fef071fb5609e0c23ff81253c4d6a995",
+  "createdAt": "2026-04-06T01:55:40.781Z"
+}

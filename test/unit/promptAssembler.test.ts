@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { PromptAssembler } from "../../src/context/promptAssembler.js";
 import { SkillRegistry } from "../../src/skills/skillRegistry.js";
-import type { RuntimeConfig, SkillManifest } from "../../src/types.js";
+import type { MemoryRecord, RuntimeConfig, SkillManifest } from "../../src/types.js";
 import {
   VALID_MOCK_SKILL_NAMES,
   buildMockSkillResolvedPaths,
@@ -38,6 +38,8 @@ describe("PromptAssembler", () => {
         shellCommandTimeoutMs: 120_000,
         maxToolOutputChars: 12_000,
         maxConversationSummaryMessages: 10,
+        autoCompactThresholdTokens: 120_000,
+        compactRecentKeepGroups: 8,
       },
       tool: {
         approvalMode: "always",
@@ -116,5 +118,146 @@ describe("PromptAssembler", () => {
     expect(assembled.systemPrompt).not.toContain(
       "GLOBAL BODY MARKER: api-testing",
     );
+  });
+
+  it("default profile 会保留 skill catalog，但不注入 memory recent 或动态时间", () => {
+    const config = buildMockSkillRuntimeConfig();
+    const memories: MemoryRecord[] = [
+      {
+        id: "reply-language",
+        name: "reply-language",
+        description: "偏好使用中文回复",
+        content: "完整正文",
+        keywords: ["reply-language", "中文"],
+        scope: "project",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+        directoryPath: "/tmp/project/.agent/memory/reply-language",
+        path: "/tmp/project/.agent/memory/reply-language/MEMORY.md",
+      },
+    ];
+
+    const assembled = new PromptAssembler().assemble({
+      config,
+      profile: "default",
+      agentLayers: [],
+      availableSkills: [
+        {
+          id: "project:pdf-processing",
+          name: "pdf-processing",
+          description: "处理 PDF",
+          scope: "project",
+          directoryPath: "/tmp/project/.agent/skills/pdf-processing",
+          filePath: "/tmp/project/.agent/skills/pdf-processing/SKILL.md",
+          content: "# body",
+        },
+      ],
+      relevantMemories: memories,
+      modelMessages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "上一轮消息",
+          createdAt: "2026-01-02T00:00:00.000Z",
+        },
+      ],
+      shellCwd: config.cwd,
+    });
+
+    expect(assembled.systemPrompt).toContain("skills:");
+    expect(assembled.systemPrompt).toContain('name: "pdf-processing"');
+    expect(assembled.systemPrompt).not.toContain("Memory: reply-language");
+    expect(assembled.systemPrompt).not.toContain("Recent Session Digest");
+    expect(assembled.systemPrompt).not.toContain("当前时间：");
+    expect(assembled.systemPrompt).not.toContain("当前 shell 工作目录：");
+    expect(assembled.systemPrompt).not.toContain("当前工具审批模式：");
+    expect(assembled.systemPrompt).not.toContain("当前最大自治步数：");
+  });
+
+  it("auto-memory profile 只保留静态 system prompt 层，不注入 skill memory recent 和动态时间", () => {
+    const config = buildMockSkillRuntimeConfig({
+      model: {
+        systemPrompt: "你是自动记忆整理代理。",
+      },
+    });
+    const assembled = new PromptAssembler().assemble({
+      config,
+      profile: "auto-memory",
+      agentLayers: [],
+      availableSkills: [
+        {
+          id: "project:pdf-processing",
+          name: "pdf-processing",
+          description: "处理 PDF",
+          scope: "project",
+          directoryPath: "/tmp/project/.agent/skills/pdf-processing",
+          filePath: "/tmp/project/.agent/skills/pdf-processing/SKILL.md",
+          content: "# body",
+        },
+      ],
+      relevantMemories: [
+        {
+          id: "reply-language",
+          name: "reply-language",
+          description: "偏好使用中文回复",
+          content: "完整正文",
+          keywords: ["reply-language"],
+          scope: "project",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-02T00:00:00.000Z",
+          directoryPath: "/tmp/project/.agent/memory/reply-language",
+          path: "/tmp/project/.agent/memory/reply-language/MEMORY.md",
+        },
+      ],
+      modelMessages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "上一轮对话",
+          createdAt: "2026-01-02T00:00:00.000Z",
+        },
+      ],
+      shellCwd: config.cwd,
+    });
+
+    expect(assembled.systemPrompt).toContain("你是自动记忆整理代理。");
+    expect(assembled.systemPrompt).not.toContain("skills:");
+    expect(assembled.systemPrompt).not.toContain("Memory: reply-language");
+    expect(assembled.systemPrompt).not.toContain("Recent Session Digest");
+    expect(assembled.systemPrompt).not.toContain("当前时间：");
+    expect(assembled.systemPrompt).not.toContain(config.cwd);
+  });
+
+  it("compact-session 在无工具模式下不会注入 skill，且基础规则不会再声称可用 shell", () => {
+    const config = buildMockSkillRuntimeConfig({
+      model: {
+        systemPrompt: "你正在执行 compact-session 子任务。",
+      },
+    });
+    const assembled = new PromptAssembler().assemble({
+      config,
+      profile: "compact-session",
+      toolMode: "none",
+      agentLayers: [],
+      availableSkills: [
+        {
+          id: "project:pdf-processing",
+          name: "pdf-processing",
+          description: "处理 PDF",
+          scope: "project",
+          directoryPath: "/tmp/project/.agent/skills/pdf-processing",
+          filePath: "/tmp/project/.agent/skills/pdf-processing/SKILL.md",
+          content: "# body",
+        },
+      ],
+      relevantMemories: [],
+      modelMessages: [],
+      shellCwd: config.cwd,
+    });
+
+    expect(assembled.systemPrompt).toContain("你正在执行 compact-session 子任务。");
+    expect(assembled.systemPrompt).toContain("当前回合不暴露任何工具。");
+    expect(assembled.systemPrompt).not.toContain("你只能使用一个名为 shell 的工具。");
+    expect(assembled.systemPrompt).not.toContain("skills:");
   });
 });

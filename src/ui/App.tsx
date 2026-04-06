@@ -3,6 +3,7 @@ import { Box, Text, useApp, useInput } from "ink";
 
 import type { AppController, AppState } from "../runtime/index.js";
 import { ApprovalModal } from "./ApprovalModal.js";
+import { AgentList } from "./AgentList.js";
 import { InputBox } from "./InputBox.js";
 import { MessageList } from "./MessageList.js";
 import { StatusBar } from "./StatusBar.js";
@@ -39,7 +40,7 @@ export function App({ controller }: AppProps) {
     });
     setCompletionHint(undefined);
     setInput("");
-  }, [state.sessionId, state.sessionRef?.label]);
+  }, [state.activeAgentId, state.activeWorkingHeadId, state.sessionId, state.sessionRef?.label]);
 
   useEffect(() => {
     if (state.shouldExit) {
@@ -58,6 +59,20 @@ export function App({ controller }: AppProps) {
       }
       if (value.toLowerCase() === "n" || key.escape) {
         void controller.approvePendingRequest(false);
+      }
+      return;
+    }
+
+    if (key.ctrl && value.toLowerCase() === "p") {
+      if (state.agents.length > 1) {
+        void controller.switchAgentRelative(-1);
+      }
+      return;
+    }
+
+    if (key.ctrl && value.toLowerCase() === "n") {
+      if (state.agents.length > 1) {
+        void controller.switchAgentRelative(1);
       }
       return;
     }
@@ -124,17 +139,47 @@ export function App({ controller }: AppProps) {
     setInput("");
   }
 
+  const tokenRatio =
+    state.autoCompactThresholdTokens > 0
+      ? (state.currentTokenEstimate / state.autoCompactThresholdTokens) * 100
+      : 0;
+  const tokenSummary = `tokens: ${state.currentTokenEstimate}/${state.autoCompactThresholdTokens} (${tokenRatio.toFixed(1)}%)`;
+  const helperActivities = state.agents.flatMap((agent) => {
+    if (
+      agent.status !== "booting"
+      && agent.status !== "running"
+      && agent.status !== "awaiting-approval"
+    ) {
+      return [];
+    }
+    if (agent.helperType === "fetch-memory") {
+      return ["fetching memory..."];
+    }
+    if (agent.helperType === "save-memory") {
+      return ["saving memory..."];
+    }
+    return [];
+  });
+
   return (
     <Box flexDirection="column" gap={1}>
       <Text color="green">QAgent CLI v1</Text>
       <StatusBar
+        agentKind={state.activeAgentKind}
+        workingHeadId={state.activeWorkingHeadId}
+        workingHeadName={state.activeWorkingHeadName}
         sessionId={state.sessionId}
         sessionRefLabel={state.sessionRef?.label}
         shellCwd={state.shellCwd}
         approvalMode={state.approvalMode}
         status={state.status}
         skillCount={state.availableSkills.length}
+        agentCount={state.agents.length}
       />
+      <AgentList agents={state.agents} activeAgentId={state.activeAgentId} />
+      {helperActivities.length > 0 ? (
+        <Text color="cyan">helper: {helperActivities.join(" | ")}</Text>
+      ) : null}
       {state.pendingApproval ? <ApprovalModal request={state.pendingApproval} /> : null}
       <MessageList
         messages={state.uiMessages}
@@ -148,8 +193,8 @@ export function App({ controller }: AppProps) {
         onSubmit={handleSubmit}
       />
       <Text color="gray">
-        slash: /help | history: ↑/↓ | complete: Tab | approval: y/n | Ctrl+C:
-        中断当前执行或退出
+        slash: /help | history: ↑/↓ | agents: Ctrl+P/Ctrl+N | complete: Tab |
+        approval: y/n | Ctrl+C: 中断当前执行或退出 | {tokenSummary}
       </Text>
     </Box>
   );

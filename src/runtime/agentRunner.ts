@@ -4,9 +4,11 @@ import type {
   LlmMessage,
   MemoryRecord,
   ModelClient,
+  PromptProfile,
   RuntimeConfig,
   SkillManifest,
   ToolCall,
+  ToolMode,
   ToolResult,
 } from "../types.js";
 import { loadAgentInstructionLayers, PromptAssembler } from "../context/index.js";
@@ -15,6 +17,8 @@ import type { ApprovalPolicy, ToolRegistry } from "../tool/index.js";
 interface AgentRunnerDependencies {
   config: RuntimeConfig;
   promptAssembler: PromptAssembler;
+  promptProfile?: PromptProfile;
+  toolMode?: ToolMode;
   modelClient: ModelClient;
   toolRegistry: ToolRegistry;
   approvalPolicy: ApprovalPolicy;
@@ -22,6 +26,7 @@ interface AgentRunnerDependencies {
   getAvailableSkills: () => SkillManifest[];
   getShellCwd: () => string;
   getLastUserPrompt: () => string | undefined;
+  beforeModelTurn?: () => Promise<void>;
   searchRelevantMemory: (query: string) => Promise<MemoryRecord[]>;
   commitAssistantTurn: (input: {
     content: string;
@@ -65,24 +70,23 @@ export class AgentRunner {
         step += 1
       ) {
         this.ensureNotAborted();
+        await this.deps.beforeModelTurn?.();
         await this.deps.setStatus(
           "running",
           `Agent 正在执行，第 ${step}/${this.deps.config.runtime.maxAgentSteps} 步`,
         );
 
-        const query = this.deps.getLastUserPrompt() ?? "";
-        const relevantMemory = query
-          ? await this.deps.searchRelevantMemory(query)
-          : [];
         const prompt = this.deps.promptAssembler.assemble({
           config: this.deps.config,
+          profile: this.deps.promptProfile ?? "default",
           agentLayers: await loadAgentInstructionLayers(
             this.deps.config.resolvedPaths,
           ),
           availableSkills: this.deps.getAvailableSkills(),
-          relevantMemories: relevantMemory,
+          relevantMemories: [],
           modelMessages: this.deps.getModelMessages(),
           shellCwd: this.deps.getShellCwd(),
+          toolMode: this.deps.toolMode,
         });
 
         const result = await this.deps.modelClient.runTurn(
