@@ -17,3 +17,12 @@ export {
   projectSnapshotConversationEntries,
   replaceConversationEntries,
 } from "./domain/sessionDomain.js";
+export {
+  createAgentStatusSetEvent,
+  createConversationCompactedEvent,
+  createConversationEntryAppendedEvent,
+  createConversationLastUserPromptSetEvent,
+  createConversationUiClearedEvent,
+  createRuntimeUiContextSetEvent,
+  createSessionCreatedEvent,
+} from "./domain/sessionEvents.js";

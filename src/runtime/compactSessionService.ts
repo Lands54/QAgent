@@ -2,6 +2,7 @@ import { buildProjectedModelMessageEntries } from "../session/index.js";
 import type {
   ApprovalMode,
   ConversationEntry,
+  ConversationCompactedPayload,
   LlmMessage,
   PromptProfile,
   RuntimeConfig,
@@ -40,7 +41,7 @@ interface CompactSessionCoordinator {
     applyCompaction(input: {
       conversationEntries: ConversationEntry[];
       summary: string;
-      metadata: Record<string, unknown>;
+      event: ConversationCompactedPayload;
     }): Promise<void>;
     isUiContextEnabled(): boolean;
   };
@@ -248,16 +249,21 @@ export class CompactSessionService {
       summaryEntry.model as LlmMessage,
       ...tailGroups.flatMap((group) => group.map((entry) => entry.message)),
     ]);
+    const compactedEntryIds = snapshot.conversationEntries
+      .filter((_entry, entryIndex) => prefixEntryIndexes.has(entryIndex))
+      .map((entry) => entry.id);
     await runtime.applyCompaction({
       conversationEntries: compactedEntries,
       summary,
-      metadata: {
+      event: {
         reason: input.reason,
         beforeTokens,
         afterTokens,
         keptGroups: tailGroups.length,
         removedGroups: prefixGroups.length,
         summaryAgentId: agentId,
+        compactedEntryIds,
+        summaryEntryId: summaryEntry.id,
       },
     });
     return {

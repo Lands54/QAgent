@@ -5,6 +5,7 @@ import type { ApprovalMode, SessionEvent, SessionSnapshot } from "../types.js";
 import {
   normalizeSessionSnapshot,
 } from "./domain/sessionDomain.js";
+import { createSessionCreatedEvent } from "./domain/sessionEvents.js";
 import {
   appendNdjson,
   createId,
@@ -49,17 +50,15 @@ export class SessionStore {
       modelMessages: [],
     };
     await this.saveSnapshot(snapshot);
-    await this.appendEvent({
-      id: createId("event"),
-      workingHeadId: input.workingHeadId,
-      sessionId,
-      type: "session.created",
-      timestamp: now,
-      payload: {
+    await this.appendEvent(
+      createSessionCreatedEvent({
+        workingHeadId: input.workingHeadId,
+        sessionId,
+        timestamp: now,
         cwd: input.cwd,
         shellCwd: input.shellCwd,
-      },
-    });
+      }),
+    );
 
     return snapshot;
   }

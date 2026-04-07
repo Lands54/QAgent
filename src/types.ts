@@ -211,14 +211,97 @@ export interface ConversationEntry {
   modelMirror?: LlmMessage;
 }
 
-export interface SessionEvent {
+export interface SessionEventBase<
+  TType extends string,
+  TPayload extends object,
+> {
   id: string;
   workingHeadId: string;
   sessionId: string;
-  type: string;
+  type: TType;
   timestamp: string;
-  payload: Record<string, unknown>;
+  payload: TPayload;
 }
+
+export interface SessionCreatedPayload {
+  cwd: string;
+  shellCwd: string;
+}
+
+export interface ConversationEntryAppendedPayload {
+  entryKind: ConversationEntryKind;
+  entry: ConversationEntry;
+}
+
+export interface ConversationLastUserPromptSetPayload {
+  prompt: string;
+}
+
+export type ConversationUiClearedPayload = Record<string, never>;
+
+export interface RuntimeUiContextSetPayload {
+  enabled: boolean;
+}
+
+export interface AgentStatusSetPayload {
+  mode: AgentLifecycleStatus;
+  detail: string;
+}
+
+export interface ConversationCompactedPayload {
+  reason: "manual" | "auto";
+  beforeTokens: number;
+  afterTokens: number;
+  keptGroups: number;
+  removedGroups: number;
+  summaryAgentId?: string;
+  compactedEntryIds: string[];
+  summaryEntryId: string;
+}
+
+export type SessionCreatedEvent = SessionEventBase<
+  "session.created",
+  SessionCreatedPayload
+>;
+
+export type ConversationEntryAppendedEvent = SessionEventBase<
+  "conversation.entry.appended",
+  ConversationEntryAppendedPayload
+>;
+
+export type ConversationLastUserPromptSetEvent = SessionEventBase<
+  "conversation.last_user_prompt.set",
+  ConversationLastUserPromptSetPayload
+>;
+
+export type ConversationUiClearedEvent = SessionEventBase<
+  "conversation.ui.cleared",
+  ConversationUiClearedPayload
+>;
+
+export type RuntimeUiContextSetEvent = SessionEventBase<
+  "runtime.ui_context.set",
+  RuntimeUiContextSetPayload
+>;
+
+export type AgentStatusSetEvent = SessionEventBase<
+  "agent.status.set",
+  AgentStatusSetPayload
+>;
+
+export type ConversationCompactedEvent = SessionEventBase<
+  "conversation.compacted",
+  ConversationCompactedPayload
+>;
+
+export type SessionEvent =
+  | SessionCreatedEvent
+  | ConversationEntryAppendedEvent
+  | ConversationLastUserPromptSetEvent
+  | ConversationUiClearedEvent
+  | RuntimeUiContextSetEvent
+  | AgentStatusSetEvent
+  | ConversationCompactedEvent;
 
 export interface SessionSnapshot {
   workingHeadId: string;

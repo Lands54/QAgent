@@ -3,7 +3,13 @@ import type { PromptAssembler } from "../context/index.js";
 import { MemoryService } from "../memory/index.js";
 import {
   appendConversationEntry,
+  createAgentStatusSetEvent,
+  createConversationCompactedEvent,
   createConversationEntry,
+  createConversationEntryAppendedEvent,
+  createConversationLastUserPromptSetEvent,
+  createConversationUiClearedEvent,
+  createRuntimeUiContextSetEvent,
   projectSnapshotConversationEntries,
   replaceConversationEntries,
   type SessionService,
@@ -24,12 +30,14 @@ import type {
   ApprovalRequest,
   ConversationEntry,
   ConversationEntryKind,
+  ConversationCompactedPayload,
   LlmMessage,
   MemoryRecord,
   ModelClient,
   PromptProfile,
   RuntimeConfig,
   SessionRefInfo,
+  SessionEvent,
   SessionSnapshot,
   SessionWorkingHead,
   SkillManifest,
@@ -381,9 +389,13 @@ export class HeadAgentRuntime {
       this.options.snapshot,
       enabled,
     );
-    await this.persistEvent("ui_context.set", {
-      enabled,
-    });
+    await this.persistEvent(
+      createRuntimeUiContextSetEvent({
+        workingHeadId: this.headId,
+        sessionId: this.sessionId,
+        enabled,
+      }),
+    );
     await this.persistSnapshot();
     await this.refreshSessionState();
     this.options.callbacks.onStateChanged(this);
@@ -411,10 +423,6 @@ export class HeadAgentRuntime {
           createdAt: now,
         },
       }),
-      "ui.command.recorded",
-      {
-        command,
-      },
     );
     for (const message of messages) {
       await this.appendUiOnlyMessage(message);
@@ -480,15 +488,15 @@ export class HeadAgentRuntime {
           createdAt: now,
         },
       }),
-      "conversation.entry.add",
-      {
-        kind: "user-input",
-      },
     );
     this.options.snapshot.lastUserPrompt = trimmed;
-    await this.persistEvent("last_user_prompt.set", {
-      prompt: trimmed,
-    });
+    await this.persistEvent(
+      createConversationLastUserPromptSetEvent({
+        workingHeadId: this.headId,
+        sessionId: this.sessionId,
+        prompt: trimmed,
+      }),
+    );
     await this.persistSnapshot();
 
     await this.runLoop();
@@ -563,7 +571,12 @@ export class HeadAgentRuntime {
       },
       this.isUiContextEnabled(),
     );
-    await this.persistEvent("ui.cleared", {});
+    await this.persistEvent(
+      createConversationUiClearedEvent({
+        workingHeadId: this.headId,
+        sessionId: this.sessionId,
+      }),
+    );
     await this.persistSnapshot();
     this.options.callbacks.onStateChanged(this);
   }
@@ -579,7 +592,7 @@ export class HeadAgentRuntime {
   public async applyCompaction(input: {
     conversationEntries: ConversationEntry[];
     summary: string;
-    metadata: Record<string, unknown>;
+    event: ConversationCompactedPayload;
   }): Promise<void> {
     this.options.snapshot = replaceConversationEntries(
       this.options.snapshot,
@@ -588,7 +601,13 @@ export class HeadAgentRuntime {
     );
     this.options.snapshot.lastRunSummary = input.summary;
     this.options.snapshot.updatedAt = new Date().toISOString();
-    await this.persistEvent("session.compacted", input.metadata);
+    await this.persistEvent(
+      createConversationCompactedEvent({
+        workingHeadId: this.headId,
+        sessionId: this.sessionId,
+        ...input.event,
+      }),
+    );
     await this.persistSnapshot();
     await this.options.sessionService.flushCompactSnapshot(this.options.snapshot);
     await this.refreshSessionState();
@@ -785,10 +804,6 @@ export class HeadAgentRuntime {
           createdAt: now,
         },
       }),
-      "conversation.entry.add",
-      {
-        kind: "assistant-turn",
-      },
     );
   }
 
@@ -821,10 +836,6 @@ export class HeadAgentRuntime {
           createdAt: now,
         },
       }),
-      "conversation.entry.add",
-      {
-        kind: "tool-result",
-      },
     );
   }
 
@@ -837,10 +848,14 @@ export class HeadAgentRuntime {
     if (status !== "awaiting-approval") {
       this.pendingApproval = undefined;
     }
-    await this.persistEvent("status.set", {
-      mode: status,
-      detail,
-    });
+    await this.persistEvent(
+      createAgentStatusSetEvent({
+        workingHeadId: this.headId,
+        sessionId: this.sessionId,
+        mode: status,
+        detail,
+      }),
+    );
     await this.persistSnapshot();
     this.options.callbacks.onStateChanged(this);
   }
@@ -864,43 +879,30 @@ export class HeadAgentRuntime {
           prefix: input?.mirrorPrefix,
         }),
       }),
-      "ui.message.add",
-      {
-        role: message.role,
-      },
     );
   }
 
   private async appendConversationEntryInternal(
     entry: ConversationEntry,
-    eventType: string,
-    payload: Record<string, unknown>,
   ): Promise<void> {
     this.options.snapshot = appendConversationEntry(
       this.options.snapshot,
       entry,
       this.isUiContextEnabled(),
     );
-    await this.persistEvent(eventType, {
-      ...payload,
-      entryKind: entry.kind,
-    });
+    await this.persistEvent(
+      createConversationEntryAppendedEvent({
+        workingHeadId: this.headId,
+        sessionId: this.sessionId,
+        entry,
+      }),
+    );
     await this.persistSnapshot();
     this.options.callbacks.onStateChanged(this);
   }
 
-  private async persistEvent(
-    type: string,
-    payload: Record<string, unknown>,
-  ): Promise<void> {
-    await this.options.sessionService.persistWorkingEvent({
-      id: createId("event"),
-      workingHeadId: this.headId,
-      sessionId: this.sessionId,
-      type,
-      timestamp: new Date().toISOString(),
-      payload,
-    });
+  private async persistEvent(event: SessionEvent): Promise<void> {
+    await this.options.sessionService.persistWorkingEvent(event);
   }
 
   private async persistSnapshot(): Promise<void> {

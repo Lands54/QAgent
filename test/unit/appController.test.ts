@@ -1,12 +1,30 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { AppController } from "../../src/runtime/appController.js";
+import type { SessionEvent } from "../../src/types.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+async function readEvents(projectDir: string, headId: string): Promise<SessionEvent[]> {
+  const eventsPath = path.join(
+    projectDir,
+    ".agent",
+    "sessions",
+    "__heads",
+    headId,
+    "events.ndjson",
+  );
+  const raw = await readFile(eventsPath, "utf8");
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as SessionEvent);
 }
 
 describe("AppController", () => {
@@ -65,6 +83,46 @@ describe("AppController", () => {
       await controller.submitInput("/help");
 
       expect(controller.getState().modelMessages).toEqual([]);
+    } finally {
+      await controller.dispose();
+    }
+  });
+
+  it("会把 slash 与 ui-context 相关 typed journal 事件写入 events.ndjson", async () => {
+    const projectDir = await makeTempDir("qagent-app-controller-events-");
+    const controller = await AppController.create({
+      cwd: projectDir,
+    });
+
+    try {
+      await controller.submitInput("/debug ui-context on");
+      await controller.submitInput("/help");
+
+      const events = await readEvents(
+        projectDir,
+        controller.getState().activeWorkingHeadId,
+      );
+      expect(events.some((event) => {
+        return (
+          event.type === "runtime.ui_context.set"
+          && event.payload.enabled === true
+        );
+      })).toBe(true);
+      const appendedEvents = events.filter((event) => {
+        return event.type === "conversation.entry.appended";
+      });
+      expect(appendedEvents.some((event) => {
+        return (
+          event.payload.entryKind === "ui-command"
+          && event.payload.entry.modelMirror?.content === "[UI命令] /help"
+        );
+      })).toBe(true);
+      expect(appendedEvents.some((event) => {
+        return (
+          event.payload.entryKind === "system-info"
+          && event.payload.entry.ui?.content.includes("可用命令：")
+        );
+      })).toBe(true);
     } finally {
       await controller.dispose();
     }
