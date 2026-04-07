@@ -4,7 +4,10 @@ import type {
   SessionSnapshot,
   SessionWorkingHead,
 } from "../../types.js";
-import { cloneSnapshotForHead } from "../domain/sessionDomain.js";
+import {
+  cloneSnapshotForHead,
+  normalizeSessionSnapshot,
+} from "../domain/sessionDomain.js";
 import type { SessionGraphStore } from "../sessionGraphStore.js";
 import type { SessionStore } from "../sessionStore.js";
 
@@ -75,8 +78,17 @@ export class AssetOverlayService {
     const head = await this.input.requireHead(headId);
     const current = await this.input.sessionStore.load(head.id);
     if (current) {
+      const normalized = normalizeSessionSnapshot(current, {
+        headId: head.id,
+        sessionId: head.sessionId,
+        fallbackTime: current.updatedAt,
+        uiContextEnabled: head.runtimeState.uiContextEnabled ?? false,
+      });
+      if (JSON.stringify(current) !== JSON.stringify(normalized)) {
+        await this.input.sessionStore.saveSnapshot(normalized);
+      }
       await this.restoreProviders(head);
-      return current;
+      return normalized;
     }
 
     const node = await this.input.requireNode(head.currentNodeId);

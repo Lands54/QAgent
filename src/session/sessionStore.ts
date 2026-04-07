@@ -3,6 +3,9 @@ import path from "node:path";
 
 import type { ApprovalMode, SessionEvent, SessionSnapshot } from "../types.js";
 import {
+  normalizeSessionSnapshot,
+} from "./domain/sessionDomain.js";
+import {
   appendNdjson,
   createId,
   ensureDir,
@@ -41,6 +44,7 @@ export class SessionStore {
       cwd: input.cwd,
       shellCwd: input.shellCwd,
       approvalMode: input.approvalMode,
+      conversationEntries: [],
       uiMessages: [],
       modelMessages: [],
     };
@@ -61,7 +65,16 @@ export class SessionStore {
   }
 
   public async load(workingHeadId: string): Promise<SessionSnapshot | undefined> {
-    return readJsonIfExists<SessionSnapshot>(this.getSnapshotPath(workingHeadId));
+    const snapshot = await readJsonIfExists<SessionSnapshot>(this.getSnapshotPath(workingHeadId));
+    if (!snapshot) {
+      return undefined;
+    }
+    return normalizeSessionSnapshot(snapshot, {
+      headId: workingHeadId,
+      sessionId: snapshot.sessionId,
+      fallbackTime: snapshot.updatedAt ?? snapshot.createdAt ?? new Date().toISOString(),
+      uiContextEnabled: false,
+    });
   }
 
   public async loadMostRecent(): Promise<SessionSnapshot | undefined> {

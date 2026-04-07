@@ -9,3 +9,11 @@ export type {
 } from "./sessionService.js";
 export { SessionStore } from "./sessionStore.js";
 export { createDigestSessionAssetProvider } from "./digestAssetProvider.js";
+export {
+  appendConversationEntry,
+  buildProjectedModelMessageEntries,
+  createConversationEntry,
+  normalizeSessionSnapshot,
+  projectSnapshotConversationEntries,
+  replaceConversationEntries,
+} from "./domain/sessionDomain.js";

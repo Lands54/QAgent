@@ -80,7 +80,7 @@ export class AppStateAssembler {
         ...snapshot.uiMessages,
       ],
       draftAssistantText: input.activeRuntime.getDraftAssistantText(),
-      modelMessages: snapshot.modelMessages,
+      modelMessages: [...snapshot.modelMessages],
       availableSkills: input.availableSkills,
       sessionRef: input.activeRuntime.getRef(),
       sessionHead: input.activeRuntime.getHead(),

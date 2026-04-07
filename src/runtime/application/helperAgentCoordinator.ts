@@ -52,6 +52,7 @@ export interface HelperAgentCoordinatorDependencies {
     toolMode?: ToolMode;
     autoMemoryFork?: boolean;
     retainOnCompletion?: boolean;
+    uiContextEnabled?: boolean;
     mergeIntoAgentId?: string;
     mergeAssets?: string[];
     seedModelMessages?: LlmMessage[];
@@ -95,6 +96,7 @@ export class HelperAgentCoordinator {
       toolMode: spec.toolMode,
       autoMemoryFork: spec.autoMemoryFork,
       retainOnCompletion: spec.retainOnCompletion,
+      uiContextEnabled: false,
       mergeIntoAgentId: spec.mergeIntoAgentId,
       mergeAssets: spec.mergeAssets,
       seedModelMessages: spec.seedModelMessages,

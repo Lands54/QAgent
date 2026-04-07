@@ -239,6 +239,7 @@ function buildBus(
       helperAgentAutoCleanup: true,
       helperAgentCount: 0,
       legacyAgentCount: 0,
+      uiContextEnabled: false,
     }),
     getApprovalMode: () => "always",
     getModelStatus: () => ({
@@ -252,6 +253,7 @@ function buildBus(
     setFetchMemoryHookEnabled: vi.fn(async () => {}),
     setSaveMemoryHookEnabled: vi.fn(async () => {}),
     setAutoCompactHookEnabled: vi.fn(async () => {}),
+    setUiContextEnabled: vi.fn(async () => {}),
     setHelperAgentAutoCleanupEnabled: vi.fn(async () => {}),
     setModelProvider: vi.fn(async () => {}),
     setModelName: vi.fn(async () => {}),
@@ -401,6 +403,27 @@ describe("SlashCommandBus", () => {
     expect(setModelProvider).toHaveBeenCalledWith("openrouter");
     expect(setModelName).toHaveBeenCalledWith("openai/gpt-5");
     expect(setModelApiKey).toHaveBeenCalledWith("sk-test-1234");
+  });
+
+  it("支持 debug ui-context 开关与状态查询", async () => {
+    const setUiContextEnabled = vi.fn(async () => {});
+    const { bus } = buildBus({
+      setUiContextEnabled,
+      getDebugStatus: async () => ({
+        helperAgentAutoCleanup: true,
+        helperAgentCount: 1,
+        legacyAgentCount: 2,
+        uiContextEnabled: true,
+      }),
+    });
+
+    const statusResult = await bus.execute("/debug ui-context status");
+    await bus.execute("/debug ui-context on");
+    await bus.execute("/debug ui-context off");
+
+    expect(statusResult.messages[0]?.content).toContain("ui-context: on");
+    expect(setUiContextEnabled).toHaveBeenNthCalledWith(1, true);
+    expect(setUiContextEnabled).toHaveBeenNthCalledWith(2, false);
   });
 
   it("支持新的 memory save/list/show 语法", async () => {

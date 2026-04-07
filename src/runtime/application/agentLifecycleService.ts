@@ -30,6 +30,7 @@ export interface SpawnAgentOptions {
   mergeAssets?: string[];
   autoMemoryFork?: boolean;
   retainOnCompletion?: boolean;
+  uiContextEnabled?: boolean;
   buildRuntimeOverrides?: (head: SessionWorkingHead) => {
     promptProfile?: PromptProfile;
     toolMode?: ToolMode;
@@ -66,6 +67,7 @@ export class AgentLifecycleService {
         agentKind: kind,
         autoMemoryFork: options.autoMemoryFork ?? (kind === "interactive"),
         retainOnCompletion: options.retainOnCompletion ?? true,
+        uiContextEnabled: options.uiContextEnabled,
       },
     });
     const runtimeOverrides = options.buildRuntimeOverrides?.(result.head);
@@ -111,6 +113,7 @@ export class AgentLifecycleService {
       retainOnCompletion: options.retainOnCompletion ?? true,
       promptProfile: runtimeOverrides?.promptProfile ?? options.promptProfile,
       toolMode: runtimeOverrides?.toolMode ?? options.toolMode ?? "shell",
+      uiContextEnabled: options.uiContextEnabled,
     });
     if (options.activate) {
       this.input.registry.setActiveAgentId(result.head.id);

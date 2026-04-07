@@ -157,17 +157,14 @@ export class HookPipeline {
       this.input.lastAutoMemoryForkSourceHashByAgent.set(agentId, sourceHash);
       await runtime.refreshSessionState();
     } catch (error) {
-      await runtime.seedConversation({
-        uiMessages: [
-          ...snapshot.uiMessages,
-          {
-            id: createId("ui"),
-            role: "error",
-            content: `自动 memory fork 失败：${(error as Error).message}`,
-            createdAt: new Date().toISOString(),
-          },
-        ],
-      });
+      await runtime.appendUiMessages([
+        {
+          id: createId("ui"),
+          role: "error",
+          content: `自动 memory fork 失败：${(error as Error).message}`,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
     }
     this.input.emitChange();
   }

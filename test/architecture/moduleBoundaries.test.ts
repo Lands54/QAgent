@@ -334,6 +334,26 @@ describe("Architecture Boundaries", () => {
     expect(violations).toEqual([]);
   });
 
+  it("源码不得直接修改 snapshot 的投影缓存或统一时间线数组", async () => {
+    const files = await listSourceFiles(srcRoot);
+    const violations: string[] = [];
+    const forbiddenPatterns = [
+      /(?:^|[^\w])[\w.]+\.(?:uiMessages|modelMessages|conversationEntries)\s*=/gu,
+      /(?:^|[^\w])[\w.]+\.(?:uiMessages|modelMessages|conversationEntries)\.(?:push|pop|shift|unshift|splice)\s*\(/gu,
+    ];
+
+    for (const file of files) {
+      const source = await readFile(file, "utf8");
+      const matched = forbiddenPatterns.some((pattern) => pattern.test(source));
+      if (!matched) {
+        continue;
+      }
+      violations.push(path.relative(workspaceRoot, file));
+    }
+
+    expect(violations).toEqual([]);
+  });
+
   it("源码文件之间不存在循环依赖", async () => {
     const graph = await collectSourceGraph();
     const cycle = detectCycle(graph);

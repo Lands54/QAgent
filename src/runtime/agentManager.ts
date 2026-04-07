@@ -172,11 +172,13 @@ export class AgentManager {
     helperAgentAutoCleanup: boolean;
     helperAgentCount: number;
     legacyAgentCount: number;
+    uiContextEnabled: boolean;
   } {
     return {
       helperAgentAutoCleanup: this.helperAgentAutoCleanupEnabled,
       helperAgentCount: this.listHelperAgents().length,
       legacyAgentCount: this.listLegacyAgents().length,
+      uiContextEnabled: this.registry.getActiveRuntime().isUiContextEnabled(),
     };
   }
 
@@ -316,10 +318,27 @@ export class AgentManager {
     await this.registry.getActiveRuntime().clearUiMessages();
   }
 
+  public async recordSlashCommandOnActiveAgent(
+    command: string,
+    messages: ReadonlyArray<UIMessage>,
+  ): Promise<void> {
+    await this.registry.getActiveRuntime().recordSlashCommand(command, messages);
+  }
+
   public async appendUiMessagesToActiveAgent(
-    messages: UIMessage[],
+    messages: ReadonlyArray<UIMessage>,
   ): Promise<void> {
     await this.registry.getActiveRuntime().appendUiMessages(messages);
+  }
+
+  public async setUiContextEnabled(
+    enabled: boolean,
+    agentId = this.registry.getActiveAgentId(),
+  ): Promise<void> {
+    const resolvedAgentId = this.navigation.resolveAgentId(agentId);
+    const runtime = this.registry.requireRuntime(resolvedAgentId);
+    await runtime.setUiContextEnabled(enabled);
+    this.emitChange();
   }
 
   public async flushCheckpointsOnExit(): Promise<void> {

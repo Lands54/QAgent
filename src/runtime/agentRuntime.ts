@@ -1,7 +1,13 @@
 import { AgentRunner } from "./agentRunner.js";
 import type { PromptAssembler } from "../context/index.js";
 import { MemoryService } from "../memory/index.js";
-import type { SessionService } from "../session/index.js";
+import {
+  appendConversationEntry,
+  createConversationEntry,
+  projectSnapshotConversationEntries,
+  replaceConversationEntries,
+  type SessionService,
+} from "../session/index.js";
 import {
   ApprovalPolicy,
   PersistentShellSession,
@@ -16,6 +22,8 @@ import type {
   ApprovalMode,
   ApprovalDecision,
   ApprovalRequest,
+  ConversationEntry,
+  ConversationEntryKind,
   LlmMessage,
   MemoryRecord,
   ModelClient,
@@ -94,6 +102,47 @@ function buildToolUiMessage(result: Parameters<HeadAgentRuntime["commitToolResul
     createdAt: new Date().toISOString(),
     title: "Shell Tool",
   };
+}
+
+function buildUiMirrorMessage(
+  message: UIMessage,
+  input?: {
+    prefix?: string;
+    role?: Exclude<LlmMessage["role"], "tool">;
+  },
+): LlmMessage {
+  const prefix =
+    input?.prefix
+    ?? (message.role === "info"
+      ? "[UI结果][INFO]"
+      : message.role === "error"
+        ? "[UI结果][ERROR]"
+        : message.role === "tool"
+          ? "[UI消息][TOOL]"
+          : message.role === "assistant"
+            ? "[UI消息][ASSISTANT]"
+            : "[UI消息][USER]");
+  return {
+    id: createId("llm"),
+    role:
+      input?.role
+      ?? (message.role === "user" ? "user" : "assistant"),
+    content: `${prefix} ${message.content}`,
+    createdAt: message.createdAt,
+  };
+}
+
+function mapUiMessageToConversationKind(
+  message: UIMessage,
+  defaultKind: ConversationEntryKind = "ui-result",
+): ConversationEntryKind {
+  if (message.role === "info") {
+    return "system-info";
+  }
+  if (message.role === "error") {
+    return "system-error";
+  }
+  return defaultKind;
 }
 
 export class HeadAgentRuntime {
@@ -263,9 +312,13 @@ export class HeadAgentRuntime {
     head?: SessionWorkingHead,
     ref?: SessionRefInfo,
   ): Promise<void> {
-    this.options.snapshot = {
-      ...snapshot,
-    };
+    const nextHead = head ?? this.options.head;
+    this.options.snapshot = projectSnapshotConversationEntries(
+      {
+        ...snapshot,
+      },
+      nextHead.runtimeState.uiContextEnabled ?? false,
+    );
     if (head) {
       this.options.head = head;
     }
@@ -281,18 +334,91 @@ export class HeadAgentRuntime {
     uiMessages?: UIMessage[];
     lastUserPrompt?: string;
   }): Promise<void> {
+    let nextSnapshot = this.options.snapshot;
     if (input.modelMessages) {
-      this.options.snapshot.modelMessages = [...input.modelMessages];
+      nextSnapshot = {
+        ...nextSnapshot,
+        conversationEntries: [],
+        modelMessages: [...input.modelMessages],
+      };
     }
     if (input.uiMessages) {
-      this.options.snapshot.uiMessages = [...input.uiMessages];
+      nextSnapshot = {
+        ...nextSnapshot,
+        conversationEntries: [],
+        uiMessages: [...input.uiMessages],
+      };
     }
     if (input.lastUserPrompt !== undefined) {
-      this.options.snapshot.lastUserPrompt = input.lastUserPrompt;
+      nextSnapshot = {
+        ...nextSnapshot,
+        lastUserPrompt: input.lastUserPrompt,
+      };
     }
-    this.options.snapshot.updatedAt = new Date().toISOString();
+    this.options.snapshot = projectSnapshotConversationEntries(
+      {
+        ...nextSnapshot,
+        updatedAt: new Date().toISOString(),
+      },
+      this.isUiContextEnabled(),
+    );
     await this.persistSnapshot();
     this.options.callbacks.onStateChanged(this);
+  }
+
+  public isUiContextEnabled(): boolean {
+    return this.options.head.runtimeState.uiContextEnabled ?? false;
+  }
+
+  public async setUiContextEnabled(enabled: boolean): Promise<void> {
+    this.options.head = await this.options.sessionService.updateHeadRuntimeState(
+      this.headId,
+      {
+        uiContextEnabled: enabled,
+      },
+    );
+    this.options.snapshot = projectSnapshotConversationEntries(
+      this.options.snapshot,
+      enabled,
+    );
+    await this.persistEvent("ui_context.set", {
+      enabled,
+    });
+    await this.persistSnapshot();
+    await this.refreshSessionState();
+    this.options.callbacks.onStateChanged(this);
+  }
+
+  public async recordSlashCommand(
+    command: string,
+    messages: ReadonlyArray<UIMessage>,
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    await this.appendConversationEntryInternal(
+      createConversationEntry({
+        kind: "ui-command",
+        createdAt: now,
+        ui: {
+          id: createId("ui"),
+          role: "user",
+          content: command,
+          createdAt: now,
+        },
+        modelMirror: {
+          id: createId("llm"),
+          role: "user",
+          content: `[UI命令] ${command}`,
+          createdAt: now,
+        },
+      }),
+      "ui.command.recorded",
+      {
+        command,
+      },
+    );
+    for (const message of messages) {
+      await this.appendUiOnlyMessage(message);
+    }
   }
 
   public async submitInput(
@@ -307,7 +433,7 @@ export class HeadAgentRuntime {
     }
 
     if (this.isRunning()) {
-      await this.addUiMessage({
+      await this.appendUiOnlyMessage({
         id: createId("ui"),
         role: "error",
         content: "Agent 正在执行中。可先中断，再提交新任务。",
@@ -323,7 +449,7 @@ export class HeadAgentRuntime {
     if (autoBranch) {
       this.options.head = autoBranch.head;
       this.ref = autoBranch.ref;
-      await this.addUiMessage({
+      await this.appendUiOnlyMessage({
         id: createId("ui"),
         role: "info",
         content: autoBranch.message,
@@ -337,18 +463,28 @@ export class HeadAgentRuntime {
       now,
       options?.modelInputAppendix,
     );
-    await this.addUiMessage({
-      id: createId("ui"),
-      role: "user",
-      content: trimmed,
-      createdAt: now,
-    });
-    await this.addModelMessage({
-      id: createId("llm"),
-      role: "user",
-      content: modelInput,
-      createdAt: now,
-    });
+    await this.appendConversationEntryInternal(
+      createConversationEntry({
+        kind: "user-input",
+        createdAt: now,
+        ui: {
+          id: createId("ui"),
+          role: "user",
+          content: trimmed,
+          createdAt: now,
+        },
+        model: {
+          id: createId("llm"),
+          role: "user",
+          content: modelInput,
+          createdAt: now,
+        },
+      }),
+      "conversation.entry.add",
+      {
+        kind: "user-input",
+      },
+    );
     this.options.snapshot.lastUserPrompt = trimmed;
     await this.persistEvent("last_user_prompt.set", {
       prompt: trimmed,
@@ -419,25 +555,37 @@ export class HeadAgentRuntime {
   }
 
   public async clearUiMessages(): Promise<void> {
-    this.options.snapshot.uiMessages = [];
-    this.options.snapshot.updatedAt = new Date().toISOString();
+    this.options.snapshot = projectSnapshotConversationEntries(
+      {
+        ...this.options.snapshot,
+        uiClearedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      this.isUiContextEnabled(),
+    );
     await this.persistEvent("ui.cleared", {});
     await this.persistSnapshot();
     this.options.callbacks.onStateChanged(this);
   }
 
-  public async appendUiMessages(messages: UIMessage[]): Promise<void> {
+  public async appendUiMessages(
+    messages: ReadonlyArray<UIMessage>,
+  ): Promise<void> {
     for (const message of messages) {
-      await this.addUiMessage(message);
+      await this.appendUiOnlyMessage(message);
     }
   }
 
   public async applyCompaction(input: {
-    modelMessages: LlmMessage[];
+    conversationEntries: ConversationEntry[];
     summary: string;
     metadata: Record<string, unknown>;
   }): Promise<void> {
-    this.options.snapshot.modelMessages = [...input.modelMessages];
+    this.options.snapshot = replaceConversationEntries(
+      this.options.snapshot,
+      input.conversationEntries,
+      this.isUiContextEnabled(),
+    );
     this.options.snapshot.lastRunSummary = input.summary;
     this.options.snapshot.updatedAt = new Date().toISOString();
     await this.persistEvent("session.compacted", input.metadata);
@@ -484,7 +632,7 @@ export class HeadAgentRuntime {
         this.commitAssistantTurn({ content, toolCalls }),
       commitToolResult: async (result) => this.commitToolResult(result),
       emitInfo: async (message) => {
-        await this.addUiMessage({
+        await this.appendUiOnlyMessage({
           id: createId("ui"),
           role: "info",
           content: message,
@@ -492,7 +640,7 @@ export class HeadAgentRuntime {
         });
       },
       emitError: async (message) => {
-        await this.addUiMessage({
+        await this.appendUiOnlyMessage({
           id: createId("ui"),
           role: "error",
           content: message,
@@ -617,22 +765,31 @@ export class HeadAgentRuntime {
     }
 
     const now = new Date().toISOString();
-    await this.addModelMessage({
-      id: createId("llm"),
-      role: "assistant",
-      content: input.content,
-      toolCalls: input.toolCalls.length > 0 ? input.toolCalls : undefined,
-      createdAt: now,
-    });
-
-    if (input.content.trim()) {
-      await this.addUiMessage({
-        id: createId("ui"),
-        role: "assistant",
-        content: input.content,
+    await this.appendConversationEntryInternal(
+      createConversationEntry({
+        kind: "assistant-turn",
         createdAt: now,
-      });
-    }
+        ui: input.content.trim()
+          ? {
+              id: createId("ui"),
+              role: "assistant",
+              content: input.content,
+              createdAt: now,
+            }
+          : undefined,
+        model: {
+          id: createId("llm"),
+          role: "assistant",
+          content: input.content,
+          toolCalls: input.toolCalls.length > 0 ? input.toolCalls : undefined,
+          createdAt: now,
+        },
+      }),
+      "conversation.entry.add",
+      {
+        kind: "assistant-turn",
+      },
+    );
   }
 
   private async commitToolResult(result: {
@@ -648,16 +805,27 @@ export class HeadAgentRuntime {
     startedAt: string;
     finishedAt: string;
   }): Promise<void> {
-    await this.addModelMessage({
-      id: createId("llm"),
-      role: "tool",
-      name: "shell",
-      toolCallId: result.callId,
-      content: formatToolResultForModel(result),
-      createdAt: new Date().toISOString(),
-    });
     this.options.snapshot.shellCwd = result.cwd;
-    await this.addUiMessage(buildToolUiMessage(result));
+    const now = new Date().toISOString();
+    await this.appendConversationEntryInternal(
+      createConversationEntry({
+        kind: "tool-result",
+        createdAt: now,
+        ui: buildToolUiMessage(result),
+        model: {
+          id: createId("llm"),
+          role: "tool",
+          name: "shell",
+          toolCallId: result.callId,
+          content: formatToolResultForModel(result),
+          createdAt: now,
+        },
+      }),
+      "conversation.entry.add",
+      {
+        kind: "tool-result",
+      },
+    );
   }
 
   private async setStatusInternal(
@@ -677,24 +845,45 @@ export class HeadAgentRuntime {
     this.options.callbacks.onStateChanged(this);
   }
 
-  private async addUiMessage(message: UIMessage): Promise<void> {
-    this.options.snapshot.uiMessages = [...this.options.snapshot.uiMessages, message];
-    this.options.snapshot.updatedAt = new Date().toISOString();
-    await this.persistEvent("ui.message.add", {
-      message,
-    });
-    await this.persistSnapshot();
-    this.options.callbacks.onStateChanged(this);
+  private async appendUiOnlyMessage(
+    message: UIMessage,
+    input?: {
+      kind?: ConversationEntryKind;
+      mirrorRole?: Exclude<LlmMessage["role"], "tool">;
+      mirrorPrefix?: string;
+    },
+  ): Promise<void> {
+    await this.appendConversationEntryInternal(
+      createConversationEntry({
+        kind:
+          input?.kind ?? mapUiMessageToConversationKind(message, "ui-result"),
+        createdAt: message.createdAt,
+        ui: message,
+        modelMirror: buildUiMirrorMessage(message, {
+          role: input?.mirrorRole,
+          prefix: input?.mirrorPrefix,
+        }),
+      }),
+      "ui.message.add",
+      {
+        role: message.role,
+      },
+    );
   }
 
-  private async addModelMessage(message: LlmMessage): Promise<void> {
-    this.options.snapshot.modelMessages = [
-      ...this.options.snapshot.modelMessages,
-      message,
-    ];
-    this.options.snapshot.updatedAt = new Date().toISOString();
-    await this.persistEvent("model.message.add", {
-      message,
+  private async appendConversationEntryInternal(
+    entry: ConversationEntry,
+    eventType: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    this.options.snapshot = appendConversationEntry(
+      this.options.snapshot,
+      entry,
+      this.isUiContextEnabled(),
+    );
+    await this.persistEvent(eventType, {
+      ...payload,
+      entryKind: entry.kind,
     });
     await this.persistSnapshot();
     this.options.callbacks.onStateChanged(this);

@@ -87,6 +87,7 @@ export function toSessionSnapshot(state: AppState): SessionSnapshot {
     cwd: state.cwd,
     shellCwd: state.shellCwd,
     approvalMode: state.approvalMode,
+    conversationEntries: [],
     uiMessages: state.uiMessages,
     modelMessages: state.modelMessages,
     lastUserPrompt: state.lastUserPrompt,

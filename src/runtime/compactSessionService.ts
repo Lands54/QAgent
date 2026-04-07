@@ -1,5 +1,7 @@
+import { buildProjectedModelMessageEntries } from "../session/index.js";
 import type {
   ApprovalMode,
+  ConversationEntry,
   LlmMessage,
   PromptProfile,
   RuntimeConfig,
@@ -12,7 +14,6 @@ import { createId } from "../utils/index.js";
 import { HelperAgentCoordinator } from "./application/helperAgentCoordinator.js";
 import {
   estimateMessagesTokens,
-  groupMessagesForCompact,
 } from "./domain/contextBudgetService.js";
 
 export const COMPACT_SUMMARY_PREFIX = "[QAGENT_COMPACT_SUMMARY v1]";
@@ -35,12 +36,13 @@ interface CompactSessionCoordinator {
     promptProfile: PromptProfile;
     getHead(): SessionWorkingHead;
     getSnapshot(): SessionSnapshot;
-    appendUiMessages(messages: UIMessage[]): Promise<void>;
+    appendUiMessages(messages: ReadonlyArray<UIMessage>): Promise<void>;
     applyCompaction(input: {
-      modelMessages: LlmMessage[];
+      conversationEntries: ConversationEntry[];
       summary: string;
       metadata: Record<string, unknown>;
     }): Promise<void>;
+    isUiContextEnabled(): boolean;
   };
   spawnTaskAgent(input: {
     name: string;
@@ -143,8 +145,14 @@ export class CompactSessionService {
   public async run(input: CompactSessionInput): Promise<CompactSessionResult> {
     const runtime = this.agentManager.getRuntime(input.targetAgentId);
     const snapshot = runtime.getSnapshot();
-    const grouped = groupMessagesForCompact(snapshot.modelMessages);
-    const beforeTokens = estimateMessagesTokens(snapshot.modelMessages);
+    const projectedEntries = buildProjectedModelMessageEntries(
+      snapshot,
+      runtime.isUiContextEnabled(),
+    );
+    const grouped = groupProjectedModelEntries(projectedEntries);
+    const beforeTokens = estimateMessagesTokens(
+      projectedEntries.map((entry) => entry.message),
+    );
     const keepGroups = Math.max(1, this.config.runtime.compactRecentKeepGroups);
     if (!input.force && beforeTokens < this.config.runtime.autoCompactThresholdTokens) {
       return {
@@ -168,7 +176,9 @@ export class CompactSessionService {
       };
     }
 
-    const prefixMessages = prefixGroups.flat();
+    const prefixMessages = prefixGroups.flatMap((group) => {
+      return group.map((entry) => entry.message);
+    });
     const helperCoordinator = new HelperAgentCoordinator(this.agentManager);
     const { agentId, result: rawSummary } = await helperCoordinator.run({
       name: `compact-session-${Date.now()}`,
@@ -217,13 +227,29 @@ export class CompactSessionService {
       throw new Error("compact helper 未返回合法摘要。");
     }
 
-    const compactedMessages = [
-      buildSyntheticSummaryMessage(summary),
-      ...tailGroups.flat(),
-    ];
-    const afterTokens = estimateMessagesTokens(compactedMessages);
+    const prefixEntryIndexes = new Set(
+      prefixGroups.flatMap((group) => group.map((entry) => entry.entryIndex)),
+    );
+    const firstTailEntryIndex = tailGroups[0]?.[0]?.entryIndex;
+    const summaryEntry = createCompactSummaryEntry(summary);
+    const compactedEntries = snapshot.conversationEntries.map((entry, entryIndex) => {
+      if (!prefixEntryIndexes.has(entryIndex)) {
+        return entry;
+      }
+      return {
+        ...entry,
+        model: undefined,
+        modelMirror: undefined,
+      } satisfies ConversationEntry;
+    });
+    const summaryInsertIndex = firstTailEntryIndex ?? compactedEntries.length;
+    compactedEntries.splice(summaryInsertIndex, 0, summaryEntry);
+    const afterTokens = estimateMessagesTokens([
+      summaryEntry.model as LlmMessage,
+      ...tailGroups.flatMap((group) => group.map((entry) => entry.message)),
+    ]);
     await runtime.applyCompaction({
-      modelMessages: compactedMessages,
+      conversationEntries: compactedEntries,
       summary,
       metadata: {
         reason: input.reason,
@@ -244,4 +270,51 @@ export class CompactSessionService {
       summary,
     };
   }
+}
+
+function createCompactSummaryEntry(summary: string): ConversationEntry {
+  return {
+    id: createId("entry"),
+    kind: "compact-summary",
+    createdAt: new Date().toISOString(),
+    model: buildSyntheticSummaryMessage(summary),
+  };
+}
+
+function groupProjectedModelEntries(
+  entries: Array<{
+    entryIndex: number;
+    message: LlmMessage;
+  }>,
+): Array<
+  Array<{
+    entryIndex: number;
+    message: LlmMessage;
+  }>
+> {
+  const groups: Array<
+    Array<{
+      entryIndex: number;
+      message: LlmMessage;
+    }>
+  > = [];
+  let current: Array<{
+    entryIndex: number;
+    message: LlmMessage;
+  }> = [];
+
+  for (const entry of entries) {
+    if (entry.message.role === "user" && current.length > 0) {
+      groups.push(current);
+      current = [entry];
+      continue;
+    }
+    current.push(entry);
+  }
+
+  if (current.length > 0) {
+    groups.push(current);
+  }
+
+  return groups;
 }

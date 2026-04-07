@@ -15,7 +15,9 @@ function estimateSingleMessageTokens(message: LlmMessage): number {
   return contentTokens + toolCallTokens;
 }
 
-export function groupMessagesForCompact(messages: LlmMessage[]): LlmMessage[][] {
+export function groupMessagesForCompact(
+  messages: ReadonlyArray<LlmMessage>,
+): LlmMessage[][] {
   const groups: LlmMessage[][] = [];
   let current: LlmMessage[] = [];
 
@@ -35,7 +37,9 @@ export function groupMessagesForCompact(messages: LlmMessage[]): LlmMessage[][] 
   return groups;
 }
 
-export function estimateMessagesTokens(messages: LlmMessage[]): number {
+export function estimateMessagesTokens(
+  messages: ReadonlyArray<LlmMessage>,
+): number {
   const rough = messages.reduce((sum, message) => {
     return sum + estimateSingleMessageTokens(message);
   }, 0);
@@ -52,7 +56,7 @@ export interface ContextBudgetSummary {
 
 export class ContextBudgetService {
   public summarize(
-    messages: LlmMessage[],
+    messages: ReadonlyArray<LlmMessage>,
     thresholdTokens: number,
   ): ContextBudgetSummary {
     const currentTokens = estimateMessagesTokens(messages);

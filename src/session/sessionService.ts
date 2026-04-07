@@ -86,6 +86,7 @@ interface ForkHeadOptions {
     retainOnCompletion?: boolean;
     promptProfile?: PromptProfile;
     toolMode?: ToolMode;
+    uiContextEnabled?: boolean;
   };
 }
 
@@ -182,6 +183,7 @@ export class SessionService {
         retainOnCompletion: true,
         promptProfile: "default",
         toolMode: "shell",
+        uiContextEnabled: false,
         status: "idle",
       },
       assetState: {},
@@ -489,6 +491,7 @@ export class SessionService {
         agentKind: "interactive",
         autoMemoryFork: true,
         retainOnCompletion: true,
+        uiContextEnabled: false,
       },
     });
   }
@@ -591,6 +594,9 @@ export class SessionService {
         toolMode: options.runtimeState?.toolMode
           ?? sourceHead.runtimeState.toolMode
           ?? "shell",
+        uiContextEnabled: options.runtimeState?.uiContextEnabled
+          ?? sourceHead.runtimeState.uiContextEnabled
+          ?? false,
         status: "idle",
       },
       assetState: {},
@@ -1007,6 +1013,7 @@ export class SessionService {
         shellCwd: node.snapshot.shellCwd,
         promptProfile: "default",
         toolMode: "shell",
+        uiContextEnabled: false,
       },
       assetState: {},
       status: "idle",

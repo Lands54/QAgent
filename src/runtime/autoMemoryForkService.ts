@@ -54,7 +54,7 @@ export interface AutoMemoryForkInput {
   targetSnapshot: SessionSnapshot;
   availableSkills: SkillManifest[];
   lastUserPrompt?: string;
-  modelMessages: LlmMessage[];
+  modelMessages: ReadonlyArray<LlmMessage>;
 }
 
 export interface AutoMemoryForkResult {

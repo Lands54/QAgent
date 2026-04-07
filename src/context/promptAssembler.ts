@@ -15,7 +15,7 @@ interface AssemblePromptInput {
   agentLayers: InstructionLayer[];
   availableSkills: SkillManifest[];
   relevantMemories: MemoryRecord[];
-  modelMessages: LlmMessage[];
+  modelMessages: ReadonlyArray<LlmMessage>;
   shellCwd: string;
   toolMode?: ToolMode;
 }
@@ -105,7 +105,7 @@ function _memoryLayers(relevantMemories: MemoryRecord[]): InstructionLayer[] {
 }
 
 function _sessionDigestLayer(
-  messages: LlmMessage[],
+  messages: ReadonlyArray<LlmMessage>,
   maxMessages: number,
 ): InstructionLayer | undefined {
   const relevant = messages.slice(-maxMessages);

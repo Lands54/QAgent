@@ -25,7 +25,7 @@ interface AgentRunnerDependencies {
   modelClient: ModelClient;
   toolRegistry: ToolRegistry;
   approvalPolicy: ApprovalPolicy;
-  getModelMessages: () => LlmMessage[];
+  getModelMessages: () => ReadonlyArray<LlmMessage>;
   getAvailableSkills: () => SkillManifest[];
   getShellCwd: () => string;
   getLastUserPrompt: () => string | undefined;

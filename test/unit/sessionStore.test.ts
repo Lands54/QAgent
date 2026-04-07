@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { projectSnapshotConversationEntries } from "../../src/session/domain/sessionDomain.js";
 import { SessionStore } from "../../src/session/sessionStore.js";
 import { createId } from "../../src/utils/ids.js";
 
@@ -21,13 +22,22 @@ describe("SessionStore", () => {
       approvalMode: "always",
     });
 
-    snapshot.uiMessages.push({
-      id: createId("ui"),
-      role: "user",
-      content: "hello",
-      createdAt: new Date().toISOString(),
-    });
-    await store.saveSnapshot(snapshot);
+    await store.saveSnapshot(
+      projectSnapshotConversationEntries(
+        {
+          ...snapshot,
+          uiMessages: [
+            {
+              id: createId("ui"),
+              role: "user",
+              content: "hello",
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        },
+        false,
+      ),
+    );
 
     const loaded = await store.load(snapshot.workingHeadId);
     const latest = await store.loadMostRecent();

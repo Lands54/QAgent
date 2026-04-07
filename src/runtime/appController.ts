@@ -93,13 +93,12 @@ export class AppController {
 
     const slashResult = await this.getSlashBus().execute(trimmed);
     if (slashResult.handled) {
+      await this.agentManager.recordSlashCommandOnActiveAgent(
+        trimmed,
+        slashResult.messages,
+      );
       if (slashResult.clearUi) {
         await this.agentManager.clearActiveAgentUi();
-      }
-      if (slashResult.messages.length > 0) {
-        await this.agentManager.appendUiMessagesToActiveAgent(
-          slashResult.messages,
-        );
       }
       if (slashResult.exitRequested) {
         await this.requestExit();
@@ -240,6 +239,9 @@ export class AppController {
         this.agentManager.setAutoCompactHookEnabled(enabled);
       },
       getDebugStatus: async () => this.agentManager.getDebugStatus(),
+      setUiContextEnabled: async (enabled) => {
+        await this.agentManager.setUiContextEnabled(enabled);
+      },
       setHelperAgentAutoCleanupEnabled: async (enabled) => {
         this.agentManager.setHelperAgentAutoCleanupEnabled(enabled);
       },

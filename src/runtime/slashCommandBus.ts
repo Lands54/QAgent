@@ -28,6 +28,7 @@ interface SlashCommandDependencies {
     helperAgentAutoCleanup: boolean;
     helperAgentCount: number;
     legacyAgentCount: number;
+    uiContextEnabled: boolean;
   }>;
   getApprovalMode: () => ApprovalMode;
   getModelStatus: () => {
@@ -42,6 +43,7 @@ interface SlashCommandDependencies {
   setFetchMemoryHookEnabled: (enabled: boolean) => Promise<void>;
   setSaveMemoryHookEnabled: (enabled: boolean) => Promise<void>;
   setAutoCompactHookEnabled: (enabled: boolean) => Promise<void>;
+  setUiContextEnabled: (enabled: boolean) => Promise<void>;
   setHelperAgentAutoCleanupEnabled: (enabled: boolean) => Promise<void>;
   setModelProvider: (provider: ModelProvider) => Promise<void>;
   setModelName: (model: string) => Promise<void>;
@@ -134,6 +136,8 @@ function helpMessage(): string {
     "/hook save-memory <on|off>",
     "/hook auto-compact <on|off>",
     "/debug helper-agent status",
+    "/debug ui-context status",
+    "/debug ui-context <on|off>",
     "/debug helper-agent autocleanup <on|off>",
     "/debug helper-agent clear",
     "/debug legacy clear",
@@ -565,6 +569,7 @@ export class SlashCommandBus {
                 `helper-agent autocleanup: ${status.helperAgentAutoCleanup ? "on" : "off"}`,
                 `helper-agent count: ${status.helperAgentCount}`,
                 `legacy-agent count: ${status.legacyAgentCount}`,
+                `ui-context: ${status.uiContextEnabled ? "on" : "off"}`,
               ].join("\n"),
             ),
           ],
@@ -640,6 +645,33 @@ export class SlashCommandBus {
               : `已清理 ${result.cleared} 个 legacy agent。`,
           ),
         ],
+      };
+    }
+
+    if (subcommand === "ui-context") {
+      const action = args[0] ?? "status";
+      if (action === "status") {
+        const status = await this.deps.getDebugStatus();
+        return {
+          handled: true,
+          messages: [
+            message(
+              "info",
+              `ui-context: ${status.uiContextEnabled ? "on" : "off"}`,
+            ),
+          ],
+        };
+      }
+      if (action !== "on" && action !== "off") {
+        return {
+          handled: true,
+          messages: [message("error", "用法：/debug ui-context <on|off>")],
+        };
+      }
+      await this.deps.setUiContextEnabled(action === "on");
+      return {
+        handled: true,
+        messages: [message("info", `ui-context 已切换为 ${action}。`)],
       };
     }
 

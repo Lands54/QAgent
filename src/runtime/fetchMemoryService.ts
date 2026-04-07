@@ -77,7 +77,7 @@ function buildFetchMemorySystemPrompt(basePrompt: string | undefined): string {
     .join("\n");
 }
 
-function buildRecentHistoryDigest(messages: LlmMessage[]): string {
+function buildRecentHistoryDigest(messages: ReadonlyArray<LlmMessage>): string {
   const relevant = messages.slice(-8);
   if (relevant.length === 0) {
     return "无";

@@ -47,6 +47,9 @@ const STATIC_COMPLETIONS: CompletionEntry[] = [
   { value: "/hook auto-compact on", description: "开启 auto-compact hook", category: "slash" },
   { value: "/hook auto-compact off", description: "关闭 auto-compact hook", category: "slash" },
   { value: "/debug helper-agent status", description: "查看 helper agent 调试状态", category: "slash" },
+  { value: "/debug ui-context status", description: "查看当前 agent 的 UI 上下文镜像状态", category: "slash" },
+  { value: "/debug ui-context on", description: "开启 UI 消息按顺序进入模型上下文", category: "slash" },
+  { value: "/debug ui-context off", description: "关闭 UI 消息进入模型上下文", category: "slash" },
   { value: "/debug helper-agent autocleanup on", description: "开启 helper agent 执行后自动清理", category: "slash" },
   { value: "/debug helper-agent autocleanup off", description: "关闭 helper agent 执行后自动清理", category: "slash" },
   { value: "/debug helper-agent clear", description: "清除当前 agent manager 中全部已结束的 helper agent", category: "slash" },
@@ -132,13 +135,15 @@ function dedupeCompletionEntries(
   return deduped;
 }
 
-export function extractUserInputHistory(messages: LlmMessage[]): string[] {
+export function extractUserInputHistory(
+  messages: ReadonlyArray<LlmMessage>,
+): string[] {
   return messages
     .filter((message): message is Extract<LlmMessage, { role: "user" }> => {
       return message.role === "user";
     })
     .map((message) => message.content.trim())
-    .filter(Boolean);
+    .filter((content) => Boolean(content) && !content.startsWith("[UI命令] "));
 }
 
 export function navigateInputHistory(

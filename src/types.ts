@@ -130,6 +130,16 @@ export interface UIMessage {
   title?: string;
 }
 
+export type ConversationEntryKind =
+  | "user-input"
+  | "assistant-turn"
+  | "tool-result"
+  | "ui-command"
+  | "ui-result"
+  | "system-info"
+  | "system-error"
+  | "compact-summary";
+
 export interface ToolCall {
   id: string;
   name: ToolName;
@@ -192,6 +202,15 @@ export type LlmMessage =
       name: ToolName;
     };
 
+export interface ConversationEntry {
+  id: string;
+  kind: ConversationEntryKind;
+  createdAt: string;
+  ui?: UIMessage;
+  model?: LlmMessage;
+  modelMirror?: LlmMessage;
+}
+
 export interface SessionEvent {
   id: string;
   workingHeadId: string;
@@ -209,10 +228,27 @@ export interface SessionSnapshot {
   cwd: string;
   shellCwd: string;
   approvalMode: ApprovalMode;
-  uiMessages: UIMessage[];
-  modelMessages: LlmMessage[];
+  /**
+   * 会话消息的单一事实来源。
+   * 所有普通对话与 UI-only 事件都应先写入这里，再投影出 UI / model 视图。
+   */
+  conversationEntries: ReadonlyArray<ConversationEntry>;
+  /**
+   * 从 conversationEntries 投影出的 UI 视图缓存。
+   * 兼容现有读取方而保留；不要把它当作主数据直接修改。
+   */
+  uiMessages: ReadonlyArray<UIMessage>;
+  /**
+   * 从 conversationEntries 投影出的模型上下文缓存。
+   * 兼容现有读取方而保留；不要把它当作主数据直接修改。
+   */
+  modelMessages: ReadonlyArray<LlmMessage>;
   lastUserPrompt?: string;
   lastRunSummary?: string;
+  /**
+   * UI 视图的清屏水位线，只影响 uiMessages 投影，不影响 conversationEntries。
+   */
+  uiClearedAt?: string;
 }
 
 export interface SessionAbstractAsset {
@@ -278,6 +314,7 @@ export interface SessionRuntimeState {
   retainOnCompletion?: boolean;
   promptProfile?: PromptProfile;
   toolMode?: ToolMode;
+  uiContextEnabled?: boolean;
   status?: "idle" | "running" | "awaiting-approval" | "interrupted" | "error" | "closed";
 }
 
@@ -387,7 +424,7 @@ export interface ToolDefinition {
 
 export interface ModelTurnRequest {
   systemPrompt: string;
-  messages: LlmMessage[];
+  messages: ReadonlyArray<LlmMessage>;
   tools: ToolDefinition[];
 }
 
@@ -461,5 +498,5 @@ export interface SlashCommandResult {
   clearUi?: boolean;
   interruptAgent?: boolean;
   resumeAgent?: boolean;
-  messages: UIMessage[];
+  messages: ReadonlyArray<UIMessage>;
 }
