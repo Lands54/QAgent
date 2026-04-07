@@ -85,7 +85,7 @@ function skillCatalogLayer(
   };
 }
 
-function memoryLayers(relevantMemories: MemoryRecord[]): InstructionLayer[] {
+function _memoryLayers(relevantMemories: MemoryRecord[]): InstructionLayer[] {
   return relevantMemories.map((memory, index) => ({
     id: createId("instruction"),
     source: "memory",
@@ -104,7 +104,7 @@ function memoryLayers(relevantMemories: MemoryRecord[]): InstructionLayer[] {
   }));
 }
 
-function sessionDigestLayer(
+function _sessionDigestLayer(
   messages: LlmMessage[],
   maxMessages: number,
 ): InstructionLayer | undefined {

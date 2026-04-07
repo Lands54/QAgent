@@ -1,5 +1,12 @@
-import type { LlmMessage, PromptProfile, SessionSnapshot } from "../types.js";
+import type {
+  LlmMessage,
+  PromptProfile,
+  RuntimeConfig,
+  SessionSnapshot,
+  SessionWorkingHead,
+} from "../types.js";
 import { truncate } from "../utils/index.js";
+import { HelperAgentCoordinator } from "./application/helperAgentCoordinator.js";
 
 interface FetchMemoryRecord {
   id: string;
@@ -12,7 +19,9 @@ interface FetchMemoryRecord {
 
 interface FetchMemoryCoordinator {
   getBaseSystemPrompt(): string | undefined;
+  getRuntimeConfig(): RuntimeConfig;
   getRuntime(agentId: string): {
+    getHead(): SessionWorkingHead;
     getSnapshot(): SessionSnapshot;
     listMemory(limit?: number): Promise<FetchMemoryRecord[]>;
   };
@@ -40,6 +49,7 @@ interface FetchMemoryCoordinator {
     },
   ): Promise<void>;
   cleanupCompletedAgent(agentId: string): Promise<void>;
+  shouldAutoCleanupHelperAgent(): boolean;
 }
 
 export interface FetchMemoryInput {
@@ -47,7 +57,6 @@ export interface FetchMemoryInput {
   userPrompt: string;
 }
 
-const FETCH_MEMORY_MAX_STEPS = 3;
 const FETCH_MEMORY_MAX_CANDIDATES = 24;
 const FETCH_MEMORY_MAX_SELECTIONS = 3;
 
@@ -206,7 +215,8 @@ export class FetchMemoryService {
       buildRecentHistoryDigest(snapshot.modelMessages),
       candidates,
     );
-    const fetchAgent = await this.agentManager.spawnTaskAgent({
+    const helperCoordinator = new HelperAgentCoordinator(this.agentManager);
+    const { result: report } = await helperCoordinator.run({
       name: `fetch-memory-${Date.now()}`,
       sourceAgentId: input.sourceAgentId,
       activate: false,
@@ -219,43 +229,41 @@ export class FetchMemoryService {
         systemPrompt: buildFetchMemorySystemPrompt(
           this.agentManager.getBaseSystemPrompt(),
         ),
-        maxAgentSteps: FETCH_MEMORY_MAX_STEPS,
+        maxAgentSteps:
+          this.agentManager.getRuntimeConfig().runtime.fetchMemoryMaxAgentSteps,
       }),
-    });
-
-    try {
-      await this.agentManager.submitInputToAgent(fetchAgent.id, fetchPrompt, {
+      buildPrompt: () => fetchPrompt,
+      submitOptions: {
         activate: false,
         skipFetchMemoryHook: true,
-      });
-      const report = this.agentManager
-        .getRuntime(fetchAgent.id)
-        .getSnapshot()
-        .modelMessages
-        .slice()
-        .reverse()
-        .find((message) => {
-          return message.role === "assistant" && message.content.trim().length > 0;
-        })?.content;
-      if (!report) {
-        return undefined;
-      }
-
-      const selectedNames = parseSelectedMemoryNames(report, candidates);
-      if (selectedNames.length === 0) {
-        return undefined;
-      }
-
-      const selectedRecords = selectedNames
-        .map((name) => candidates.find((record) => record.name === name))
-        .filter((record): record is FetchMemoryRecord => Boolean(record));
-      if (selectedRecords.length === 0) {
-        return undefined;
-      }
-
-      return buildMemoryAppendix(selectedRecords);
-    } finally {
-      await this.agentManager.cleanupCompletedAgent(fetchAgent.id);
+      },
+      readResult: (fetchRuntime) => {
+        return fetchRuntime
+          .getSnapshot()
+          .modelMessages
+          .slice()
+          .reverse()
+          .find((message) => {
+            return message.role === "assistant" && message.content.trim().length > 0;
+          })?.content;
+      },
+    });
+    if (!report) {
+      return undefined;
     }
+
+    const selectedNames = parseSelectedMemoryNames(report, candidates);
+    if (selectedNames.length === 0) {
+      return undefined;
+    }
+
+    const selectedRecords = selectedNames
+      .map((name) => candidates.find((record) => record.name === name))
+      .filter((record): record is FetchMemoryRecord => Boolean(record));
+    if (selectedRecords.length === 0) {
+      return undefined;
+    }
+
+    return buildMemoryAppendix(selectedRecords);
   }
 }

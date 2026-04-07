@@ -106,9 +106,13 @@ describe("AutoMemoryForkService", () => {
       },
       runtime: {
         maxAgentSteps: 6,
+        fetchMemoryMaxAgentSteps: 3,
+        autoMemoryForkMaxAgentSteps: 4,
         shellCommandTimeoutMs: 15_000,
         maxToolOutputChars: 12_000,
         maxConversationSummaryMessages: 10,
+        autoCompactThresholdTokens: 120_000,
+        compactRecentKeepGroups: 8,
       },
       tool: {
         approvalMode: "always",

@@ -3,6 +3,10 @@ export type SkillScope = "project" | "global";
 export type ToolName = "shell";
 export type ModelProvider = "openai" | "openrouter";
 export type AgentKind = "interactive" | "task";
+export type HelperAgentType =
+  | "fetch-memory"
+  | "save-memory"
+  | "compact-session";
 export type PromptProfile =
   | "default"
   | "auto-memory"
@@ -51,6 +55,8 @@ export interface RuntimeConfig {
   };
   runtime: {
     maxAgentSteps: number;
+    fetchMemoryMaxAgentSteps: number;
+    autoMemoryForkMaxAgentSteps: number;
     shellCommandTimeoutMs: number;
     maxToolOutputChars: number;
     maxConversationSummaryMessages: number;
@@ -347,7 +353,7 @@ export interface AgentRecord {
   sessionId: string;
   name: string;
   kind: AgentKind;
-  helperType?: "fetch-memory" | "save-memory" | "compact-session";
+  helperType?: HelperAgentType;
   status: AgentLifecycleStatus;
   autoMemoryFork: boolean;
   retainOnCompletion: boolean;

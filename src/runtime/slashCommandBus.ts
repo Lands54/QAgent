@@ -24,6 +24,11 @@ interface SlashCommandDependencies {
     saveMemory: boolean;
     autoCompact: boolean;
   };
+  getDebugStatus: () => Promise<{
+    helperAgentAutoCleanup: boolean;
+    helperAgentCount: number;
+    legacyAgentCount: number;
+  }>;
   getApprovalMode: () => ApprovalMode;
   getModelStatus: () => {
     provider: ModelProvider;
@@ -37,6 +42,7 @@ interface SlashCommandDependencies {
   setFetchMemoryHookEnabled: (enabled: boolean) => Promise<void>;
   setSaveMemoryHookEnabled: (enabled: boolean) => Promise<void>;
   setAutoCompactHookEnabled: (enabled: boolean) => Promise<void>;
+  setHelperAgentAutoCleanupEnabled: (enabled: boolean) => Promise<void>;
   setModelProvider: (provider: ModelProvider) => Promise<void>;
   setModelName: (model: string) => Promise<void>;
   setModelApiKey: (apiKey: string) => Promise<void>;
@@ -79,6 +85,15 @@ interface SlashCommandDependencies {
   detachSessionHead: (headId: string) => Promise<SessionRefInfo>;
   mergeSessionHead: (sourceHeadId: string) => Promise<SessionRefInfo>;
   closeSessionHead: (headId: string) => Promise<SessionRefInfo>;
+  clearHelperAgents: () => Promise<{
+    cleared: number;
+    skippedRunning: number;
+  }>;
+  clearLegacyAgents: () => Promise<{
+    cleared: number;
+    skippedRunning: number;
+    skippedActive: number;
+  }>;
 }
 
 interface SessionCheckoutResultLike {
@@ -118,6 +133,10 @@ function helpMessage(): string {
     "/hook fetch-memory <on|off>",
     "/hook save-memory <on|off>",
     "/hook auto-compact <on|off>",
+    "/debug helper-agent status",
+    "/debug helper-agent autocleanup <on|off>",
+    "/debug helper-agent clear",
+    "/debug legacy clear",
     "/memory save [--global] --name=<name> --description=<说明> <内容>",
     "/memory list",
     "/memory show <name>",
@@ -196,6 +215,8 @@ export class SlashCommandBus {
           return this.handleTool(subcommand, rest);
         case "hook":
           return this.handleHook(subcommand, rest);
+        case "debug":
+          return this.handleDebug(subcommand, rest);
         case "memory":
           return this.handleMemory(subcommand, rest);
         case "skills":
@@ -524,6 +545,107 @@ export class SlashCommandBus {
     return {
       handled: true,
       messages: [message("error", "未知的 /memory 子命令。")],
+    };
+  }
+
+  private async handleDebug(
+    subcommand?: string,
+    args: string[] = [],
+  ): Promise<SlashCommandResult> {
+    if (subcommand === "helper-agent") {
+      const action = args[0] ?? "status";
+      if (action === "status") {
+        const status = await this.deps.getDebugStatus();
+        return {
+          handled: true,
+          messages: [
+            message(
+              "info",
+              [
+                `helper-agent autocleanup: ${status.helperAgentAutoCleanup ? "on" : "off"}`,
+                `helper-agent count: ${status.helperAgentCount}`,
+                `legacy-agent count: ${status.legacyAgentCount}`,
+              ].join("\n"),
+            ),
+          ],
+        };
+      }
+
+      if (action === "autocleanup") {
+        const mode = args[1];
+        if (mode !== "on" && mode !== "off") {
+          return {
+            handled: true,
+            messages: [
+              message(
+                "error",
+                "用法：/debug helper-agent autocleanup <on|off>",
+              ),
+            ],
+          };
+        }
+        await this.deps.setHelperAgentAutoCleanupEnabled(mode === "on");
+        return {
+          handled: true,
+          messages: [
+            message("info", `helper-agent autocleanup 已切换为 ${mode}。`),
+          ],
+        };
+      }
+
+      if (action === "clear") {
+        const result = await this.deps.clearHelperAgents();
+        return {
+          handled: true,
+          messages: [
+            message(
+              "info",
+              result.skippedRunning > 0
+                ? `已清理 ${result.cleared} 个 helper agent，跳过 ${result.skippedRunning} 个运行中的 helper agent。`
+                : `已清理 ${result.cleared} 个 helper agent。`,
+            ),
+          ],
+        };
+      }
+
+      return {
+        handled: true,
+        messages: [message("error", "未知的 /debug helper-agent 子命令。")],
+      };
+    }
+
+    if (subcommand === "legacy") {
+      const action = args[0];
+      if (action !== "clear") {
+        return {
+          handled: true,
+          messages: [message("error", "用法：/debug legacy clear")],
+        };
+      }
+      const result = await this.deps.clearLegacyAgents();
+      const suffix: string[] = [];
+      if (result.skippedRunning > 0) {
+        suffix.push(`跳过 ${result.skippedRunning} 个运行中的 legacy agent`);
+      }
+      if (result.skippedActive > 0) {
+        suffix.push(`跳过 ${result.skippedActive} 个当前激活的 legacy agent`);
+      }
+      return {
+        handled: true,
+        messages: [
+          message(
+            "info",
+            suffix.length > 0
+              ? `已清理 ${result.cleared} 个 legacy agent，${suffix.join("，")}。`
+              : `已清理 ${result.cleared} 个 legacy agent。`,
+          ),
+        ],
+      };
+    }
+
+    return {
+      handled: true,
+      messages: [message("error", "未知的 /debug 子命令。")],
     };
   }
 

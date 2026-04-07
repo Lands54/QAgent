@@ -9,6 +9,11 @@ import type {
   UIMessage,
 } from "../types.js";
 import { createId } from "../utils/index.js";
+import { HelperAgentCoordinator } from "./application/helperAgentCoordinator.js";
+import {
+  estimateMessagesTokens,
+  groupMessagesForCompact,
+} from "./domain/contextBudgetService.js";
 
 export const COMPACT_SUMMARY_PREFIX = "[QAGENT_COMPACT_SUMMARY v1]";
 
@@ -66,6 +71,7 @@ interface CompactSessionCoordinator {
     },
   ): Promise<void>;
   cleanupCompletedAgent(agentId: string): Promise<void>;
+  shouldAutoCleanupHelperAgent(): boolean;
 }
 
 export interface CompactSessionInput {
@@ -106,44 +112,6 @@ function buildCompactUserPrompt(input: {
     `压缩前估算 tokens：${input.beforeTokens}`,
     "请基于前面的历史消息，直接输出 4 个编号章节的摘要。",
   ].join("\n");
-}
-
-export function groupMessagesForCompact(messages: LlmMessage[]): LlmMessage[][] {
-  const groups: LlmMessage[][] = [];
-  let current: LlmMessage[] = [];
-
-  for (const message of messages) {
-    if (message.role === "user" && current.length > 0) {
-      groups.push(current);
-      current = [message];
-      continue;
-    }
-    current.push(message);
-  }
-
-  if (current.length > 0) {
-    groups.push(current);
-  }
-
-  return groups;
-}
-
-function estimateSingleMessageTokens(message: LlmMessage): number {
-  const contentTokens = message.content.length / 4;
-  if (message.role !== "assistant" || !message.toolCalls?.length) {
-    return contentTokens;
-  }
-  const toolCallTokens = message.toolCalls.reduce((sum, toolCall) => {
-    return sum + (toolCall.name.length + JSON.stringify(toolCall.input).length) / 4;
-  }, 0);
-  return contentTokens + toolCallTokens;
-}
-
-export function estimateMessagesTokens(messages: LlmMessage[]): number {
-  const rough = messages.reduce((sum, message) => {
-    return sum + estimateSingleMessageTokens(message);
-  }, 0);
-  return Math.ceil(rough * (4 / 3));
 }
 
 function buildSyntheticSummaryMessage(summary: string): LlmMessage {
@@ -201,7 +169,8 @@ export class CompactSessionService {
     }
 
     const prefixMessages = prefixGroups.flat();
-    const helper = await this.agentManager.spawnTaskAgent({
+    const helperCoordinator = new HelperAgentCoordinator(this.agentManager);
+    const { agentId, result: rawSummary } = await helperCoordinator.run({
       name: `compact-session-${Date.now()}`,
       sourceAgentId: runtime.agentId,
       activate: false,
@@ -220,63 +189,59 @@ export class CompactSessionService {
         ),
         maxAgentSteps: 1,
       }),
-    });
-
-    try {
-      await this.agentManager.submitInputToAgent(
-        helper.id,
+      buildPrompt: () =>
         buildCompactUserPrompt({
           reason: input.reason,
           removedGroups: prefixGroups.length,
           keptGroups: tailGroups.length,
           beforeTokens,
         }),
-        {
-          activate: false,
-          skipFetchMemoryHook: true,
-        },
-      );
+      submitOptions: {
+        activate: false,
+        skipFetchMemoryHook: true,
+      },
+      readResult: (helperRuntime) => {
+        return helperRuntime
+          .getSnapshot()
+          .modelMessages
+          .slice()
+          .reverse()
+          .find((message) => {
+            return message.role === "assistant" && message.content.trim().length > 0;
+          })?.content;
+      },
+    });
 
-      const helperSnapshot = this.agentManager.getRuntime(helper.id).getSnapshot();
-      const rawSummary = helperSnapshot.modelMessages
-        .slice()
-        .reverse()
-        .find((message) => {
-          return message.role === "assistant" && message.content.trim().length > 0;
-        })?.content;
-      const summary = rawSummary ? parseCompactSummary(rawSummary) : undefined;
-      if (!summary) {
-        throw new Error("compact helper 未返回合法摘要。");
-      }
+    const summary = rawSummary ? parseCompactSummary(rawSummary) : undefined;
+    if (!summary) {
+      throw new Error("compact helper 未返回合法摘要。");
+    }
 
-      const compactedMessages = [
-        buildSyntheticSummaryMessage(summary),
-        ...tailGroups.flat(),
-      ];
-      const afterTokens = estimateMessagesTokens(compactedMessages);
-      await runtime.applyCompaction({
-        modelMessages: compactedMessages,
-        summary,
-        metadata: {
-          reason: input.reason,
-          beforeTokens,
-          afterTokens,
-          keptGroups: tailGroups.length,
-          removedGroups: prefixGroups.length,
-          summaryAgentId: helper.id,
-        },
-      });
-      return {
-        compacted: true,
-        agentId: helper.id,
+    const compactedMessages = [
+      buildSyntheticSummaryMessage(summary),
+      ...tailGroups.flat(),
+    ];
+    const afterTokens = estimateMessagesTokens(compactedMessages);
+    await runtime.applyCompaction({
+      modelMessages: compactedMessages,
+      summary,
+      metadata: {
+        reason: input.reason,
         beforeTokens,
         afterTokens,
         keptGroups: tailGroups.length,
         removedGroups: prefixGroups.length,
-        summary,
-      };
-    } finally {
-      await this.agentManager.cleanupCompletedAgent(helper.id);
-    }
+        summaryAgentId: agentId,
+      },
+    });
+    return {
+      compacted: true,
+      agentId,
+      beforeTokens,
+      afterTokens,
+      keptGroups: tailGroups.length,
+      removedGroups: prefixGroups.length,
+      summary,
+    };
   }
 }

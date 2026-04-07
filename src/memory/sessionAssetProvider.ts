@@ -7,12 +7,12 @@ import type {
   SessionAssetMergeResult,
   SessionAssetProvider,
 } from "../types.js";
-import { ensureDir } from "../utils/index.js";
 import {
   MemoryService,
   type MemoryDirectories,
   type MemoryForkWorkspace,
 } from "./memoryService.js";
+import { ensureDir } from "../utils/index.js";
 
 interface MemoryAssetState {
   workspaceRoot: string;

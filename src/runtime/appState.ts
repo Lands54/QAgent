@@ -41,6 +41,7 @@ export interface AppState {
   lastUserPrompt?: string;
   currentTokenEstimate: number;
   autoCompactThresholdTokens: number;
+  helperActivities: string[];
 }
 
 export type AppEvent = never;
@@ -68,6 +69,7 @@ export function createEmptyState(cwd: string): AppState {
     shouldExit: false,
     currentTokenEstimate: 0,
     autoCompactThresholdTokens: 0,
+    helperActivities: [],
   };
 }
 

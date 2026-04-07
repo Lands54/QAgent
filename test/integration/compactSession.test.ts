@@ -7,6 +7,8 @@ import { PromptAssembler } from "../../src/context/promptAssembler.js";
 import { createMemorySessionAssetProvider } from "../../src/memory/index.js";
 import { AgentManager } from "../../src/runtime/agentManager.js";
 import { COMPACT_SUMMARY_PREFIX } from "../../src/runtime/compactSessionService.js";
+import { SessionService } from "../../src/session/index.js";
+import { ApprovalPolicy } from "../../src/tool/approvalPolicy.js";
 import type {
   LlmMessage,
   ModelClient,
@@ -15,8 +17,6 @@ import type {
   RuntimeConfig,
   UIMessage,
 } from "../../src/types.js";
-import { SessionService } from "../../src/session/index.js";
-import { ApprovalPolicy } from "../../src/tool/approvalPolicy.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -53,6 +53,8 @@ function buildConfig(
     },
     runtime: {
       maxAgentSteps: 4,
+      fetchMemoryMaxAgentSteps: 3,
+      autoMemoryForkMaxAgentSteps: 4,
       shellCommandTimeoutMs: 10_000,
       maxToolOutputChars: 2_000,
       maxConversationSummaryMessages: 10,

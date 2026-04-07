@@ -9,11 +9,13 @@
   "scripts": {
     "dev": "tsx src/cli/index.ts",
     "build": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "start": "node ./bin/qagent.js",
     "test": "vitest run",
     "test:architecture": "vitest run test/architecture",
     "test:watch": "vitest",
-    "check": "npm run build && npm run test"
+    "check": "npm run build && npm run lint && npm run test"
   },
   "dependencies": {
     "gray-matter": "^4.0.3",
@@ -22,12 +24,19 @@
     "react": "^18.3.1"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@types/node": "^24.6.0",
     "@types/react": "^18.3.12",
+    "eslint": "^9.39.4",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "globals": "^17.4.0",
     "ink-testing-library": "^4.0.0",
     "react-test-renderer": "^18.3.1",
     "tsx": "^4.19.2",
     "typescript": "^5.9.3",
+    "typescript-eslint": "^8.58.0",
     "vitest": "^2.1.8"
   }
 }

@@ -1,8 +1,8 @@
 import { render } from "ink";
 import { createElement } from "react";
 
-import type { CliOptions } from "../types.js";
 import { createAppController } from "../runtime/index.js";
+import type { CliOptions } from "../types.js";
 import { App } from "../ui/index.js";
 
 function printHelp(): void {

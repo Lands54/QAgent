@@ -48,9 +48,10 @@ export function MessageList({
   const visibleMessages = messages.slice(-maxItems);
 
   return (
-    <Box flexDirection="column" gap={1}>
+    <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" gap={1}>
+      <Text color="cyan">Conversation</Text>
       {visibleMessages.map((message) => (
-        <Box key={message.id} flexDirection="column">
+        <Box key={message.id} flexDirection="column" marginTop={1}>
           <Text color={roleColor(message.role)}>
             [{roleLabel(message.role)}]
             {message.title ? ` ${message.title}` : ""}
@@ -59,7 +60,7 @@ export function MessageList({
         </Box>
       ))}
       {draftAssistantText ? (
-        <Box flexDirection="column">
+        <Box flexDirection="column" marginTop={1}>
           <Text color="green">[AGENT][streaming]</Text>
           <Text>{draftAssistantText}</Text>
         </Box>

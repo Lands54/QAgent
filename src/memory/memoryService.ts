@@ -1,5 +1,4 @@
-import os from "node:os";
-import path from "node:path";
+import matter from "gray-matter";
 import {
   copyFile,
   mkdtemp,
@@ -8,8 +7,9 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
-import matter from "gray-matter";
 
 import type { MemoryRecord, ResolvedPaths, SkillScope } from "../types.js";
 import {

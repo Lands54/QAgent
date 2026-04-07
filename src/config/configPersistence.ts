@@ -66,3 +66,21 @@ export async function persistGlobalModelConfig(
     model: patch,
   });
 }
+
+export async function persistProjectRuntimeConfig(
+  paths: ResolvedPaths,
+  patch: Partial<RuntimeConfig["runtime"]>,
+): Promise<void> {
+  await patchConfigFile(paths.projectConfigPath, {
+    runtime: patch,
+  });
+}
+
+export async function persistGlobalRuntimeConfig(
+  paths: ResolvedPaths,
+  patch: Partial<RuntimeConfig["runtime"]>,
+): Promise<void> {
+  await patchConfigFile(paths.globalConfigPath, {
+    runtime: patch,
+  });
+}

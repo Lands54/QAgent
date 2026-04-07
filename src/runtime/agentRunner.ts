@@ -1,3 +1,8 @@
+import {
+  loadAgentInstructionLayers,
+  type PromptAssembler,
+} from "../context/index.js";
+import type { ApprovalPolicy, ToolRegistry } from "../tool/index.js";
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -11,8 +16,6 @@ import type {
   ToolMode,
   ToolResult,
 } from "../types.js";
-import { loadAgentInstructionLayers, PromptAssembler } from "../context/index.js";
-import type { ApprovalPolicy, ToolRegistry } from "../tool/index.js";
 
 interface AgentRunnerDependencies {
   config: RuntimeConfig;

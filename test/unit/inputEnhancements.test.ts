@@ -5,6 +5,7 @@ import {
   buildAutocompleteCandidates,
   completeInput,
   extractUserInputHistory,
+  getCompletionPreview,
   navigateInputHistory,
 } from "../../src/ui/inputEnhancements.js";
 
@@ -105,25 +106,36 @@ describe("inputEnhancements", () => {
   it("Tab 时能唯一补全 slash 命令", () => {
     const result = completeInput("/ex", []);
 
-    expect(result).toEqual({
-      nextValue: "/exit",
-      hint: "补全: /exit",
-    });
+    expect(result.nextValue).toBe("/exit");
+    expect(result.hint).toContain("/exit");
   });
 
   it("补全存在多个候选时会返回提示", () => {
     const result = completeInput("/tool confirm ", []);
 
     expect(result.nextValue).toBe("/tool confirm ");
-    expect(result.hint).toContain("/tool confirm always");
-    expect(result.hint).toContain("/tool confirm risky");
-    expect(result.hint).toContain("/tool confirm never");
+    const preview = getCompletionPreview("/tool confirm ", []);
+
+    expect(result.hint).toContain("Tab");
+    expect(result.cycleQuery).toBe("/tool confirm ");
+    expect(preview.suggestions.map((item) => item.value)).toContain("/tool confirm always");
+    expect(preview.suggestions.map((item) => item.value)).toContain("/tool confirm risky");
+    expect(preview.suggestions.map((item) => item.value)).toContain("/tool confirm never");
   });
 
   it("会包含新的 memory save 命令模板", () => {
     const candidates = buildAutocompleteCandidates([]);
 
     expect(candidates).toContain("/memory save --name= --description=");
+  });
+
+  it("会包含 helper agent debug 命令模板", () => {
+    const candidates = buildAutocompleteCandidates([]);
+
+    expect(candidates).toContain("/debug helper-agent status");
+    expect(candidates).toContain("/debug helper-agent autocleanup off");
+    expect(candidates).toContain("/debug helper-agent clear");
+    expect(candidates).toContain("/debug legacy clear");
   });
 
   it("会把 skill 名称加入动态补全候选", () => {
@@ -136,9 +148,39 @@ describe("inputEnhancements", () => {
     const result = completeInput("/skills show api", skills);
 
     expect(candidates).toContain("/skills show api-testing");
-    expect(result).toEqual({
-      nextValue: "/skills show api-testing",
-      hint: "补全: /skills show api-testing",
-    });
+    expect(result.nextValue).toBe("/skills show api-testing");
+    expect(result.hint).toContain("/skills show api-testing");
+  });
+
+  it("空输入时会给出默认推荐命令", () => {
+    const preview = getCompletionPreview("", []);
+
+    expect(preview.mode).toBe("idle");
+    expect(preview.suggestions.map((item) => item.value)).toContain("/help");
+    expect(preview.suggestions.map((item) => item.value)).toContain("/session status");
+    expect(preview.hint).toContain("待机态");
+  });
+
+  it("重复按 Tab 时会在多个候选之间轮换", () => {
+    const step1 = completeInput("/agent ", [], 0);
+    const step2 = completeInput(
+      "/agent ",
+      [],
+      step1.nextSuggestionIndex,
+      step1.cycleQuery,
+    );
+    const step3 = completeInput(
+      step2.nextValue,
+      [],
+      step2.nextSuggestionIndex,
+      step2.cycleQuery,
+    );
+
+    expect(step1.nextValue).toBe("/agent ");
+    expect(step1.cycleQuery).toBe("/agent ");
+    expect(step2.nextValue).not.toBe(step1.nextValue);
+    expect(step3.nextValue).not.toBe(step2.nextValue);
+    expect(step2.hint).toContain("补全:");
+    expect(step3.hint).toContain("补全:");
   });
 });

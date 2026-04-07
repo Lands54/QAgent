@@ -1,12 +1,6 @@
 import { EventEmitter } from "node:events";
 
-import type {
-  ApprovalMode,
-  CliOptions,
-  ModelClient,
-  ModelProvider,
-  RuntimeConfig,
-} from "../types.js";
+import { AgentManager } from "./agentManager.js";
 import {
   defaultBaseUrlForProvider,
   loadRuntimeConfig,
@@ -19,14 +13,19 @@ import { createModelClient } from "../model/index.js";
 import { SessionService } from "../session/index.js";
 import { SkillRegistry } from "../skills/index.js";
 import { ApprovalPolicy } from "../tool/index.js";
-import { createId } from "../utils/index.js";
-import { AgentManager } from "./agentManager.js";
-import { estimateMessagesTokens } from "./compactSessionService.js";
+import { AppStateAssembler } from "./application/appStateAssembler.js";
 import {
   createEmptyState,
   type AppState,
 } from "./appState.js";
 import { SlashCommandBus } from "./slashCommandBus.js";
+import type {
+  ApprovalMode,
+  CliOptions,
+  ModelClient,
+  ModelProvider,
+  RuntimeConfig,
+} from "../types.js";
 
 type Listener = (state: AppState) => void;
 
@@ -44,6 +43,7 @@ export class AppController {
   private readonly approvalPolicy: ApprovalPolicy;
   private readonly promptAssembler = new PromptAssembler();
   private readonly agentManager: AgentManager;
+  private readonly appStateAssembler = new AppStateAssembler();
   private modelClient: ModelClient;
   private state: AppState;
   private slashBus?: SlashCommandBus;
@@ -239,6 +239,12 @@ export class AppController {
       setAutoCompactHookEnabled: async (enabled) => {
         this.agentManager.setAutoCompactHookEnabled(enabled);
       },
+      getDebugStatus: async () => this.agentManager.getDebugStatus(),
+      setHelperAgentAutoCleanupEnabled: async (enabled) => {
+        this.agentManager.setHelperAgentAutoCleanupEnabled(enabled);
+      },
+      clearHelperAgents: async () => this.agentManager.clearHelperAgents(),
+      clearLegacyAgents: async () => this.agentManager.clearLegacyAgents(),
       setModelProvider: async (provider) => {
         await this.setModelProvider(provider);
       },
@@ -324,49 +330,18 @@ export class AppController {
         .filter((agent) => agent.pendingApproval)
         .map((agent) => [agent.id, agent.pendingApproval as NonNullable<typeof agent.pendingApproval>]),
     );
-
-    this.state = {
-      activeAgentId: activeView.id,
-      activeAgentKind: activeView.kind,
-      activeWorkingHeadId: activeRuntime.headId,
-      activeWorkingHeadName: activeView.name,
-      sessionId: activeRuntime.sessionId,
-      cwd: activeRuntime.getSnapshot().cwd,
-      shellCwd: activeView.shellCwd,
+    this.state = this.appStateAssembler.build({
+      cwd: this.config.cwd,
+      previousState: this.state,
+      activeRuntime,
+      activeView,
       approvalMode: this.approvalPolicy.getMode(),
-      status: {
-        mode: activeView.status,
-        detail: activeView.detail,
-        updatedAt: new Date().toISOString(),
-      },
-      uiMessages: [
-        ...(infoMessage
-          ? [
-              {
-                id: createId("ui"),
-                role: "info" as const,
-                content: infoMessage,
-                createdAt: new Date().toISOString(),
-              },
-            ]
-          : []),
-        ...activeRuntime.getSnapshot().uiMessages,
-      ],
-      draftAssistantText: activeRuntime.getDraftAssistantText(),
-      modelMessages: activeRuntime.getSnapshot().modelMessages,
       availableSkills: this.skillRegistry.getAll(),
-      sessionRef: activeRuntime.getRef(),
-      sessionHead: activeRuntime.getHead(),
-      pendingApproval: activeRuntime.getPendingApproval(),
       pendingApprovals,
       agents: this.agentManager.listAgents(),
-      shouldExit: this.state.shouldExit,
-      lastUserPrompt: activeRuntime.getSnapshot().lastUserPrompt,
-      currentTokenEstimate: estimateMessagesTokens(
-        activeRuntime.getSnapshot().modelMessages,
-      ),
+      infoMessage,
       autoCompactThresholdTokens: this.config.runtime.autoCompactThresholdTokens,
-    };
+    });
     this.events.emit("state", this.state);
   }
 }

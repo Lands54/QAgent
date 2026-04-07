@@ -1,6 +1,6 @@
+import matter from "gray-matter";
 import path from "node:path";
 
-import matter from "gray-matter";
 
 import type { ResolvedPaths, SkillManifest, SkillScope } from "../types.js";
 import { listDirectories, pathExists, readTextIfExists } from "../utils/index.js";

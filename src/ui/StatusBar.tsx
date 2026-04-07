@@ -27,19 +27,33 @@ export function StatusBar({
   skillCount,
   agentCount,
 }: StatusBarProps) {
+  const statusColor =
+    status.mode === "error"
+      ? "red"
+      : status.mode === "running"
+        ? "green"
+        : status.mode === "awaiting-approval"
+          ? "yellow"
+          : "gray";
+
   return (
     <Box
       borderStyle="round"
-      borderColor="gray"
+      borderColor={statusColor}
       paddingX={1}
-      justifyContent="space-between"
       flexDirection="column"
     >
-      <Text>
-        agent={workingHeadName ?? "N/A"} ({workingHeadId || "N/A"}) | kind={agentKind ?? "N/A"} | session={sessionId || "N/A"} | status={status.mode} | detail={status.detail}
+      <Text color={statusColor}>
+        Session Overview
       </Text>
       <Text>
-        ref={sessionRefLabel ?? "N/A"} | shell={shellCwd} | approval={approvalMode} | skills={skillCount} | agents={agentCount}
+        agent={workingHeadName ?? "N/A"} ({workingHeadId || "N/A"}) | kind={agentKind ?? "N/A"} | session={sessionId || "N/A"}
+      </Text>
+      <Text>
+        status={status.mode} | detail={status.detail} | ref={sessionRefLabel ?? "N/A"}
+      </Text>
+      <Text>
+        shell={shellCwd} | approval={approvalMode} | skills={skillCount} | agents={agentCount}
       </Text>
     </Box>
   );

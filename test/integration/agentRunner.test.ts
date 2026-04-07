@@ -3,6 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { PromptAssembler } from "../../src/context/promptAssembler.js";
+import { createMemorySessionAssetProvider } from "../../src/memory/index.js";
+import { AgentRunner } from "../../src/runtime/agentRunner.js";
+import { AgentManager } from "../../src/runtime/index.js";
+import { SessionService } from "../../src/session/index.js";
+import { SkillRegistry } from "../../src/skills/skillRegistry.js";
+import { ApprovalPolicy } from "../../src/tool/approvalPolicy.js";
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -16,13 +23,6 @@ import type {
   ToolCall,
   ToolResult,
 } from "../../src/types.js";
-import { PromptAssembler } from "../../src/context/promptAssembler.js";
-import { createMemorySessionAssetProvider } from "../../src/memory/index.js";
-import { AgentManager } from "../../src/runtime/index.js";
-import { AgentRunner } from "../../src/runtime/agentRunner.js";
-import { SessionService } from "../../src/session/index.js";
-import { SkillRegistry } from "../../src/skills/skillRegistry.js";
-import { ApprovalPolicy } from "../../src/tool/approvalPolicy.js";
 import {
   VALID_MOCK_SKILL_NAMES,
   buildMockSkillResolvedPaths,
@@ -97,9 +97,13 @@ describe("AgentRunner", () => {
       },
       runtime: {
         maxAgentSteps: 4,
+        fetchMemoryMaxAgentSteps: 3,
+        autoMemoryForkMaxAgentSteps: 4,
         shellCommandTimeoutMs: 10_000,
         maxToolOutputChars: 2_000,
         maxConversationSummaryMessages: 10,
+        autoCompactThresholdTokens: 120_000,
+        compactRecentKeepGroups: 8,
       },
       tool: {
         approvalMode: "always",

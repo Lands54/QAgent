@@ -1,9 +1,8 @@
-import { EventEmitter } from "node:events";
 import { render } from "ink-testing-library";
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 
-import type { AppState } from "../../src/runtime/appState.js";
-import { createEmptyState } from "../../src/runtime/appState.js";
+import { createEmptyState, type AppState } from "../../src/runtime/appState.js";
 import { App } from "../../src/ui/App.js";
 
 class FakeController {
@@ -71,6 +70,9 @@ describe("App", () => {
     expect(view.lastFrame()).toContain("history: ↑/↓");
     expect(view.lastFrame()).toContain("complete: Tab");
     expect(view.lastFrame()).toContain("tokens: 2400/120000 (2.0%)");
+    expect(view.lastFrame()).toContain("待机模式");
+    expect(view.lastFrame()).toContain("今天的热身动作");
+    expect(view.lastFrame()).toContain("现在是待机态");
   });
 
   it("在审批态显示明确的等待提示", () => {
@@ -179,6 +181,7 @@ describe("App", () => {
         updatedAt: new Date().toISOString(),
       },
     ];
+    state.helperActivities = ["fetching memory...", "saving memory..."];
 
     const view = render(<App controller={controller as never} />);
 

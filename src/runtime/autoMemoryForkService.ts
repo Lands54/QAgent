@@ -1,15 +1,18 @@
 import type {
-  LlmMessage,
   ApprovalMode,
+  LlmMessage,
   PromptProfile,
+  RuntimeConfig,
   SessionSnapshot,
   SessionWorkingHead,
   SkillManifest,
   UIMessage,
 } from "../types.js";
+import { HelperAgentCoordinator } from "./application/helperAgentCoordinator.js";
 
 interface AutoMemoryForkCoordinator {
   getBaseSystemPrompt(): string | undefined;
+  getRuntimeConfig(): RuntimeConfig;
   getRuntime(agentId: string): {
     getHead(): SessionWorkingHead;
     getSnapshot(): SessionSnapshot;
@@ -42,9 +45,8 @@ interface AutoMemoryForkCoordinator {
     },
   ): Promise<void>;
   cleanupCompletedAgent(agentId: string): Promise<void>;
+  shouldAutoCleanupHelperAgent(): boolean;
 }
-
-const AUTO_MEMORY_FORK_MAX_STEPS = 4;
 
 export interface AutoMemoryForkInput {
   sourceAgentId: string;
@@ -124,7 +126,8 @@ export class AutoMemoryForkService {
   public constructor(private readonly agentManager: AutoMemoryForkCoordinator) {}
 
   public async run(input: AutoMemoryForkInput): Promise<AutoMemoryForkResult> {
-    const forkAgent = await this.agentManager.spawnTaskAgent({
+    const helperCoordinator = new HelperAgentCoordinator(this.agentManager);
+    const { agentId, result: report } = await helperCoordinator.run({
       name: `auto-memory-${Date.now()}`,
       sourceAgentId: input.sourceAgentId,
       activate: false,
@@ -151,7 +154,8 @@ export class AutoMemoryForkService {
           systemPrompt: buildForkSystemPrompt(
             this.agentManager.getBaseSystemPrompt(),
           ),
-          maxAgentSteps: AUTO_MEMORY_FORK_MAX_STEPS,
+          maxAgentSteps:
+            this.agentManager.getRuntimeConfig().runtime.autoMemoryForkMaxAgentSteps,
           environment: {
             QAGENT_MEMORY_FORK_ROOT: memoryState.workspaceRoot ?? "",
             QAGENT_PROJECT_MEMORY_DIR: memoryState.projectMemoryDir,
@@ -159,43 +163,41 @@ export class AutoMemoryForkService {
           },
         };
       },
-    });
-    const forkHead = this.agentManager.getRuntime(forkAgent.id).getHead();
-    const memoryState = forkHead.assetState.memory as
-      | {
-          projectMemoryDir?: string;
-          globalMemoryDir?: string;
+      buildPrompt: (runtime) => {
+        const forkHead = runtime.getHead();
+        const memoryState = forkHead.assetState.memory as
+          | {
+              projectMemoryDir?: string;
+              globalMemoryDir?: string;
+            }
+          | undefined;
+        if (!memoryState?.projectMemoryDir || !memoryState.globalMemoryDir) {
+          throw new Error("自动 memory fork 缺少 memory asset state。");
         }
-      | undefined;
-    if (!memoryState?.projectMemoryDir || !memoryState.globalMemoryDir) {
-      throw new Error("自动 memory fork 缺少 memory asset state。");
-    }
-    const forkPrompt = buildForkUserPrompt({
-      lastUserPrompt: input.lastUserPrompt,
-      projectMemoryDir: memoryState.projectMemoryDir,
-      globalMemoryDir: memoryState.globalMemoryDir,
+        return buildForkUserPrompt({
+          lastUserPrompt: input.lastUserPrompt,
+          projectMemoryDir: memoryState.projectMemoryDir,
+          globalMemoryDir: memoryState.globalMemoryDir,
+        });
+      },
+      submitOptions: {
+        activate: false,
+      },
+      readResult: (runtime) => {
+        return runtime
+          .getSnapshot()
+          .modelMessages
+          .slice()
+          .reverse()
+          .find((message) => {
+            return message.role === "assistant" && message.content.trim().length > 0;
+          })?.content;
+      },
     });
 
-    try {
-      await this.agentManager.submitInputToAgent(forkAgent.id, forkPrompt, {
-        activate: false,
-      });
-      const report = this.agentManager
-        .getRuntime(forkAgent.id)
-        .getSnapshot()
-        .modelMessages
-        .slice()
-        .reverse()
-        .find((message) => {
-          return message.role === "assistant" && message.content.trim().length > 0;
-        })?.content;
-
-      return {
-        report,
-        agentId: forkAgent.id,
-      };
-    } finally {
-      await this.agentManager.cleanupCompletedAgent(forkAgent.id);
-    }
+    return {
+      report,
+      agentId,
+    };
   }
 }

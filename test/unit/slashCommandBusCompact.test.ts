@@ -23,6 +23,11 @@ function buildBus() {
       saveMemory: true,
       autoCompact: false,
     }),
+    getDebugStatus: async () => ({
+      helperAgentAutoCleanup: true,
+      helperAgentCount: 0,
+      legacyAgentCount: 0,
+    }),
     getApprovalMode: () => "always",
     getModelStatus: () => ({
       provider: "openai",
@@ -35,6 +40,7 @@ function buildBus() {
     setFetchMemoryHookEnabled: vi.fn(async () => {}),
     setSaveMemoryHookEnabled: vi.fn(async () => {}),
     setAutoCompactHookEnabled,
+    setHelperAgentAutoCleanupEnabled: vi.fn(async () => {}),
     setModelProvider: vi.fn(async () => {}),
     setModelName: vi.fn(async () => {}),
     setModelApiKey: vi.fn(async () => {}),
@@ -82,6 +88,15 @@ function buildBus() {
     })),
     listSessionLog: vi.fn(async () => []),
     compactSession,
+    clearHelperAgents: vi.fn(async () => ({
+      cleared: 0,
+      skippedRunning: 0,
+    })),
+    clearLegacyAgents: vi.fn(async () => ({
+      cleared: 0,
+      skippedRunning: 0,
+      skippedActive: 0,
+    })),
     createSessionBranch: vi.fn(async () => {
       throw new Error("not used");
     }),

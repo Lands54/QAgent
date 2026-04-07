@@ -1,48 +1,40 @@
-import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 
+import type { PromptAssembler } from "../context/index.js";
 import type {
-  AgentKind,
+  SessionService,
+  SessionCheckoutResult,
+  SessionInitializationResult,
+} from "../session/index.js";
+import type { ApprovalPolicy } from "../tool/index.js";
+import type {
   AgentViewState,
   ApprovalMode,
-  LlmMessage,
   MemoryRecord,
   ModelClient,
-  PromptProfile,
   RuntimeConfig,
   SessionHeadListView,
   SessionListView,
   SessionLogEntry,
   SessionRefInfo,
-  SessionSnapshot,
-  SessionWorkingHead,
   SkillManifest,
-  ToolMode,
   UIMessage,
 } from "../types.js";
-import { PromptAssembler } from "../context/index.js";
-import type {
-  SessionCheckoutResult,
-  SessionInitializationResult,
-} from "../session/index.js";
-import { SessionService } from "../session/index.js";
-import { ApprovalPolicy } from "../tool/index.js";
-import { createId } from "../utils/index.js";
-import { HeadAgentRuntime } from "./agentRuntime.js";
+import type { AgentRuntimeCallbacks, HeadAgentRuntime } from "./agentRuntime.js";
 import { AgentRuntimeFactory } from "./agentRuntimeFactory.js";
-import { AutoMemoryForkService } from "./autoMemoryForkService.js";
-import { CompactSessionService, type CompactSessionResult } from "./compactSessionService.js";
-import { FetchMemoryService } from "./fetchMemoryService.js";
+import {
+  AgentLifecycleService,
+  type SpawnAgentOptions,
+} from "./application/agentLifecycleService.js";
+import { AgentNavigationService } from "./application/agentNavigationService.js";
+import { AgentRegistry } from "./application/agentRegistry.js";
+import { HookPipeline } from "./application/hookPipeline.js";
+import {
+  CompactSessionService,
+  type CompactSessionResult,
+} from "./compactSessionService.js";
 
 type Listener = () => void;
-
-interface ManagedAgentEntry {
-  runtime: HeadAgentRuntime;
-  sourceAgentId?: string;
-  mergeIntoAgentId?: string;
-  mergeAssets?: string[];
-  mergePending?: boolean;
-}
 
 export interface AgentManagerInitializationInput {
   cwd: string;
@@ -51,63 +43,19 @@ export interface AgentManagerInitializationInput {
   resumeSessionId?: string;
 }
 
-export interface SpawnAgentOptions {
-  name: string;
-  sourceAgentId?: string;
-  activate?: boolean;
-  approvalMode?: ApprovalMode;
-  promptProfile?: PromptProfile;
-  toolMode?: ToolMode;
-  seedModelMessages?: LlmMessage[];
-  seedUiMessages?: UIMessage[];
-  lastUserPrompt?: string;
-  systemPrompt?: string;
-  maxAgentSteps?: number;
-  environment?: Record<string, string>;
-  mergeIntoAgentId?: string;
-  mergeAssets?: string[];
-  autoMemoryFork?: boolean;
-  retainOnCompletion?: boolean;
-  buildRuntimeOverrides?: (head: SessionWorkingHead) => {
-    promptProfile?: PromptProfile;
-    toolMode?: ToolMode;
-    systemPrompt?: string;
-    maxAgentSteps?: number;
-    environment?: Record<string, string>;
-  };
-}
-
-function computeAutoMemoryForkSourceHash(
-  snapshot: SessionSnapshot,
-): string | undefined {
-  if (!snapshot.lastUserPrompt || snapshot.modelMessages.length === 0) {
-    return undefined;
-  }
-
-  return createHash("sha1")
-    .update(
-      JSON.stringify({
-        lastUserPrompt: snapshot.lastUserPrompt,
-        modelMessages: snapshot.modelMessages.map((message) => ({
-          role: message.role,
-          content: message.content,
-          toolCallId: message.role === "tool" ? message.toolCallId : undefined,
-        })),
-      }),
-    )
-    .digest("hex");
-}
-
 export class AgentManager {
   private readonly events = new EventEmitter();
-  private readonly runtimes = new Map<string, ManagedAgentEntry>();
+  private readonly registry = new AgentRegistry();
   private readonly runtimeFactory: AgentRuntimeFactory;
+  private readonly navigation: AgentNavigationService;
+  private readonly lifecycle: AgentLifecycleService;
+  private readonly hookPipeline: HookPipeline;
   private readonly lastAutoMemoryForkSourceHashByAgent = new Map<string, string>();
   private readonly autoCompactFailureCountByAgent = new Map<string, number>();
   private fetchMemoryHookEnabled = true;
   private saveMemoryHookEnabled = true;
   private autoCompactHookEnabled = true;
-  private activeAgentId = "";
+  private helperAgentAutoCleanupEnabled = true;
 
   public constructor(
     private config: RuntimeConfig,
@@ -125,6 +73,36 @@ export class AgentManager {
       approvalPolicy,
       getAvailableSkills,
     );
+    this.navigation = new AgentNavigationService({
+      registry: this.registry,
+      sessionService,
+      runtimeFactory: this.runtimeFactory,
+      createRuntimeCallbacks: () => this.createRuntimeCallbacks(),
+      emitChange: () => this.emitChange(),
+    });
+    this.lifecycle = new AgentLifecycleService({
+      registry: this.registry,
+      navigation: this.navigation,
+      sessionService,
+      runtimeFactory: this.runtimeFactory,
+      createRuntimeCallbacks: () => this.createRuntimeCallbacks(),
+      emitChange: () => this.emitChange(),
+      lastAutoMemoryForkSourceHashByAgent:
+        this.lastAutoMemoryForkSourceHashByAgent,
+      autoCompactFailureCountByAgent: this.autoCompactFailureCountByAgent,
+    });
+    this.hookPipeline = new HookPipeline({
+      config,
+      coordinator: this,
+      getAvailableSkills: this.getAvailableSkills,
+      getFetchMemoryHookEnabled: () => this.fetchMemoryHookEnabled,
+      getSaveMemoryHookEnabled: () => this.saveMemoryHookEnabled,
+      getAutoCompactHookEnabled: () => this.autoCompactHookEnabled,
+      autoCompactFailureCountByAgent: this.autoCompactFailureCountByAgent,
+      lastAutoMemoryForkSourceHashByAgent:
+        this.lastAutoMemoryForkSourceHashByAgent,
+      emitChange: () => this.emitChange(),
+    });
   }
 
   public subscribe(listener: Listener): () => void {
@@ -138,7 +116,7 @@ export class AgentManager {
     input: AgentManagerInitializationInput,
   ): Promise<SessionInitializationResult> {
     const initialized = await this.sessionService.initialize(input);
-    this.activeAgentId = initialized.head.id;
+    this.registry.initializeActiveAgent(initialized.head.id);
 
     const headsView = await this.sessionService.listHeads(initialized.snapshot);
     for (const item of headsView.heads) {
@@ -157,7 +135,7 @@ export class AgentManager {
         this.createRuntimeCallbacks(),
         ref,
       );
-      this.runtimes.set(head.id, {
+      this.registry.set(head.id, {
         runtime,
       });
     }
@@ -167,11 +145,15 @@ export class AgentManager {
   }
 
   public getActiveAgentId(): string {
-    return this.activeAgentId;
+    return this.registry.getActiveAgentId();
   }
 
   public getBaseSystemPrompt(): string | undefined {
     return this.config.model.systemPrompt;
+  }
+
+  public getRuntimeConfig(): RuntimeConfig {
+    return this.config;
   }
 
   public getHookStatus(): {
@@ -183,6 +165,18 @@ export class AgentManager {
       fetchMemory: this.fetchMemoryHookEnabled,
       saveMemory: this.saveMemoryHookEnabled,
       autoCompact: this.autoCompactHookEnabled,
+    };
+  }
+
+  public getDebugStatus(): {
+    helperAgentAutoCleanup: boolean;
+    helperAgentCount: number;
+    legacyAgentCount: number;
+  } {
+    return {
+      helperAgentAutoCleanup: this.helperAgentAutoCleanupEnabled,
+      helperAgentCount: this.listHelperAgents().length,
+      legacyAgentCount: this.listLegacyAgents().length,
     };
   }
 
@@ -202,33 +196,49 @@ export class AgentManager {
     this.emitChange();
   }
 
+  public setHelperAgentAutoCleanupEnabled(enabled: boolean): void {
+    this.helperAgentAutoCleanupEnabled = enabled;
+    this.emitChange();
+  }
+
   public listAgents(): AgentViewState[] {
-    return [...this.runtimes.values()]
-      .map((entry) => entry.runtime.getViewState())
+    return this.registry
+      .listAgentViews()
       .filter((agent) => agent.status !== "closed")
       .sort((left, right) => {
-        if (left.id === this.activeAgentId) {
+        if (left.id === this.registry.getActiveAgentId()) {
           return -1;
         }
-        if (right.id === this.activeAgentId) {
+        if (right.id === this.registry.getActiveAgentId()) {
           return 1;
         }
         return left.name.localeCompare(right.name);
       });
   }
 
+  public listHelperAgents(): AgentViewState[] {
+    return this.listAgents().filter((agent) => Boolean(agent.helperType));
+  }
+
+  public listLegacyAgents(): AgentViewState[] {
+    return this.listAgents().filter((agent) => {
+      return !agent.helperType && agent.name.startsWith("legacy-");
+    });
+  }
+
   public getAgentStatus(agentId?: string): AgentViewState {
-    return this.requireRuntime(
-      this.resolveAgentId(agentId ?? this.activeAgentId),
-    ).getViewState();
+    const resolvedAgentId = agentId
+      ? this.navigation.resolveAgentId(agentId)
+      : this.registry.getActiveAgentId();
+    return this.registry.requireRuntime(resolvedAgentId).getViewState();
   }
 
   public getActiveRuntime(): HeadAgentRuntime {
-    return this.requireRuntime(this.activeAgentId);
+    return this.registry.getActiveRuntime();
   }
 
   public getRuntime(agentId: string): HeadAgentRuntime {
-    return this.requireRuntime(agentId);
+    return this.registry.requireRuntime(agentId);
   }
 
   public async rebuildModelRuntime(
@@ -241,21 +251,20 @@ export class AgentManager {
     this.config = config;
     this.modelClient = modelClient;
     this.runtimeFactory.updateSharedDependencies(config, modelClient);
-    for (const entry of this.runtimes.values()) {
-      await entry.runtime.updateModelRuntime(config, modelClient);
-    }
+    await Promise.all(
+      this.registry.getEntries().map(async (entry) => {
+        await this.runtimeFactory.refreshRuntime(entry.runtime, config, modelClient);
+      }),
+    );
     this.emitChange();
   }
 
   public hasBusyAgents(): boolean {
-    return [...this.runtimes.values()].some((entry) => {
-      const view = entry.runtime.getViewState();
-      return entry.runtime.isRunning() || Boolean(view.pendingApproval);
-    });
+    return this.registry.hasBusyAgents();
   }
 
   public async submitInputToActiveAgent(input: string): Promise<void> {
-    await this.submitInputToAgent(this.activeAgentId, input);
+    await this.submitInputToAgent(this.registry.getActiveAgentId(), input);
   }
 
   public async submitInputToAgent(
@@ -266,134 +275,87 @@ export class AgentManager {
       skipFetchMemoryHook?: boolean;
     },
   ): Promise<void> {
+    const resolvedAgentId = this.navigation.resolveAgentId(agentId);
     if (options?.activate) {
-      await this.switchAgent(agentId);
+      await this.navigation.switchAgent(resolvedAgentId);
     }
-    const runtime = this.requireRuntime(agentId);
-    const modelInputAppendix =
-      options?.skipFetchMemoryHook
-      || !this.fetchMemoryHookEnabled
-      || runtime.promptProfile !== "default"
-        ? undefined
-        : await new FetchMemoryService(this).run({
-            sourceAgentId: agentId,
-            userPrompt: input,
-          });
+    const runtime = this.registry.requireRuntime(resolvedAgentId);
+    const modelInputAppendix = await this.hookPipeline.buildModelInputAppendix(
+      runtime,
+      input,
+      options?.skipFetchMemoryHook,
+    );
     await runtime.submitInput(input, {
       modelInputAppendix,
     });
   }
 
   public async interruptAgent(agentId?: string): Promise<void> {
-    await this.requireRuntime(agentId ?? this.activeAgentId).interrupt();
+    const resolvedAgentId = agentId
+      ? this.navigation.resolveAgentId(agentId)
+      : this.registry.getActiveAgentId();
+    await this.registry.requireRuntime(resolvedAgentId).interrupt();
   }
 
   public async resumeAgent(agentId?: string): Promise<void> {
-    await this.requireRuntime(agentId ?? this.activeAgentId).resume();
+    const resolvedAgentId = agentId
+      ? this.navigation.resolveAgentId(agentId)
+      : this.registry.getActiveAgentId();
+    await this.registry.requireRuntime(resolvedAgentId).resume();
   }
 
   public async approvePendingRequest(
     approved: boolean,
-    agentId = this.activeAgentId,
+    agentId = this.registry.getActiveAgentId(),
   ): Promise<void> {
-    await this.requireRuntime(agentId).resolveApproval(approved);
+    const resolvedAgentId = this.navigation.resolveAgentId(agentId);
+    await this.registry.requireRuntime(resolvedAgentId).resolveApproval(approved);
   }
 
   public async clearActiveAgentUi(): Promise<void> {
-    await this.getActiveRuntime().clearUiMessages();
+    await this.registry.getActiveRuntime().clearUiMessages();
   }
 
-  public async appendUiMessagesToActiveAgent(messages: UIMessage[]): Promise<void> {
-    await this.getActiveRuntime().appendUiMessages(messages);
+  public async appendUiMessagesToActiveAgent(
+    messages: UIMessage[],
+  ): Promise<void> {
+    await this.registry.getActiveRuntime().appendUiMessages(messages);
   }
 
   public async flushCheckpointsOnExit(): Promise<void> {
-    for (const entry of this.runtimes.values()) {
-      await this.sessionService.flushCheckpointOnExit(entry.runtime.getSnapshot());
-    }
+    await this.lifecycle.flushCheckpointsOnExit();
   }
 
   public async dispose(): Promise<void> {
-    await Promise.all(
-      [...this.runtimes.values()].map(async (entry) => {
-        await entry.runtime.dispose();
-      }),
-    );
+    await this.lifecycle.disposeAll();
   }
 
   public async switchAgent(agentId: string): Promise<AgentViewState> {
-    agentId = this.resolveAgentId(agentId);
-    if (agentId === this.activeAgentId) {
-      return this.getAgentStatus(agentId);
-    }
-    const current = this.getActiveRuntime();
-    const result = await this.sessionService.switchHead(
-      agentId,
-      current.getSnapshot(),
-    );
-    let runtime = this.runtimes.get(agentId)?.runtime;
-    if (!runtime) {
-      runtime = await this.runtimeFactory.createFromSessionState(
-        result.head,
-        result.snapshot,
-        this.createRuntimeCallbacks(),
-        result.ref,
-      );
-      this.runtimes.set(agentId, {
-        runtime,
-      });
-    } else {
-      await runtime.replaceSnapshot(result.snapshot, result.head, result.ref);
-    }
-    this.activeAgentId = agentId;
-    this.emitChange();
-    return runtime.getViewState();
+    return this.navigation.switchAgent(agentId);
   }
 
   public async switchAgentRelative(offset: number): Promise<AgentViewState> {
-    const agents = this.getNavigableAgents();
-    if (agents.length === 0) {
-      throw new Error("当前没有可切换的 agent。");
-    }
-    const currentIndex = agents.findIndex((agent) => agent.id === this.activeAgentId);
-    if (currentIndex < 0) {
-      return this.switchAgent(agents[0]!.id);
-    }
-    const nextIndex = (currentIndex + offset + agents.length) % agents.length;
-    return this.switchAgent(agents[nextIndex]!.id);
+    return this.navigation.switchAgentRelative(offset);
   }
 
   public async spawnInteractiveAgent(
     options: SpawnAgentOptions,
   ): Promise<AgentViewState> {
-    return this.spawnAgent("interactive", options);
+    return this.lifecycle.spawnAgent("interactive", options);
   }
 
   public async spawnTaskAgent(
     options: SpawnAgentOptions,
   ): Promise<AgentViewState> {
-    return this.spawnAgent("task", options);
+    return this.lifecycle.spawnAgent("task", options);
   }
 
   public async closeAgent(agentId: string): Promise<AgentViewState> {
-    agentId = this.resolveAgentId(agentId);
-    const runtime = this.requireRuntime(agentId);
-    if (agentId === this.activeAgentId) {
-      throw new Error("当前 active agent 不能直接关闭。");
-    }
-    if (runtime.isRunning()) {
-      throw new Error("运行中的 agent 不能直接关闭，请先中断。");
-    }
-    await this.sessionService.closeHead(agentId);
-    await runtime.markClosed();
-    await runtime.dispose();
-    this.runtimes.delete(agentId);
-    this.emitChange();
-    return runtime.getViewState();
+    return this.lifecycle.closeAgent(agentId);
   }
 
   public async listMemory(limit?: number): Promise<MemoryRecord[]> {
-    return this.getActiveRuntime().listMemory(limit);
+    return this.registry.getActiveRuntime().listMemory(limit);
   }
 
   public async saveMemory(input: {
@@ -402,15 +364,18 @@ export class AgentManager {
     content: string;
     scope?: "project" | "global";
   }): Promise<MemoryRecord> {
-    return this.getActiveRuntime().saveMemory(input);
+    return this.registry.getActiveRuntime().saveMemory(input);
   }
 
   public async showMemory(name: string): Promise<MemoryRecord | undefined> {
-    return this.getActiveRuntime().showMemory(name);
+    return this.registry.getActiveRuntime().showMemory(name);
   }
 
   public async getSessionGraphStatus(agentId?: string): Promise<SessionRefInfo> {
-    const runtime = this.requireRuntime(agentId ?? this.activeAgentId);
+    const resolvedAgentId = agentId
+      ? this.navigation.resolveAgentId(agentId)
+      : this.registry.getActiveAgentId();
+    const runtime = this.registry.requireRuntime(resolvedAgentId);
     const ref = runtime.getRef();
     if (ref) {
       return ref;
@@ -419,19 +384,24 @@ export class AgentManager {
   }
 
   public async listSessionRefs(): Promise<SessionListView> {
-    return this.sessionService.listRefs(this.getActiveRuntime().getSnapshot());
+    return this.sessionService.listRefs(this.registry.getActiveRuntime().getSnapshot());
   }
 
   public async listSessionHeads(): Promise<SessionHeadListView> {
-    return this.sessionService.listHeads(this.getActiveRuntime().getSnapshot());
+    return this.sessionService.listHeads(
+      this.registry.getActiveRuntime().getSnapshot(),
+    );
   }
 
   public async listSessionLog(limit?: number): Promise<SessionLogEntry[]> {
     return this.sessionService.log(limit);
   }
 
-  public async compactSession(agentId = this.activeAgentId): Promise<CompactSessionResult> {
-    const runtime = this.requireRuntime(this.resolveAgentId(agentId));
+  public async compactSession(
+    agentId = this.registry.getActiveAgentId(),
+  ): Promise<CompactSessionResult> {
+    const resolvedAgentId = this.navigation.resolveAgentId(agentId);
+    const runtime = this.registry.requireRuntime(resolvedAgentId);
     if (runtime.promptProfile !== "default") {
       throw new Error("只有普通对话 agent 支持 compact。");
     }
@@ -450,7 +420,7 @@ export class AgentManager {
   }
 
   public async createSessionBranch(name: string): Promise<SessionRefInfo> {
-    const runtime = this.getActiveRuntime();
+    const runtime = this.registry.getActiveRuntime();
     const result = await this.sessionService.createBranch(
       name,
       runtime.getSnapshot(),
@@ -461,7 +431,7 @@ export class AgentManager {
   }
 
   public async forkSessionBranch(name: string): Promise<SessionRefInfo> {
-    const runtime = this.getActiveRuntime();
+    const runtime = this.registry.getActiveRuntime();
     const result = await this.sessionService.forkBranch(
       name,
       runtime.getSnapshot(),
@@ -472,49 +442,40 @@ export class AgentManager {
       this.createRuntimeCallbacks(),
       result.ref,
     );
-    this.runtimes.set(result.head.id, {
+    this.registry.set(result.head.id, {
       runtime: nextRuntime,
     });
-    this.activeAgentId = result.head.id;
+    this.registry.setActiveAgentId(result.head.id);
     this.emitChange();
     return result.ref;
   }
 
   public async checkoutSessionRef(ref: string): Promise<SessionCheckoutResult> {
-    const runtime = this.getActiveRuntime();
-    const result = await this.sessionService.checkout(
-      ref,
-      runtime.getSnapshot(),
-    );
+    const runtime = this.registry.getActiveRuntime();
+    const result = await this.sessionService.checkout(ref, runtime.getSnapshot());
     await runtime.replaceSnapshot(result.snapshot, result.head, result.ref);
     this.emitChange();
     return result;
   }
 
   public async createSessionTag(name: string): Promise<SessionRefInfo> {
-    const runtime = this.getActiveRuntime();
-    const result = await this.sessionService.createTag(
-      name,
-      runtime.getSnapshot(),
-    );
+    const runtime = this.registry.getActiveRuntime();
+    const result = await this.sessionService.createTag(name, runtime.getSnapshot());
     await runtime.refreshSessionState();
     this.emitChange();
     return result.ref;
   }
 
   public async mergeSessionRef(ref: string): Promise<SessionRefInfo> {
-    const runtime = this.getActiveRuntime();
-    const result = await this.sessionService.merge(
-      ref,
-      runtime.getSnapshot(),
-    );
+    const runtime = this.registry.getActiveRuntime();
+    const result = await this.sessionService.merge(ref, runtime.getSnapshot());
     await runtime.refreshSessionState();
     this.emitChange();
     return result.ref;
   }
 
   public async forkSessionHead(name: string): Promise<SessionRefInfo> {
-    const active = this.getActiveRuntime();
+    const active = this.registry.getActiveRuntime();
     const result = await this.sessionService.forkHead(name, {
       sourceHeadId: active.headId,
       activate: false,
@@ -530,7 +491,7 @@ export class AgentManager {
       this.createRuntimeCallbacks(),
       result.ref,
     );
-    this.runtimes.set(result.head.id, {
+    this.registry.set(result.head.id, {
       runtime,
     });
     this.emitChange();
@@ -538,14 +499,18 @@ export class AgentManager {
   }
 
   public async switchSessionHead(headId: string): Promise<SessionRefInfo> {
-    const view = await this.switchAgent(headId);
+    const view = await this.navigation.switchAgent(headId);
     return this.sessionService.getHeadStatus(view.headId);
   }
 
-  public async attachSessionHead(headId: string, ref: string): Promise<SessionRefInfo> {
-    const runtime = this.requireRuntime(headId);
+  public async attachSessionHead(
+    headId: string,
+    ref: string,
+  ): Promise<SessionRefInfo> {
+    const resolvedHeadId = this.navigation.resolveAgentId(headId);
+    const runtime = this.registry.requireRuntime(resolvedHeadId);
     const result = await this.sessionService.attachHead(
-      headId,
+      resolvedHeadId,
       ref,
       runtime.getSnapshot(),
     );
@@ -555,18 +520,20 @@ export class AgentManager {
   }
 
   public async detachSessionHead(headId: string): Promise<SessionRefInfo> {
-    const runtime = this.requireRuntime(headId);
-    const result = await this.sessionService.detachHead(headId);
+    const resolvedHeadId = this.navigation.resolveAgentId(headId);
+    const runtime = this.registry.requireRuntime(resolvedHeadId);
+    const result = await this.sessionService.detachHead(resolvedHeadId);
     await runtime.refreshSessionState();
     this.emitChange();
     return result.ref;
   }
 
   public async mergeSessionHead(sourceHeadId: string): Promise<SessionRefInfo> {
-    const runtime = this.getActiveRuntime();
+    const resolvedSourceHeadId = this.navigation.resolveAgentId(sourceHeadId);
+    const runtime = this.registry.getActiveRuntime();
     const result = await this.sessionService.mergeHeadIntoHead(
       runtime.headId,
-      sourceHeadId,
+      resolvedSourceHeadId,
       ["digest", "memory"],
       runtime.getSnapshot(),
     );
@@ -576,98 +543,92 @@ export class AgentManager {
   }
 
   public async closeSessionHead(headId: string): Promise<SessionRefInfo> {
-    const closed = await this.closeAgent(headId);
-    return this.sessionService.getHeadStatus(this.activeAgentId, this.getActiveRuntime().getSnapshot());
+    await this.lifecycle.closeAgent(headId);
+    return this.sessionService.getHeadStatus(
+      this.registry.getActiveAgentId(),
+      this.registry.getActiveRuntime().getSnapshot(),
+    );
   }
 
   public async cleanupCompletedAgent(agentId: string): Promise<void> {
-    await this.closeCompletedAgent(this.resolveAgentId(agentId));
+    await this.lifecycle.cleanupCompletedAgent(agentId);
   }
 
-  private async spawnAgent(
-    kind: AgentKind,
-    options: SpawnAgentOptions,
-  ): Promise<AgentViewState> {
-    const sourceAgentId = options.sourceAgentId ?? this.activeAgentId;
-    const result = await this.sessionService.forkHead(options.name, {
-      sourceHeadId: sourceAgentId,
-      activate: options.activate ?? false,
-      runtimeState: {
-        agentKind: kind,
-        autoMemoryFork: options.autoMemoryFork ?? (kind === "interactive"),
-        retainOnCompletion: options.retainOnCompletion ?? true,
-      },
-    });
-    const runtimeOverrides = options.buildRuntimeOverrides?.(result.head);
-    const runtime = await this.runtimeFactory.createRuntime({
-      head: result.head,
-      snapshot: result.snapshot,
-      initialRef: result.ref,
-      policy: {
-        kind,
-        autoMemoryFork: options.autoMemoryFork ?? (kind === "interactive"),
-        retainOnCompletion: options.retainOnCompletion ?? true,
-        promptProfile: runtimeOverrides?.promptProfile ?? options.promptProfile,
-        toolMode: runtimeOverrides?.toolMode ?? options.toolMode,
-        approvalMode: options.approvalMode,
-        systemPrompt: runtimeOverrides?.systemPrompt ?? options.systemPrompt,
-        maxAgentSteps: runtimeOverrides?.maxAgentSteps ?? options.maxAgentSteps,
-        environment: runtimeOverrides?.environment ?? options.environment,
-      },
-      callbacks: this.createRuntimeCallbacks(),
-    });
-    if (
-      options.seedModelMessages
-      || options.seedUiMessages
-      || options.lastUserPrompt !== undefined
-    ) {
-      await runtime.seedConversation({
-        modelMessages: options.seedModelMessages,
-        uiMessages: options.seedUiMessages,
-        lastUserPrompt: options.lastUserPrompt,
-      });
+  public shouldAutoCleanupHelperAgent(): boolean {
+    return this.helperAgentAutoCleanupEnabled;
+  }
+
+  public async clearHelperAgents(): Promise<{
+    cleared: number;
+    skippedRunning: number;
+  }> {
+    const helperAgents = this.listHelperAgents();
+    let cleared = 0;
+    let skippedRunning = 0;
+
+    for (const agent of helperAgents) {
+      const runtime = this.registry.requireRuntime(agent.id);
+      if (runtime.isRunning()) {
+        skippedRunning += 1;
+        continue;
+      }
+      await this.lifecycle.cleanupCompletedAgent(agent.id);
+      if (!this.registry.getEntry(agent.id)) {
+        cleared += 1;
+      }
     }
-    this.runtimes.set(result.head.id, {
-      runtime,
-      sourceAgentId,
-      mergeIntoAgentId: options.mergeIntoAgentId,
-      mergeAssets: options.mergeAssets,
-      mergePending: Boolean(options.mergeIntoAgentId),
-    });
-    await this.sessionService.updateHeadRuntimeState(result.head.id, {
-      agentKind: kind,
-      autoMemoryFork: options.autoMemoryFork ?? (kind === "interactive"),
-      retainOnCompletion: options.retainOnCompletion ?? true,
-      promptProfile: runtimeOverrides?.promptProfile ?? options.promptProfile,
-      toolMode: runtimeOverrides?.toolMode ?? options.toolMode ?? "shell",
-    });
-    if (options.activate) {
-      this.activeAgentId = result.head.id;
-    }
+
     this.emitChange();
-    return runtime.getViewState();
+    return {
+      cleared,
+      skippedRunning,
+    };
+  }
+
+  public async clearLegacyAgents(): Promise<{
+    cleared: number;
+    skippedRunning: number;
+    skippedActive: number;
+  }> {
+    const legacyAgents = this.listLegacyAgents();
+    let cleared = 0;
+    let skippedRunning = 0;
+    let skippedActive = 0;
+
+    for (const agent of legacyAgents) {
+      if (agent.id === this.registry.getActiveAgentId()) {
+        skippedActive += 1;
+        continue;
+      }
+      const runtime = this.registry.requireRuntime(agent.id);
+      if (runtime.isRunning()) {
+        skippedRunning += 1;
+        continue;
+      }
+      await this.lifecycle.closeAgent(agent.id);
+      if (!this.registry.getEntry(agent.id)) {
+        cleared += 1;
+      }
+    }
+
+    this.emitChange();
+    return {
+      cleared,
+      skippedRunning,
+      skippedActive,
+    };
   }
 
   private async handleRuntimeCompleted(runtime: HeadAgentRuntime): Promise<void> {
-    const entry = this.runtimes.get(runtime.agentId);
+    const entry = this.registry.getEntry(runtime.agentId);
     if (!entry) {
       return;
     }
 
-    if (
-      this.saveMemoryHookEnabled
-      && runtime.kind === "interactive"
-      && runtime.autoMemoryFork
-    ) {
-      await this.runAutoMemoryForkIfNeeded(runtime.agentId);
-    }
+    await this.hookPipeline.handleRuntimeCompleted(runtime);
 
-    if (
-      runtime.kind === "task"
-      && entry.mergeIntoAgentId
-      && entry.mergePending
-    ) {
-      const targetRuntime = this.requireRuntime(entry.mergeIntoAgentId);
+    if (runtime.kind === "task" && entry.mergeIntoAgentId && entry.mergePending) {
+      const targetRuntime = this.registry.requireRuntime(entry.mergeIntoAgentId);
       await this.sessionService.mergeHeadIntoHead(
         targetRuntime.headId,
         runtime.headId,
@@ -678,79 +639,9 @@ export class AgentManager {
       await targetRuntime.refreshSessionState();
       this.emitChange();
     }
-
   }
 
-  private async maybeAutoCompactBeforeModelTurn(runtime: HeadAgentRuntime): Promise<void> {
-    if (!this.autoCompactHookEnabled || runtime.promptProfile !== "default") {
-      return;
-    }
-    const failureCount = this.autoCompactFailureCountByAgent.get(runtime.agentId) ?? 0;
-    if (failureCount >= 3) {
-      return;
-    }
-    try {
-      const result = await new CompactSessionService(this, this.config).run({
-        targetAgentId: runtime.agentId,
-        reason: "auto",
-        force: false,
-      });
-      if (result.compacted) {
-        this.autoCompactFailureCountByAgent.delete(runtime.agentId);
-        await runtime.refreshSessionState();
-        this.emitChange();
-      }
-    } catch (error) {
-      this.autoCompactFailureCountByAgent.set(runtime.agentId, failureCount + 1);
-      await runtime.appendUiMessages([
-        {
-          id: createId("ui"),
-          role: "error",
-          content: `自动 compact 失败：${(error as Error).message}`,
-          createdAt: new Date().toISOString(),
-        },
-      ]);
-      this.emitChange();
-    }
-  }
-
-  private async runAutoMemoryForkIfNeeded(agentId: string): Promise<void> {
-    const runtime = this.requireRuntime(agentId);
-    const snapshot = runtime.getSnapshot();
-    const sourceHash = computeAutoMemoryForkSourceHash(snapshot);
-    if (!sourceHash || sourceHash === this.lastAutoMemoryForkSourceHashByAgent.get(agentId)) {
-      return;
-    }
-
-    const service = new AutoMemoryForkService(this);
-    try {
-      await service.run({
-        sourceAgentId: agentId,
-        targetAgentId: agentId,
-        targetSnapshot: snapshot,
-        availableSkills: this.getAvailableSkills(),
-        lastUserPrompt: snapshot.lastUserPrompt,
-        modelMessages: snapshot.modelMessages,
-      });
-      this.lastAutoMemoryForkSourceHashByAgent.set(agentId, sourceHash);
-      await runtime.refreshSessionState();
-    } catch (error) {
-      await runtime.seedConversation({
-        uiMessages: [
-          ...snapshot.uiMessages,
-          {
-            id: createId("ui"),
-            role: "error",
-            content: `自动 memory fork 失败：${(error as Error).message}`,
-            createdAt: new Date().toISOString(),
-          },
-        ],
-      });
-    }
-    this.emitChange();
-  }
-
-  private createRuntimeCallbacks() {
+  private createRuntimeCallbacks(): AgentRuntimeCallbacks {
     return {
       onStateChanged: () => {
         this.emitChange();
@@ -759,98 +650,12 @@ export class AgentManager {
         await this.handleRuntimeCompleted(runtime);
       },
       onBeforeModelTurn: async (runtime: HeadAgentRuntime) => {
-        await this.maybeAutoCompactBeforeModelTurn(runtime);
+        await this.hookPipeline.handleBeforeModelTurn(runtime);
       },
     };
   }
 
-  private requireRuntime(agentId: string): HeadAgentRuntime {
-    const runtime = this.runtimes.get(agentId)?.runtime;
-    if (!runtime) {
-      throw new Error(`未找到 agent：${agentId}`);
-    }
-    return runtime;
-  }
-
-  private resolveAgentId(identifier: string): string {
-    if (this.runtimes.has(identifier)) {
-      return identifier;
-    }
-
-    const matched = [...this.runtimes.values()]
-      .map((entry) => entry.runtime.getViewState())
-      .filter((agent) => agent.status !== "closed" && agent.name === identifier);
-    if (matched.length === 1) {
-      return matched[0]!.id;
-    }
-    if (matched.length > 1) {
-      throw new Error(`存在多个同名 agent：${identifier}，请改用 agent id。`);
-    }
-    throw new Error(`未找到 agent：${identifier}`);
-  }
-
-  private getNavigableAgents(): AgentViewState[] {
-    return [...this.runtimes.values()]
-      .map((entry) => entry.runtime.getViewState())
-      .filter((agent) => agent.status !== "closed")
-      .sort((left, right) => {
-        const helperDiff = Number(Boolean(left.helperType)) - Number(Boolean(right.helperType));
-        if (helperDiff !== 0) {
-          return helperDiff;
-        }
-        return left.name.localeCompare(right.name);
-      });
-  }
-
   private emitChange(): void {
     this.events.emit("change");
-  }
-
-  private async closeCompletedAgent(agentId: string): Promise<void> {
-    const entry = this.runtimes.get(agentId);
-    if (!entry) {
-      return;
-    }
-    const runtime = entry.runtime;
-    if (runtime.isRunning()) {
-      return;
-    }
-
-    if (this.activeAgentId === agentId) {
-      const fallbackAgentId = this.pickFallbackAgentId(agentId, entry);
-      if (!fallbackAgentId) {
-        return;
-      }
-      await this.switchAgent(fallbackAgentId);
-    }
-
-    await this.sessionService.closeHead(agentId);
-    await runtime.markClosed();
-    await runtime.dispose();
-    this.runtimes.delete(agentId);
-    this.lastAutoMemoryForkSourceHashByAgent.delete(agentId);
-    this.autoCompactFailureCountByAgent.delete(agentId);
-    this.emitChange();
-  }
-
-  private pickFallbackAgentId(
-    agentId: string,
-    entry: ManagedAgentEntry,
-  ): string | undefined {
-    const preferred = [
-      entry.mergeIntoAgentId,
-      entry.sourceAgentId,
-      ...this.getNavigableAgents()
-        .map((agent) => agent.id)
-        .filter((id) => id !== agentId),
-    ].filter((id): id is string => Boolean(id));
-
-    return preferred.find((id) => {
-      const runtime = this.runtimes.get(id)?.runtime;
-      if (!runtime) {
-        return false;
-      }
-      return runtime.getViewState().status !== "closed";
-    });
   }
 }

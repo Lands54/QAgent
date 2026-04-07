@@ -5,7 +5,26 @@ import { SkillRegistry } from "../../src/skills/skillRegistry.js";
 import type { MemoryRecord } from "../../src/types.js";
 import { buildMockSkillResolvedPaths } from "../helpers/mockSkillFixture.js";
 
-function buildSessionDeps() {
+type SlashCommandDeps = ConstructorParameters<typeof SlashCommandBus>[0];
+
+function buildSessionDeps(): Pick<
+  SlashCommandDeps,
+  | "getSessionGraphStatus"
+  | "listSessionRefs"
+  | "listSessionLog"
+  | "createSessionBranch"
+  | "forkSessionBranch"
+  | "checkoutSessionRef"
+  | "createSessionTag"
+  | "mergeSessionRef"
+  | "listSessionHeads"
+  | "forkSessionHead"
+  | "switchSessionHead"
+  | "attachSessionHead"
+  | "detachSessionHead"
+  | "mergeSessionHead"
+  | "closeSessionHead"
+> {
   return {
     getSessionGraphStatus: vi.fn(async () => ({
       mode: "branch" as const,
@@ -200,40 +219,162 @@ function buildSessionDeps() {
   };
 }
 
+function buildBus(
+  overrides: Partial<SlashCommandDeps> = {},
+): {
+  bus: SlashCommandBus;
+  deps: SlashCommandDeps;
+} {
+  const deps: SlashCommandDeps = {
+    getSessionId: () => "session_demo",
+    getActiveHeadId: () => "head_main",
+    getActiveAgentId: () => "head_main",
+    getShellCwd: () => "/tmp/project",
+    getHookStatus: () => ({
+      fetchMemory: true,
+      saveMemory: true,
+      autoCompact: true,
+    }),
+    getDebugStatus: async () => ({
+      helperAgentAutoCleanup: true,
+      helperAgentCount: 0,
+      legacyAgentCount: 0,
+    }),
+    getApprovalMode: () => "always",
+    getModelStatus: () => ({
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      baseUrl: "https://api.openai.com/v1",
+    }),
+    getStatusLine: () => "idle",
+    getAvailableSkills: () => [],
+    setApprovalMode: vi.fn(async () => {}),
+    setFetchMemoryHookEnabled: vi.fn(async () => {}),
+    setSaveMemoryHookEnabled: vi.fn(async () => {}),
+    setAutoCompactHookEnabled: vi.fn(async () => {}),
+    setHelperAgentAutoCleanupEnabled: vi.fn(async () => {}),
+    setModelProvider: vi.fn(async () => {}),
+    setModelName: vi.fn(async () => {}),
+    setModelApiKey: vi.fn(async () => {}),
+    listMemory: vi.fn(async () => []),
+    saveMemory: vi.fn(async () => {
+      throw new Error("not used");
+    }),
+    showMemory: vi.fn(async () => undefined),
+    getAgentStatus: vi.fn(async () => ({
+      id: "head_main",
+      headId: "head_main",
+      sessionId: "session_demo",
+      name: "main",
+      kind: "interactive",
+      status: "idle",
+      autoMemoryFork: true,
+      retainOnCompletion: true,
+      detail: "idle",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    })),
+    listAgents: vi.fn(async () => []),
+    spawnAgent: vi.fn(async () => ({
+      id: "head_worker",
+      headId: "head_worker",
+      sessionId: "session_worker",
+      name: "worker",
+      kind: "task",
+      status: "idle",
+      autoMemoryFork: false,
+      retainOnCompletion: true,
+      detail: "idle",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    })),
+    switchAgent: vi.fn(async () => ({
+      id: "head_worker",
+      headId: "head_worker",
+      sessionId: "session_worker",
+      name: "worker",
+      kind: "task",
+      status: "idle",
+      autoMemoryFork: false,
+      retainOnCompletion: true,
+      detail: "idle",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    })),
+    switchAgentRelative: vi.fn(async () => ({
+      id: "head_worker",
+      headId: "head_worker",
+      sessionId: "session_worker",
+      name: "worker",
+      kind: "task",
+      status: "idle",
+      autoMemoryFork: false,
+      retainOnCompletion: true,
+      detail: "idle",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    })),
+    closeAgent: vi.fn(async () => ({
+      id: "head_worker",
+      headId: "head_worker",
+      sessionId: "session_worker",
+      name: "worker",
+      kind: "task",
+      status: "closed",
+      autoMemoryFork: false,
+      retainOnCompletion: true,
+      detail: "closed",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    })),
+    interruptAgent: vi.fn(async () => {}),
+    resumeAgent: vi.fn(async () => {}),
+    compactSession: vi.fn(async () => ({
+      compacted: true,
+      agentId: "head_compact",
+      beforeTokens: 1800,
+      afterTokens: 420,
+      keptGroups: 1,
+      removedGroups: 3,
+    })),
+    clearHelperAgents: vi.fn(async () => ({
+      cleared: 0,
+      skippedRunning: 0,
+    })),
+    clearLegacyAgents: vi.fn(async () => ({
+      cleared: 0,
+      skippedRunning: 0,
+      skippedActive: 0,
+    })),
+    ...buildSessionDeps(),
+    ...overrides,
+  };
+
+  return {
+    bus: new SlashCommandBus(deps),
+    deps,
+  };
+}
+
 describe("SlashCommandBus", () => {
   it("支持查看模型状态", async () => {
-    const sessionDeps = buildSessionDeps();
-    const bus = new SlashCommandBus({
-      getSessionId: () => "session_demo",
-      getActiveHeadId: () => "head_main",
-      getShellCwd: () => "/tmp/project",
-      getHookStatus: () => ({
-        fetchMemory: true,
-        saveMemory: true,
-      }),
-      getApprovalMode: () => "always",
+    const { bus } = buildBus({
       getModelStatus: () => ({
         provider: "openrouter",
         model: "openai/gpt-5",
         baseUrl: "https://openrouter.ai/api/v1",
         apiKeyMasked: "sk-a...1234",
       }),
-      getStatusLine: () => "idle",
-      getAvailableSkills: () => [],
-      setApprovalMode: vi.fn(async () => {}),
-      setFetchMemoryHookEnabled: vi.fn(async () => {}),
-      setSaveMemoryHookEnabled: vi.fn(async () => {}),
-      setModelProvider: vi.fn(async () => {}),
-      setModelName: vi.fn(async () => {}),
-      setModelApiKey: vi.fn(async () => {}),
-      listMemory: vi.fn(async () => []),
-      saveMemory: vi.fn(async () => {
-        throw new Error("not used");
-      }),
-      showMemory: vi.fn(async () => undefined),
-      interruptAgent: vi.fn(async () => {}),
-      resumeAgent: vi.fn(async () => {}),
-      ...sessionDeps,
     });
 
     const result = await bus.execute("/model status");
@@ -244,41 +385,13 @@ describe("SlashCommandBus", () => {
   });
 
   it("支持通过 slash 更新 provider / model / apikey", async () => {
-    const sessionDeps = buildSessionDeps();
     const setModelProvider = vi.fn(async () => {});
     const setModelName = vi.fn(async () => {});
     const setModelApiKey = vi.fn(async () => {});
-
-    const bus = new SlashCommandBus({
-      getSessionId: () => "session_demo",
-      getActiveHeadId: () => "head_main",
-      getShellCwd: () => "/tmp/project",
-      getHookStatus: () => ({
-        fetchMemory: true,
-        saveMemory: true,
-      }),
-      getApprovalMode: () => "always",
-      getModelStatus: () => ({
-        provider: "openai",
-        model: "gpt-4.1-mini",
-        baseUrl: "https://api.openai.com/v1",
-      }),
-      getStatusLine: () => "idle",
-      getAvailableSkills: () => [],
-      setApprovalMode: vi.fn(async () => {}),
-      setFetchMemoryHookEnabled: vi.fn(async () => {}),
-      setSaveMemoryHookEnabled: vi.fn(async () => {}),
+    const { bus } = buildBus({
       setModelProvider,
       setModelName,
       setModelApiKey,
-      listMemory: vi.fn(async () => []),
-      saveMemory: vi.fn(async () => {
-        throw new Error("not used");
-      }),
-      showMemory: vi.fn(async () => undefined),
-      interruptAgent: vi.fn(async () => {}),
-      resumeAgent: vi.fn(async () => {}),
-      ...sessionDeps,
     });
 
     await bus.execute("/model provider openrouter");
@@ -291,7 +404,6 @@ describe("SlashCommandBus", () => {
   });
 
   it("支持新的 memory save/list/show 语法", async () => {
-    const sessionDeps = buildSessionDeps();
     const savedRecord: MemoryRecord = {
       id: "reply-language",
       name: "reply-language",
@@ -307,35 +419,10 @@ describe("SlashCommandBus", () => {
     const listMemory = vi.fn(async () => [savedRecord]);
     const saveMemory = vi.fn(async () => savedRecord);
     const showMemory = vi.fn(async () => savedRecord);
-
-    const bus = new SlashCommandBus({
-      getSessionId: () => "session_demo",
-      getActiveHeadId: () => "head_main",
-      getShellCwd: () => "/tmp/project",
-      getHookStatus: () => ({
-        fetchMemory: true,
-        saveMemory: true,
-      }),
-      getApprovalMode: () => "always",
-      getModelStatus: () => ({
-        provider: "openai",
-        model: "gpt-4.1-mini",
-        baseUrl: "https://api.openai.com/v1",
-      }),
-      getStatusLine: () => "idle",
-      getAvailableSkills: () => [],
-      setApprovalMode: vi.fn(async () => {}),
-      setFetchMemoryHookEnabled: vi.fn(async () => {}),
-      setSaveMemoryHookEnabled: vi.fn(async () => {}),
-      setModelProvider: vi.fn(async () => {}),
-      setModelName: vi.fn(async () => {}),
-      setModelApiKey: vi.fn(async () => {}),
+    const { bus } = buildBus({
       listMemory,
       saveMemory,
       showMemory,
-      interruptAgent: vi.fn(async () => {}),
-      resumeAgent: vi.fn(async () => {}),
-      ...sessionDeps,
     });
 
     const saveResult = await bus.execute(
@@ -356,99 +443,100 @@ describe("SlashCommandBus", () => {
       "reply-language | project | 偏好使用中文回复",
     );
     expect(showResult.messages[0]?.content).toContain("name: reply-language");
-    expect(showResult.messages[0]?.content).toContain(
-      "description: 偏好使用中文回复",
-    );
+    expect(showResult.messages[0]?.content).toContain("description: 偏好使用中文回复");
     expect(showResult.messages[0]?.content).toContain("MEMORY.md");
   });
 
-  it("支持查看并切换 fetch/save memory hook", async () => {
-    const sessionDeps = buildSessionDeps();
+  it("支持查看并切换 helper hooks", async () => {
     const setFetchMemoryHookEnabled = vi.fn(async () => {});
     const setSaveMemoryHookEnabled = vi.fn(async () => {});
-    const bus = new SlashCommandBus({
-      getSessionId: () => "session_demo",
-      getActiveHeadId: () => "head_main",
-      getShellCwd: () => "/tmp/project",
+    const setAutoCompactHookEnabled = vi.fn(async () => {});
+    const { bus } = buildBus({
       getHookStatus: () => ({
         fetchMemory: true,
         saveMemory: false,
+        autoCompact: true,
       }),
-      getApprovalMode: () => "always",
-      getModelStatus: () => ({
-        provider: "openai",
-        model: "gpt-4.1-mini",
-        baseUrl: "https://api.openai.com/v1",
-      }),
-      getStatusLine: () => "idle",
-      getAvailableSkills: () => [],
-      setApprovalMode: vi.fn(async () => {}),
       setFetchMemoryHookEnabled,
       setSaveMemoryHookEnabled,
-      setModelProvider: vi.fn(async () => {}),
-      setModelName: vi.fn(async () => {}),
-      setModelApiKey: vi.fn(async () => {}),
-      listMemory: vi.fn(async () => []),
-      saveMemory: vi.fn(async () => {
-        throw new Error("not used");
-      }),
-      showMemory: vi.fn(async () => undefined),
-      interruptAgent: vi.fn(async () => {}),
-      resumeAgent: vi.fn(async () => {}),
-      ...sessionDeps,
+      setAutoCompactHookEnabled,
     });
 
     const statusResult = await bus.execute("/hook status");
     const fetchResult = await bus.execute("/hook fetch-memory off");
     const saveResult = await bus.execute("/hook save-memory on");
+    const compactResult = await bus.execute("/hook auto-compact off");
 
     expect(statusResult.messages[0]?.content).toContain("fetch-memory: on");
     expect(statusResult.messages[0]?.content).toContain("save-memory: off");
+    expect(statusResult.messages[0]?.content).toContain("auto-compact: on");
     expect(setFetchMemoryHookEnabled).toHaveBeenCalledWith(false);
     expect(setSaveMemoryHookEnabled).toHaveBeenCalledWith(true);
-    expect(fetchResult.messages[0]?.content).toContain(
-      "fetch-memory hook 已切换为 off",
+    expect(setAutoCompactHookEnabled).toHaveBeenCalledWith(false);
+    expect(fetchResult.messages[0]?.content).toContain("fetch-memory hook 已切换为 off");
+    expect(saveResult.messages[0]?.content).toContain("save-memory hook 已切换为 on");
+    expect(compactResult.messages[0]?.content).toContain("auto-compact hook 已切换为 off");
+  });
+
+  it("支持 helper agent debug 命令", async () => {
+    const getDebugStatus = vi.fn(async () => ({
+      helperAgentAutoCleanup: false,
+      helperAgentCount: 3,
+      legacyAgentCount: 2,
+    }));
+    const setHelperAgentAutoCleanupEnabled = vi.fn(async () => {});
+    const clearHelperAgents = vi.fn(async () => ({
+      cleared: 2,
+      skippedRunning: 1,
+    }));
+    const { bus } = buildBus({
+      getDebugStatus,
+      setHelperAgentAutoCleanupEnabled,
+      clearHelperAgents,
+    });
+
+    const statusResult = await bus.execute("/debug helper-agent status");
+    const toggleResult = await bus.execute("/debug helper-agent autocleanup on");
+    const clearResult = await bus.execute("/debug helper-agent clear");
+
+    expect(getDebugStatus).toHaveBeenCalledTimes(1);
+    expect(statusResult.messages[0]?.content).toContain(
+      "helper-agent autocleanup: off",
     );
-    expect(saveResult.messages[0]?.content).toContain(
-      "save-memory hook 已切换为 on",
+    expect(statusResult.messages[0]?.content).toContain("helper-agent count: 3");
+    expect(statusResult.messages[0]?.content).toContain("legacy-agent count: 2");
+    expect(setHelperAgentAutoCleanupEnabled).toHaveBeenCalledWith(true);
+    expect(toggleResult.messages[0]?.content).toContain(
+      "helper-agent autocleanup 已切换为 on",
     );
+    expect(clearHelperAgents).toHaveBeenCalledTimes(1);
+    expect(clearResult.messages[0]?.content).toContain("已清理 2 个 helper agent");
+    expect(clearResult.messages[0]?.content).toContain("跳过 1 个运行中的 helper agent");
+  });
+
+  it("支持清理 legacy agent", async () => {
+    const clearLegacyAgents = vi.fn(async () => ({
+      cleared: 3,
+      skippedRunning: 1,
+      skippedActive: 1,
+    }));
+    const { bus } = buildBus({
+      clearLegacyAgents,
+    });
+
+    const result = await bus.execute("/debug legacy clear");
+
+    expect(clearLegacyAgents).toHaveBeenCalledTimes(1);
+    expect(result.messages[0]?.content).toContain("已清理 3 个 legacy agent");
+    expect(result.messages[0]?.content).toContain("跳过 1 个运行中的 legacy agent");
+    expect(result.messages[0]?.content).toContain("跳过 1 个当前激活的 legacy agent");
   });
 
   it("支持列出并查看 mock skill 元信息", async () => {
-    const sessionDeps = buildSessionDeps();
     const registry = new SkillRegistry(buildMockSkillResolvedPaths());
     await registry.refresh();
-
-    const bus = new SlashCommandBus({
-      getSessionId: () => "session_demo",
-      getActiveHeadId: () => "head_main",
-      getShellCwd: () => "/tmp/project",
-      getHookStatus: () => ({
-        fetchMemory: true,
-        saveMemory: true,
-      }),
-      getApprovalMode: () => "always",
-      getModelStatus: () => ({
-        provider: "openai",
-        model: "gpt-4.1-mini",
-        baseUrl: "https://api.openai.com/v1",
-      }),
-      getStatusLine: () => "idle",
+    const { bus } = buildBus({
       getAvailableSkills: () => registry.getAll(),
-      setApprovalMode: vi.fn(async () => {}),
-      setFetchMemoryHookEnabled: vi.fn(async () => {}),
-      setSaveMemoryHookEnabled: vi.fn(async () => {}),
-      setModelProvider: vi.fn(async () => {}),
-      setModelName: vi.fn(async () => {}),
-      setModelApiKey: vi.fn(async () => {}),
-      listMemory: vi.fn(async () => []),
-      saveMemory: vi.fn(async () => {
-        throw new Error("not used");
-      }),
-      showMemory: vi.fn(async () => undefined),
-      interruptAgent: vi.fn(async () => {}),
-      resumeAgent: vi.fn(async () => {}),
-      ...sessionDeps,
     });
 
     const listResult = await bus.execute("/skills list");
@@ -463,38 +551,7 @@ describe("SlashCommandBus", () => {
   });
 
   it("支持 session 图命令", async () => {
-    const sessionDeps = buildSessionDeps();
-    const bus = new SlashCommandBus({
-      getSessionId: () => "session_demo",
-      getActiveHeadId: () => "head_main",
-      getShellCwd: () => "/tmp/project",
-      getHookStatus: () => ({
-        fetchMemory: true,
-        saveMemory: true,
-      }),
-      getApprovalMode: () => "always",
-      getModelStatus: () => ({
-        provider: "openai",
-        model: "gpt-4.1-mini",
-        baseUrl: "https://api.openai.com/v1",
-      }),
-      getStatusLine: () => "idle",
-      getAvailableSkills: () => [],
-      setApprovalMode: vi.fn(async () => {}),
-      setFetchMemoryHookEnabled: vi.fn(async () => {}),
-      setSaveMemoryHookEnabled: vi.fn(async () => {}),
-      setModelProvider: vi.fn(async () => {}),
-      setModelName: vi.fn(async () => {}),
-      setModelApiKey: vi.fn(async () => {}),
-      listMemory: vi.fn(async () => []),
-      saveMemory: vi.fn(async () => {
-        throw new Error("not used");
-      }),
-      showMemory: vi.fn(async () => undefined),
-      interruptAgent: vi.fn(async () => {}),
-      resumeAgent: vi.fn(async () => {}),
-      ...sessionDeps,
-    });
+    const { bus } = buildBus();
 
     const statusResult = await bus.execute("/session status");
     const listResult = await bus.execute("/session list");
@@ -510,38 +567,7 @@ describe("SlashCommandBus", () => {
   });
 
   it("支持 working head 命令", async () => {
-    const sessionDeps = buildSessionDeps();
-    const bus = new SlashCommandBus({
-      getSessionId: () => "session_demo",
-      getActiveHeadId: () => "head_main",
-      getShellCwd: () => "/tmp/project",
-      getHookStatus: () => ({
-        fetchMemory: true,
-        saveMemory: true,
-      }),
-      getApprovalMode: () => "always",
-      getModelStatus: () => ({
-        provider: "openai",
-        model: "gpt-4.1-mini",
-        baseUrl: "https://api.openai.com/v1",
-      }),
-      getStatusLine: () => "idle",
-      getAvailableSkills: () => [],
-      setApprovalMode: vi.fn(async () => {}),
-      setFetchMemoryHookEnabled: vi.fn(async () => {}),
-      setSaveMemoryHookEnabled: vi.fn(async () => {}),
-      setModelProvider: vi.fn(async () => {}),
-      setModelName: vi.fn(async () => {}),
-      setModelApiKey: vi.fn(async () => {}),
-      listMemory: vi.fn(async () => []),
-      saveMemory: vi.fn(async () => {
-        throw new Error("not used");
-      }),
-      showMemory: vi.fn(async () => undefined),
-      interruptAgent: vi.fn(async () => {}),
-      resumeAgent: vi.fn(async () => {}),
-      ...sessionDeps,
-    });
+    const { bus } = buildBus();
 
     const listResult = await bus.execute("/session head list");
     const forkResult = await bus.execute("/session head fork worker-a");

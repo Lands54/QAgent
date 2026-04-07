@@ -10,9 +10,11 @@ export {
   CompactSessionService,
   type CompactSessionInput,
   type CompactSessionResult,
+} from "./compactSessionService.js";
+export {
   estimateMessagesTokens,
   groupMessagesForCompact,
-} from "./compactSessionService.js";
+} from "./domain/contextBudgetService.js";
 export { FetchMemoryService } from "./fetchMemoryService.js";
 export {
   HeadAgentRuntime,

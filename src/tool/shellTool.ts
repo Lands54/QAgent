@@ -1,6 +1,6 @@
 import type { ToolCall, ToolDefinition, ToolResult } from "../types.js";
-import { truncate } from "../utils/index.js";
 import type { PersistentShellSession } from "./shellSession.js";
+import { truncate } from "../utils/index.js";
 
 function detectInteractiveCommand(command: string): string | undefined {
   const patterns = [

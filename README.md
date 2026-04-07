@@ -38,6 +38,8 @@ node bin/qagent.js --help
 - `OPENROUTER_SITE_URL`
 - `QAGENT_SHELL`
 - `QAGENT_MAX_AGENT_STEPS`
+- `QAGENT_FETCH_MEMORY_MAX_AGENT_STEPS`
+- `QAGENT_AUTO_MEMORY_FORK_MAX_AGENT_STEPS`
 - `QAGENT_SHELL_TIMEOUT_MS`
 - `QAGENT_AUTO_COMPACT_THRESHOLD_TOKENS`
 - `QAGENT_COMPACT_RECENT_KEEP_GROUPS`
@@ -93,6 +95,10 @@ qagent --provider openrouter --model openai/gpt-4.1-mini
 - `/hook fetch-memory <on|off>`
 - `/hook save-memory <on|off>`
 - `/hook auto-compact <on|off>`
+- `/debug helper-agent status`
+- `/debug helper-agent autocleanup <on|off>`
+- `/debug helper-agent clear`
+- `/debug legacy clear`
 - `/memory save [--global] --name=<name> --description=<说明> <内容>`
 - `/memory list`
 - `/memory show <name>`
@@ -129,12 +135,19 @@ qagent --provider openrouter --model openai/gpt-4.1-mini
 UI 小技巧：
 
 - `Ctrl+P` / `Ctrl+N` 可以在 agent 之间快速切换
-- `fetch-memory`、`save-memory` 与 `compact-session` 辅助 agent 会在运行期间显示在 Agents 面板中；完成后会自动清理
+- `fetch-memory`、`save-memory` 与 `compact-session` helper agent 会在运行期间显示在 Agents 面板中；默认完成后会自动清理
+- 可以通过 `/debug helper-agent autocleanup <on|off>` 临时控制 helper agent 是否在执行后直接消亡，并通过 `/debug helper-agent clear` 清理当前 manager 中的 helper agent
+- 遇到 v1 迁移残留的 `legacy-*` working head 时，可以通过 `/debug legacy clear` 统一清理
 
 模型配置说明：
 
 - `/model provider` 与 `/model name` 会写入项目级 `.agent/config.json`
 - `/model apikey` 会写入全局 `~/.agent/config.json`，避免把密钥直接写进项目配置
+- helper agent 的最大行动次数也支持通过 `.agent/config.json` 或环境变量配置：
+  - `runtime.fetchMemoryMaxAgentSteps`
+  - `runtime.autoMemoryForkMaxAgentSteps`
+  - `QAGENT_FETCH_MEMORY_MAX_AGENT_STEPS`
+  - `QAGENT_AUTO_MEMORY_FORK_MAX_AGENT_STEPS`
 
 Skill 机制说明：
 

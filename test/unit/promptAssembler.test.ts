@@ -35,6 +35,8 @@ describe("PromptAssembler", () => {
       },
       runtime: {
         maxAgentSteps: 8,
+        fetchMemoryMaxAgentSteps: 3,
+        autoMemoryForkMaxAgentSteps: 4,
         shellCommandTimeoutMs: 120_000,
         maxToolOutputChars: 12_000,
         maxConversationSummaryMessages: 10,

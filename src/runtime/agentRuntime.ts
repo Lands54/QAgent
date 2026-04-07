@@ -1,3 +1,14 @@
+import { AgentRunner } from "./agentRunner.js";
+import type { PromptAssembler } from "../context/index.js";
+import { MemoryService } from "../memory/index.js";
+import type { SessionService } from "../session/index.js";
+import {
+  ApprovalPolicy,
+  PersistentShellSession,
+  ShellTool,
+  ToolRegistry,
+  formatToolResultForModel,
+} from "../tool/index.js";
 import type {
   AgentKind,
   AgentLifecycleStatus,
@@ -18,18 +29,7 @@ import type {
   ToolMode,
   UIMessage,
 } from "../types.js";
-import { PromptAssembler } from "../context/index.js";
-import { MemoryService } from "../memory/index.js";
-import { SessionService } from "../session/index.js";
-import {
-  ApprovalPolicy,
-  PersistentShellSession,
-  ShellTool,
-  ToolRegistry,
-  formatToolResultForModel,
-} from "../tool/index.js";
 import { createId, firstLine, formatDuration } from "../utils/index.js";
-import { AgentRunner } from "./agentRunner.js";
 
 interface PendingApprovalState {
   request: ApprovalRequest;

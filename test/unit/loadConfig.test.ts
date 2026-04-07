@@ -33,6 +33,7 @@ describe("loadRuntimeConfig", () => {
         },
         runtime: {
           maxAgentSteps: 3,
+          fetchMemoryMaxAgentSteps: 5,
         },
       }),
       "utf8",
@@ -53,6 +54,7 @@ describe("loadRuntimeConfig", () => {
     process.env.HOME = tempHome;
     process.env.QAGENT_MODEL = "env-model";
     process.env.QAGENT_SHELL_TIMEOUT_MS = "3333";
+    process.env.QAGENT_AUTO_MEMORY_FORK_MAX_AGENT_STEPS = "7";
 
     const config = await loadRuntimeConfig({
       cwd: tempProject,
@@ -63,6 +65,8 @@ describe("loadRuntimeConfig", () => {
     expect(config.model.baseUrl).toBe("https://global.example/v1");
     expect(config.model.model).toBe("cli-model");
     expect(config.runtime.maxAgentSteps).toBe(3);
+    expect(config.runtime.fetchMemoryMaxAgentSteps).toBe(5);
+    expect(config.runtime.autoMemoryForkMaxAgentSteps).toBe(7);
     expect(config.runtime.shellCommandTimeoutMs).toBe(3333);
     expect(config.tool.approvalMode).toBe("risky");
     expect(config.resolvedPaths.projectAgentDir).toBe(
@@ -91,5 +95,7 @@ describe("loadRuntimeConfig", () => {
     expect(config.model.apiKey).toBe("or-key");
     expect(config.model.appName).toBe("QAgent Test");
     expect(config.model.appUrl).toBe("https://example.com/qagent");
+    expect(config.runtime.fetchMemoryMaxAgentSteps).toBe(3);
+    expect(config.runtime.autoMemoryForkMaxAgentSteps).toBe(4);
   });
 });

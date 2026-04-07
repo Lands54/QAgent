@@ -1,7 +1,3 @@
-import { createHash } from "node:crypto";
-import { copyFile, readdir } from "node:fs/promises";
-import path from "node:path";
-
 import type {
   AgentKind,
   ApprovalMode,
@@ -23,14 +19,28 @@ import type {
   SessionWorkingHead,
   ToolMode,
 } from "../types.js";
-import { createId } from "../utils/index.js";
-import { SessionGraphStore } from "./sessionGraphStore.js";
-import { SessionStore } from "./sessionStore.js";
+import { AssetOverlayService } from "./application/assetOverlayService.js";
+import { SessionRepoMigrationService } from "./application/sessionRepoMigrationService.js";
 import {
   buildNodeDigestAsset,
   createDigestSessionAssetProvider,
 } from "./digestAssetProvider.js";
-import { ensureDir, pathExists, readJsonIfExists, writeJson } from "../utils/index.js";
+import {
+  attachmentLabel,
+  attachmentModeToRefMode,
+  cloneSnapshotForHead,
+  dedupeAssets,
+  DEFAULT_BRANCH_NAME,
+  formatUtcTimestamp,
+  isLegacyRepoState,
+  type LegacySessionRepoStateV1,
+  SESSION_REF_NAME_PATTERN,
+  snapshotHash,
+  V1_INCOMPATIBLE_MESSAGE,
+} from "./domain/sessionDomain.js";
+import { SessionGraphStore } from "./sessionGraphStore.js";
+import { SessionStore } from "./sessionStore.js";
+import { createId } from "../utils/index.js";
 
 interface SessionInitializationInput {
   cwd: string;
@@ -79,140 +89,12 @@ interface ForkHeadOptions {
   };
 }
 
-const DEFAULT_BRANCH_NAME = "main" as const;
-const SESSION_REF_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
-const V1_INCOMPATIBLE_MESSAGE =
-  "当前版本不兼容 v1 session repo，请手动清理或迁移后再启动。";
-
-interface LegacySessionRepoStateV1 {
-  version?: 1;
-  currentBranchName?: string;
-  headNodeId?: string;
-  workingSessionId?: string;
-  defaultBranchName?: string;
-}
-
-interface LegacySessionSnapshot {
-  sessionId?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  cwd?: string;
-  shellCwd?: string;
-  approvalMode?: ApprovalMode;
-  uiMessages?: SessionSnapshot["uiMessages"];
-  modelMessages?: SessionSnapshot["modelMessages"];
-  lastUserPrompt?: string;
-  lastRunSummary?: string;
-}
-
-interface LegacySessionNode {
-  id?: string;
-  parentNodeIds?: string[];
-  kind?: SessionNode["kind"];
-  workingSessionId?: string;
-  snapshot?: LegacySessionSnapshot;
-  abstractAssets?: SessionAbstractAsset[];
-  snapshotHash?: string;
-  createdAt?: string;
-}
-
-interface LegacySessionRecord {
-  sessionId: string;
-  snapshot: LegacySessionSnapshot;
-  snapshotPath: string;
-  eventsPath: string;
-}
-
-function isLegacyRepoState(value: unknown): value is LegacySessionRepoStateV1 {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const state = value as LegacySessionRepoStateV1;
-  return state.version === 1 || Boolean(state.currentBranchName || state.workingSessionId);
-}
-
-function cloneSnapshotForHead(
-  snapshot: SessionSnapshot,
-  head: SessionWorkingHead,
-): SessionSnapshot {
-  return {
-    ...snapshot,
-    workingHeadId: head.id,
-    sessionId: head.sessionId,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-function normalizeSnapshotForHash(
-  snapshot: SessionSnapshot,
-): Record<string, unknown> {
-  return {
-    workingHeadId: snapshot.workingHeadId,
-    cwd: snapshot.cwd,
-    shellCwd: snapshot.shellCwd,
-    approvalMode: snapshot.approvalMode,
-    modelMessages: snapshot.modelMessages,
-    lastUserPrompt: snapshot.lastUserPrompt ?? "",
-    lastRunSummary: snapshot.lastRunSummary ?? "",
-  };
-}
-
-function snapshotHash(snapshot: SessionSnapshot): string {
-  return createHash("sha1")
-    .update(JSON.stringify(normalizeSnapshotForHash(snapshot)))
-    .digest("hex");
-}
-
-function dedupeAssets(assets: SessionAbstractAsset[]): SessionAbstractAsset[] {
-  const seen = new Set<string>();
-  const deduped: SessionAbstractAsset[] = [];
-
-  for (const asset of assets) {
-    const key = `${asset.title}\n${asset.content}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    deduped.push(asset);
-  }
-
-  return deduped;
-}
-
-function attachmentLabel(attachment: SessionWorkingHead["attachment"]): string {
-  if (attachment.mode === "branch") {
-    return `branch=${attachment.name}`;
-  }
-  if (attachment.mode === "tag") {
-    return `detached=tag:${attachment.name}`;
-  }
-  return `detached=node:${attachment.nodeId}`;
-}
-
-function attachmentModeToRefMode(
-  mode: SessionWorkingHead["attachment"]["mode"],
-): SessionRefInfo["mode"] {
-  if (mode === "branch") {
-    return "branch";
-  }
-  if (mode === "tag") {
-    return "detached-tag";
-  }
-  return "detached-node";
-}
-
-function formatUtcTimestamp(value = new Date()): string {
-  return value
-    .toISOString()
-    .replace(/[-:]/gu, "")
-    .replace(/\.\d{3}Z$/u, "")
-    .toLowerCase();
-}
-
 export class SessionService {
   private readonly sessionStore: SessionStore;
   private readonly graphStore: SessionGraphStore;
   private readonly assetProviders: SessionAssetProvider[];
+  private readonly assetOverlayService: AssetOverlayService;
+  private readonly repoMigrationService: SessionRepoMigrationService;
   private repoState?: SessionRepoState;
   private branches: SessionBranchRef[] = [];
   private tags: SessionTagRef[] = [];
@@ -231,6 +113,24 @@ export class SessionService {
       providerMap.set(provider.kind, provider);
     }
     this.assetProviders = [...providerMap.values()];
+    this.assetOverlayService = new AssetOverlayService({
+      sessionRoot: this.sessionRoot,
+      assetProviders: this.assetProviders,
+      sessionStore: this.sessionStore,
+      graphStore: this.graphStore,
+      ensureRepoLoaded: async () => this.ensureRepoLoaded(),
+      requireHead: async (headId) => this.requireHead(headId),
+      requireNode: async (nodeId) => this.requireNode(nodeId),
+    });
+    this.repoMigrationService = new SessionRepoMigrationService({
+      sessionRoot: this.sessionRoot,
+      graphStore: this.graphStore,
+      sessionStore: this.sessionStore,
+      runForkProviders: async (head, snapshot, sourceHead) => {
+        return this.assetOverlayService.runForkProviders(head, snapshot, sourceHead);
+      },
+      buildNode: (input) => this.buildNode(input),
+    });
   }
 
   public async initialize(
@@ -1132,65 +1032,22 @@ export class SessionService {
     snapshot: SessionSnapshot,
     sourceHead?: SessionWorkingHead,
   ): Promise<Record<string, unknown>> {
-    const nextState: Record<string, unknown> = {};
-    for (const provider of this.assetProviders) {
-      nextState[provider.kind] = await provider.fork({
-        head,
-        sessionRoot: this.sessionRoot,
-        snapshot,
-        sourceHead,
-        sourceState: sourceHead?.assetState[provider.kind],
-      });
-    }
-    return nextState;
+    return this.assetOverlayService.runForkProviders(head, snapshot, sourceHead);
   }
 
   private async runCheckpointProviders(
     head: SessionWorkingHead,
     snapshot: SessionSnapshot,
   ): Promise<Record<string, unknown>> {
-    const nextState: Record<string, unknown> = {
-      ...head.assetState,
-    };
-    for (const provider of this.assetProviders) {
-      nextState[provider.kind] = await provider.checkpoint({
-        head,
-        state: head.assetState[provider.kind],
-        snapshot,
-        sessionRoot: this.sessionRoot,
-      });
-    }
-    return nextState;
+    return this.assetOverlayService.runCheckpointProviders(head, snapshot);
   }
 
   private async restoreProviders(head: SessionWorkingHead): Promise<void> {
-    for (const provider of this.assetProviders) {
-      if (!provider.restore) {
-        continue;
-      }
-      await provider.restore({
-        head,
-        state: head.assetState[provider.kind],
-        sessionRoot: this.sessionRoot,
-      });
-    }
+    await this.assetOverlayService.restoreProviders(head);
   }
 
   private async loadWorkingSnapshot(headId: string): Promise<SessionSnapshot> {
-    await this.ensureRepoLoaded();
-    const head = await this.requireHead(headId);
-    const current = await this.sessionStore.load(head.id);
-    if (current) {
-      await this.restoreProviders(head);
-      return current;
-    }
-
-    const node = await this.requireNode(head.currentNodeId);
-    const restored = cloneSnapshotForHead(node.snapshot, head);
-    restored.shellCwd = head.runtimeState.shellCwd || restored.shellCwd;
-    await this.sessionStore.saveSnapshot(restored);
-    await this.restoreProviders(head);
-    return restored;
+    return this.assetOverlayService.loadWorkingSnapshot(headId);
   }
 
   private async ensureRepoLoaded(): Promise<void> {
@@ -1224,297 +1081,12 @@ export class SessionService {
   }
 
   private async migrateLegacyRepo(state: LegacySessionRepoStateV1): Promise<string> {
-    const legacySessions = await this.listLegacySessions();
-    const legacyNodes = await this.listLegacyNodes();
-    const legacyBranches = await this.graphStore.loadBranches();
-    const legacyTags = await this.graphStore.loadTags();
-    const now = new Date().toISOString();
-
-    const activeSessionId =
-      state.workingSessionId
-      ?? legacyNodes.find((node) => node.workingSessionId)?.workingSessionId
-      ?? legacySessions.at(0)?.sessionId;
-    if (!activeSessionId) {
-      throw new Error(V1_INCOMPATIBLE_MESSAGE);
-    }
-
-    const activeHeadId = activeSessionId;
-    const activeNode = legacyNodes.find(
-      (node): node is LegacySessionNode & { id: string } => {
-        return Boolean(node.id) && node.id === state.headNodeId;
-      },
-    );
-    const activeLegacySession = legacySessions.find((item) => item.sessionId === activeSessionId);
-    const activeSnapshot = this.normalizeLegacySnapshot(
-      activeLegacySession?.snapshot ?? activeNode?.snapshot,
-      activeHeadId,
-      activeSessionId,
-      now,
-    );
-
-    const migratedActiveNodes = activeNode
-      ? this.normalizeLegacyNodesForHead(legacyNodes, activeHeadId, activeSessionId)
-      : [];
-    const existingNodeIds = new Set(migratedActiveNodes.map((node) => node.id));
-
-    const activeHead: SessionWorkingHead = {
-      id: activeHeadId,
-      name: state.currentBranchName ?? state.defaultBranchName ?? DEFAULT_BRANCH_NAME,
-      currentNodeId: activeNode?.id ?? "",
-      sessionId: activeSessionId,
-      attachment: {
-        mode: "detached-node",
-        name: "",
-        nodeId: "",
-      },
-      writerLease: undefined,
-      runtimeState: {
-        shellCwd: activeSnapshot.shellCwd,
-        agentKind: "interactive",
-        autoMemoryFork: true,
-        retainOnCompletion: true,
-        promptProfile: "default",
-        toolMode: "shell",
-        status: "idle",
-      },
-      assetState: {},
-      status: "idle",
-      createdAt: activeSnapshot.createdAt,
-      updatedAt: activeSnapshot.updatedAt,
-    };
-    activeHead.assetState = await this.runForkProviders(activeHead, activeSnapshot);
-
-    let nextNodes = [...migratedActiveNodes];
-    if (!activeNode) {
-      const synthesizedNode = this.buildNode({
-        kind: "root",
-        parentNodeIds: [],
-        snapshot: activeSnapshot,
-        assetState: activeHead.assetState,
-      });
-      activeHead.currentNodeId = synthesizedNode.id;
-      nextNodes.push(synthesizedNode);
-      existingNodeIds.add(synthesizedNode.id);
-    } else {
-      activeHead.currentNodeId = activeNode.id;
-    }
-
-    let nextBranches = legacyBranches.filter((branch) => existingNodeIds.has(branch.headNodeId));
-    const activeBranchName = state.currentBranchName ?? state.defaultBranchName ?? DEFAULT_BRANCH_NAME;
-    const activeBranch = nextBranches.find((branch) => branch.name === activeBranchName);
-    if (activeBranch) {
-      activeBranch.headNodeId = activeHead.currentNodeId;
-      activeBranch.updatedAt = now;
-    } else {
-      nextBranches.push({
-        name: activeBranchName,
-        headNodeId: activeHead.currentNodeId,
-        createdAt: activeSnapshot.createdAt,
-        updatedAt: now,
-      });
-    }
-    nextBranches = nextBranches.sort((left, right) => left.name.localeCompare(right.name));
-
-    activeHead.attachment = {
-      mode: "branch",
-      name: activeBranchName,
-      nodeId: activeHead.currentNodeId,
-    };
-    activeHead.writerLease = {
-      branchName: activeBranchName,
-      acquiredAt: now,
-    };
-
-    const additionalHeads: SessionWorkingHead[] = [];
-    const additionalSnapshots: Array<{ headId: string; snapshot: SessionSnapshot }> = [];
-    for (const [index, legacySession] of legacySessions.entries()) {
-      if (legacySession.sessionId === activeSessionId) {
-        continue;
-      }
-      const headId = legacySession.sessionId;
-      const snapshot = this.normalizeLegacySnapshot(
-        legacySession.snapshot,
-        headId,
-        legacySession.sessionId,
-        now,
-      );
-      const head: SessionWorkingHead = {
-        id: headId,
-        name: `legacy-${index}`,
-        currentNodeId: "",
-        sessionId: legacySession.sessionId,
-        attachment: {
-          mode: "detached-node",
-          name: "",
-          nodeId: "",
-        },
-        writerLease: undefined,
-        runtimeState: {
-          shellCwd: snapshot.shellCwd,
-          agentKind: "interactive",
-          autoMemoryFork: true,
-          retainOnCompletion: true,
-          promptProfile: "default",
-          toolMode: "shell",
-          status: "idle",
-        },
-        assetState: {},
-        status: "idle",
-        createdAt: snapshot.createdAt,
-        updatedAt: snapshot.updatedAt,
-      };
-      head.assetState = await this.runForkProviders(head, snapshot);
-      const node = this.buildNode({
-        kind: "root",
-        parentNodeIds: [],
-        snapshot,
-        assetState: head.assetState,
-      });
-      head.currentNodeId = node.id;
-      head.attachment = {
-        mode: "detached-node",
-        name: node.id,
-        nodeId: node.id,
-      };
-      nextNodes.push(node);
-      additionalHeads.push(head);
-      additionalSnapshots.push({ headId, snapshot });
-    }
-
-    const nextTags = legacyTags.filter((tag) => existingNodeIds.has(tag.targetNodeId));
-    const repoState: SessionRepoState = {
-      version: 2,
-      activeWorkingHeadId: activeHead.id,
-      defaultBranchName: DEFAULT_BRANCH_NAME,
-      createdAt: activeSnapshot.createdAt,
-      updatedAt: now,
-    };
-    const nextHeads = [activeHead, ...additionalHeads];
-
-    await this.backupLegacyRepoState(state);
-    await this.graphStore.saveState(repoState);
-    await this.graphStore.saveBranches(nextBranches);
-    await this.graphStore.saveTags(nextTags);
-    await Promise.all([
-      ...nextNodes.map(async (node) => this.graphStore.saveNode(node)),
-      ...nextHeads.map(async (head) => this.graphStore.saveHead(head)),
-      this.sessionStore.saveSnapshot(activeSnapshot),
-      ...additionalSnapshots.map(async ({ snapshot }) => this.sessionStore.saveSnapshot(snapshot)),
-    ]);
-    await Promise.all([
-      this.copyLegacyEvents(activeSessionId, activeHead.id),
-      ...additionalHeads.map(async (head) => this.copyLegacyEvents(head.sessionId, head.id)),
-    ]);
-
-    this.repoState = repoState;
-    this.branches = nextBranches;
-    this.tags = nextTags;
-    this.heads = nextHeads;
-
-    return `已尽力将 v1 session repo 迁移为 v2；恢复 ${nextHeads.length} 个 working heads。`;
-  }
-
-  private normalizeLegacySnapshot(
-    snapshot: LegacySessionSnapshot | undefined,
-    headId: string,
-    sessionId: string,
-    fallbackTime: string,
-  ): SessionSnapshot {
-    return {
-      workingHeadId: headId,
-      sessionId,
-      createdAt: snapshot?.createdAt ?? fallbackTime,
-      updatedAt: snapshot?.updatedAt ?? snapshot?.createdAt ?? fallbackTime,
-      cwd: snapshot?.cwd ?? process.cwd(),
-      shellCwd: snapshot?.shellCwd ?? snapshot?.cwd ?? process.cwd(),
-      approvalMode: snapshot?.approvalMode ?? "always",
-      uiMessages: snapshot?.uiMessages ?? [],
-      modelMessages: snapshot?.modelMessages ?? [],
-      lastUserPrompt: snapshot?.lastUserPrompt,
-      lastRunSummary: snapshot?.lastRunSummary,
-    };
-  }
-
-  private normalizeLegacyNodesForHead(
-    nodes: LegacySessionNode[],
-    headId: string,
-    sessionId: string,
-  ): SessionNode[] {
-    return nodes
-      .filter((node): node is Required<Pick<LegacySessionNode, "id">> & LegacySessionNode => {
-        return Boolean(node.id);
-      })
-      .map((node) => {
-        const normalizedSnapshot = this.normalizeLegacySnapshot(
-          node.snapshot,
-          headId,
-          sessionId,
-          node.createdAt ?? new Date().toISOString(),
-        );
-        return {
-          id: node.id,
-          parentNodeIds: node.parentNodeIds ?? [],
-          kind: node.kind ?? "checkpoint",
-          snapshot: normalizedSnapshot,
-          abstractAssets: node.abstractAssets ?? [],
-          snapshotHash: snapshotHash(normalizedSnapshot),
-          createdAt: node.createdAt ?? normalizedSnapshot.createdAt,
-        } satisfies SessionNode;
-      })
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-  }
-
-  private async listLegacyNodes(): Promise<LegacySessionNode[]> {
-    const nodes = await this.graphStore.listNodes();
-    return nodes as unknown as LegacySessionNode[];
-  }
-
-  private async listLegacySessions(): Promise<LegacySessionRecord[]> {
-    try {
-      const entries = await readdir(this.sessionRoot, { withFileTypes: true });
-      const sessions = await Promise.all(
-        entries
-          .filter((entry) => entry.isDirectory() && entry.name.startsWith("session_"))
-          .map(async (entry) => {
-            const sessionId = entry.name;
-            const dirPath = path.join(this.sessionRoot, entry.name);
-            const snapshotPath = path.join(dirPath, "snapshot.json");
-            const snapshot = await readJsonIfExists<LegacySessionSnapshot>(snapshotPath);
-            if (!snapshot) {
-              return undefined;
-            }
-            return {
-              sessionId,
-              snapshot,
-              snapshotPath,
-              eventsPath: path.join(dirPath, "events.ndjson"),
-            } satisfies LegacySessionRecord;
-          }),
-      );
-      return sessions
-        .filter((session): session is LegacySessionRecord => Boolean(session))
-        .sort((left, right) => right.snapshot.updatedAt?.localeCompare(left.snapshot.updatedAt ?? "") ?? 0);
-    } catch {
-      return [];
-    }
-  }
-
-  private async backupLegacyRepoState(state: LegacySessionRepoStateV1): Promise<void> {
-    const backupPath = path.join(this.sessionRoot, "__repo", "legacy-v1-state.json");
-    if (await pathExists(backupPath)) {
-      return;
-    }
-    await writeJson(backupPath, state);
-  }
-
-  private async copyLegacyEvents(sessionId: string, headId: string): Promise<void> {
-    const sourcePath = path.join(this.sessionRoot, sessionId, "events.ndjson");
-    if (!(await pathExists(sourcePath))) {
-      return;
-    }
-    const targetPath = path.join(this.sessionRoot, "__heads", headId, "events.ndjson");
-    await ensureDir(path.dirname(targetPath));
-    await copyFile(sourcePath, targetPath);
+    const migrated = await this.repoMigrationService.migrateLegacyRepo(state);
+    this.repoState = migrated.repoState;
+    this.branches = migrated.branches;
+    this.tags = migrated.tags;
+    this.heads = migrated.heads;
+    return migrated.infoMessage;
   }
 
   private requireRepoState(): SessionRepoState {

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { SessionGraphStore } from "../../src/session/index.js";
 import type {
   SessionBranchRef,
   SessionNode,
@@ -11,7 +12,6 @@ import type {
   SessionTagRef,
   SessionWorkingHead,
 } from "../../src/types.js";
-import { SessionGraphStore } from "../../src/session/index.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));

@@ -60,6 +60,8 @@ export function buildMockSkillRuntimeConfig(
     },
     runtime: {
       maxAgentSteps: 8,
+      fetchMemoryMaxAgentSteps: 3,
+      autoMemoryForkMaxAgentSteps: 4,
       shellCommandTimeoutMs: 15_000,
       maxToolOutputChars: 12_000,
       maxConversationSummaryMessages: 10,

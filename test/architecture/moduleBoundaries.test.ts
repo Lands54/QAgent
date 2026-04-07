@@ -1,6 +1,6 @@
-import path from "node:path";
-import { access, readFile, readdir } from "node:fs/promises";
 import { constants } from "node:fs";
+import { access, readFile, readdir } from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const workspaceRoot = process.cwd();
@@ -127,6 +127,26 @@ function facadePathForModule(moduleName: string): string {
   return path.join(srcRoot, moduleName, "index.ts");
 }
 
+function internalLayerForFile(
+  filePath: string,
+): "root" | "application" | "domain" | "presentation" | "infrastructure" | "other" {
+  const relativePath = path.relative(srcRoot, filePath);
+  const segments = relativePath.split(path.sep);
+  if (segments.length < 2) {
+    return "root";
+  }
+  const layer = segments[1];
+  if (
+    layer === "application"
+    || layer === "domain"
+    || layer === "presentation"
+    || layer === "infrastructure"
+  ) {
+    return layer;
+  }
+  return "root";
+}
+
 async function collectSourceGraph(): Promise<Map<string, string[]>> {
   const files = await listSourceFiles(srcRoot);
   const graph = new Map<string, string[]>();
@@ -230,6 +250,84 @@ describe("Architecture Boundaries", () => {
             `${path.relative(workspaceRoot, fromFile)} 不允许依赖模块 ${targetModule}`,
           );
         }
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("runtime/session/ui 的内部层级目录已经建立", async () => {
+    const expectedDirs = [
+      path.join(srcRoot, "runtime", "application"),
+      path.join(srcRoot, "runtime", "domain"),
+      path.join(srcRoot, "session", "application"),
+      path.join(srcRoot, "session", "domain"),
+      path.join(srcRoot, "ui", "presentation"),
+    ];
+
+    for (const dir of expectedDirs) {
+      expect(
+        await pathExists(dir),
+        `缺少内部层级目录：${path.relative(workspaceRoot, dir)}`,
+      ).toBe(true);
+    }
+  });
+
+  it("模块内部层级遵守单向依赖约束", async () => {
+    const graph = await collectSourceGraph();
+    const violations: string[] = [];
+
+    for (const [fromFile, imports] of graph.entries()) {
+      const fromModule = moduleNameForFile(fromFile);
+      if (!["runtime", "session", "ui"].includes(fromModule)) {
+        continue;
+      }
+      const fromLayer = internalLayerForFile(fromFile);
+
+      for (const targetFile of imports) {
+        const targetModule = moduleNameForFile(targetFile);
+        if (fromModule !== targetModule) {
+          continue;
+        }
+        const targetLayer = internalLayerForFile(targetFile);
+        const relativeFrom = path.relative(workspaceRoot, fromFile);
+        const relativeTarget = path.relative(workspaceRoot, targetFile);
+
+        if (fromLayer === "domain" && (targetLayer === "application" || targetLayer === "presentation")) {
+          violations.push(`${relativeFrom} 不应依赖更高层：${relativeTarget}`);
+        }
+        if (fromLayer === "application" && targetLayer === "presentation") {
+          violations.push(`${relativeFrom} 不应依赖 presentation：${relativeTarget}`);
+        }
+        if (fromLayer === "presentation" && targetLayer === "application") {
+          violations.push(`${relativeFrom} 不应回跳到 application：${relativeTarget}`);
+        }
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("AppController 是 runtime 唯一组合根", async () => {
+    const runtimeFiles = await listSourceFiles(path.join(srcRoot, "runtime"));
+    const compositionPatterns = [
+      "new SessionService(",
+      "new SkillRegistry(",
+      "createModelClient(",
+      "new AgentManager(",
+    ];
+    const violations: string[] = [];
+
+    for (const file of runtimeFiles) {
+      const source = await readFile(file, "utf8");
+      const matchesPattern = compositionPatterns.some((pattern) => {
+        return source.includes(pattern);
+      });
+      if (!matchesPattern) {
+        continue;
+      }
+      if (path.relative(srcRoot, file) !== path.join("runtime", "appController.ts")) {
+        violations.push(path.relative(workspaceRoot, file));
       }
     }
 

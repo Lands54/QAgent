@@ -128,6 +128,9 @@ function mergeConfig(
 
 function fromEnv(provider: ModelProvider): PartialRuntimeConfig {
   const maxSteps = process.env.QAGENT_MAX_AGENT_STEPS;
+  const fetchMemoryMaxSteps = process.env.QAGENT_FETCH_MEMORY_MAX_AGENT_STEPS;
+  const autoMemoryForkMaxSteps =
+    process.env.QAGENT_AUTO_MEMORY_FORK_MAX_AGENT_STEPS;
   const shellTimeout = process.env.QAGENT_SHELL_TIMEOUT_MS;
   const autoCompactThreshold = process.env.QAGENT_AUTO_COMPACT_THRESHOLD_TOKENS;
   const compactRecentKeepGroups = process.env.QAGENT_COMPACT_RECENT_KEEP_GROUPS;
@@ -162,6 +165,12 @@ function fromEnv(provider: ModelProvider): PartialRuntimeConfig {
     },
     runtime: {
       maxAgentSteps: maxSteps ? Number(maxSteps) : undefined,
+      fetchMemoryMaxAgentSteps: fetchMemoryMaxSteps
+        ? Number(fetchMemoryMaxSteps)
+        : undefined,
+      autoMemoryForkMaxAgentSteps: autoMemoryForkMaxSteps
+        ? Number(autoMemoryForkMaxSteps)
+        : undefined,
       shellCommandTimeoutMs: shellTimeout ? Number(shellTimeout) : undefined,
       autoCompactThresholdTokens: autoCompactThreshold ? Number(autoCompactThreshold) : undefined,
       compactRecentKeepGroups: compactRecentKeepGroups ? Number(compactRecentKeepGroups) : undefined,
@@ -214,6 +223,8 @@ export async function loadRuntimeConfig(
     },
     runtime: {
       maxAgentSteps: 8,
+      fetchMemoryMaxAgentSteps: 3,
+      autoMemoryForkMaxAgentSteps: 4,
       shellCommandTimeoutMs: 120_000,
       maxToolOutputChars: 12_000,
       maxConversationSummaryMessages: 10,

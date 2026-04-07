@@ -15,16 +15,20 @@ export function AgentList({ agents, activeAgentId }: AgentListProps) {
       paddingX={1}
       flexDirection="column"
     >
-      <Text>Agents</Text>
+      <Text color="cyan">Agents · {agents.length}</Text>
       {agents.map((agent) => (
-        <Text key={agent.id}>
-          {agent.id === activeAgentId ? "*" : " "} {agent.name} [{agent.id}] (
-          {agent.kind}) | status={agent.status}
-          {agent.helperType ? ` | helper=${agent.helperType}` : ""}
-          {agent.pendingApproval ? " | pending=approval" : ""}
-          {agent.sessionRefLabel ? ` | ref=${agent.sessionRefLabel}` : ""}
-          {agent.detail ? ` | detail=${agent.detail}` : ""}
-        </Text>
+        <Box key={agent.id} flexDirection="column" marginTop={1}>
+          <Text color={agent.id === activeAgentId ? "green" : undefined}>
+            {agent.id === activeAgentId ? "●" : "○"} {agent.name} [{agent.id}] ({agent.kind})
+          </Text>
+          <Text color="gray">
+            status={agent.status}
+            {agent.helperType ? ` | helper=${agent.helperType}` : ""}
+            {agent.pendingApproval ? " | pending=approval" : ""}
+            {agent.sessionRefLabel ? ` | ref=${agent.sessionRefLabel}` : ""}
+            {agent.detail ? ` | detail=${agent.detail}` : ""}
+          </Text>
+        </Box>
       ))}
     </Box>
   );

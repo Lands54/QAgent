@@ -1,18 +1,20 @@
-import { useEffect, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
+import { useEffect, useState } from "react";
 
-import type { AppController, AppState } from "../runtime/index.js";
-import { ApprovalModal } from "./ApprovalModal.js";
 import { AgentList } from "./AgentList.js";
+import { ApprovalModal } from "./ApprovalModal.js";
 import { InputBox } from "./InputBox.js";
-import { MessageList } from "./MessageList.js";
-import { StatusBar } from "./StatusBar.js";
 import {
   completeInput,
   extractUserInputHistory,
+  getCompletionPreview,
   navigateInputHistory,
   type InputHistoryState,
 } from "./inputEnhancements.js";
+import { MessageList } from "./MessageList.js";
+import { buildFooterHint } from "./presentation/footerHint.js";
+import { StatusBar } from "./StatusBar.js";
+import type { AppController, AppState } from "../runtime/index.js";
 
 interface AppProps {
   controller: AppController;
@@ -22,6 +24,8 @@ export function App({ controller }: AppProps) {
   const [state, setState] = useState<AppState>(controller.getState());
   const [input, setInput] = useState("");
   const [completionHint, setCompletionHint] = useState<string>();
+  const [completionSuggestionIndex, setCompletionSuggestionIndex] = useState(0);
+  const [completionCycleQuery, setCompletionCycleQuery] = useState<string>();
   const [historyState, setHistoryState] = useState<InputHistoryState>({
     index: null,
     draft: "",
@@ -39,6 +43,8 @@ export function App({ controller }: AppProps) {
       draft: "",
     });
     setCompletionHint(undefined);
+    setCompletionSuggestionIndex(0);
+    setCompletionCycleQuery(undefined);
     setInput("");
   }, [state.activeAgentId, state.activeWorkingHeadId, state.sessionId, state.sessionRef?.label]);
 
@@ -82,6 +88,8 @@ export function App({ controller }: AppProps) {
       setInput(result.nextValue);
       setHistoryState(result.nextState);
       setCompletionHint(undefined);
+      setCompletionCycleQuery(undefined);
+      setCompletionSuggestionIndex(0);
       return;
     }
 
@@ -90,13 +98,22 @@ export function App({ controller }: AppProps) {
       setInput(result.nextValue);
       setHistoryState(result.nextState);
       setCompletionHint(undefined);
+      setCompletionCycleQuery(undefined);
+      setCompletionSuggestionIndex(0);
       return;
     }
 
     if (key.tab) {
-      const result = completeInput(input, state.availableSkills);
+      const result = completeInput(
+        input,
+        state.availableSkills,
+        completionSuggestionIndex,
+        completionCycleQuery,
+      );
       setInput(result.nextValue);
       setCompletionHint(result.hint);
+      setCompletionSuggestionIndex(result.nextSuggestionIndex);
+      setCompletionCycleQuery(result.cycleQuery);
       setHistoryState({
         index: null,
         draft: "",
@@ -116,6 +133,8 @@ export function App({ controller }: AppProps) {
   function handleChange(nextValue: string) {
     setInput(nextValue);
     setCompletionHint(undefined);
+    setCompletionSuggestionIndex(0);
+    setCompletionCycleQuery(undefined);
     if (historyState.index !== null) {
       setHistoryState({
         index: null,
@@ -127,6 +146,8 @@ export function App({ controller }: AppProps) {
   function handleSubmit(nextValue: string) {
     const trimmed = nextValue.trim();
     setCompletionHint(undefined);
+    setCompletionSuggestionIndex(0);
+    setCompletionCycleQuery(undefined);
     setHistoryState({
       index: null,
       draft: "",
@@ -139,26 +160,13 @@ export function App({ controller }: AppProps) {
     setInput("");
   }
 
-  const tokenRatio =
-    state.autoCompactThresholdTokens > 0
-      ? (state.currentTokenEstimate / state.autoCompactThresholdTokens) * 100
-      : 0;
-  const tokenSummary = `tokens: ${state.currentTokenEstimate}/${state.autoCompactThresholdTokens} (${tokenRatio.toFixed(1)}%)`;
-  const helperActivities = state.agents.flatMap((agent) => {
-    if (
-      agent.status !== "booting"
-      && agent.status !== "running"
-      && agent.status !== "awaiting-approval"
-    ) {
-      return [];
-    }
-    if (agent.helperType === "fetch-memory") {
-      return ["fetching memory..."];
-    }
-    if (agent.helperType === "save-memory") {
-      return ["saving memory..."];
-    }
-    return [];
+  const completionPreview = getCompletionPreview(
+    completionCycleQuery ?? input,
+    state.availableSkills,
+  );
+  const footerHint = buildFooterHint({
+    currentTokenEstimate: state.currentTokenEstimate,
+    autoCompactThresholdTokens: state.autoCompactThresholdTokens,
   });
 
   return (
@@ -177,8 +185,8 @@ export function App({ controller }: AppProps) {
         agentCount={state.agents.length}
       />
       <AgentList agents={state.agents} activeAgentId={state.activeAgentId} />
-      {helperActivities.length > 0 ? (
-        <Text color="cyan">helper: {helperActivities.join(" | ")}</Text>
+      {state.helperActivities.length > 0 ? (
+        <Text color="cyan">helper: {state.helperActivities.join(" | ")}</Text>
       ) : null}
       {state.pendingApproval ? <ApprovalModal request={state.pendingApproval} /> : null}
       <MessageList
@@ -188,14 +196,14 @@ export function App({ controller }: AppProps) {
       <InputBox
         value={input}
         disabled={Boolean(state.pendingApproval)}
-        completionHint={completionHint}
+        completionHint={completionHint ?? completionPreview.hint}
+        completionMode={completionPreview.mode}
+        completionSuggestions={completionPreview.suggestions}
+        completionSelectedIndex={completionSuggestionIndex}
         onChange={handleChange}
         onSubmit={handleSubmit}
       />
-      <Text color="gray">
-        slash: /help | history: ↑/↓ | agents: Ctrl+P/Ctrl+N | complete: Tab |
-        approval: y/n | Ctrl+C: 中断当前执行或退出 | {tokenSummary}
-      </Text>
+      <Text color="gray">{footerHint}</Text>
     </Box>
   );
 }

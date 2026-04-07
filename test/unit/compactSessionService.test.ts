@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   estimateMessagesTokens,
   groupMessagesForCompact,
-} from "../../src/runtime/compactSessionService.js";
+} from "../../src/runtime/domain/contextBudgetService.js";
 import type { LlmMessage } from "../../src/types.js";
 
 function message(
