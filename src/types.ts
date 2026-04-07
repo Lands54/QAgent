@@ -366,6 +366,15 @@ export interface SessionTagRef {
   createdAt: string;
 }
 
+export interface SessionCommitRecord {
+  id: string;
+  message: string;
+  nodeId: string;
+  headId: string;
+  sessionId: string;
+  createdAt: string;
+}
+
 export type SessionAttachmentMode = "branch" | "tag" | "detached-node";
 
 export type SessionHeadAttachment =
@@ -447,6 +456,14 @@ export interface SessionListItem {
 export interface SessionListView {
   branches: SessionListItem[];
   tags: SessionListItem[];
+}
+
+export interface SessionCommitListItem extends SessionCommitRecord {
+  current: boolean;
+}
+
+export interface SessionCommitListView {
+  commits: SessionCommitListItem[];
 }
 
 export interface SessionHeadListItem {

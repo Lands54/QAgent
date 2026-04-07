@@ -13,6 +13,8 @@ import type {
   MemoryRecord,
   ModelClient,
   RuntimeConfig,
+  SessionCommitListView,
+  SessionCommitRecord,
   SessionHeadListView,
   SessionListView,
   SessionLogEntry,
@@ -412,8 +414,21 @@ export class AgentManager {
     );
   }
 
+  public async listSessionCommits(
+    limit?: number,
+  ): Promise<SessionCommitListView> {
+    return this.sessionService.listCommits(
+      limit,
+      this.registry.getActiveRuntime().getSnapshot(),
+    );
+  }
+
+  public async listSessionGraphLog(limit?: number): Promise<SessionLogEntry[]> {
+    return this.sessionService.graphLog(limit);
+  }
+
   public async listSessionLog(limit?: number): Promise<SessionLogEntry[]> {
-    return this.sessionService.log(limit);
+    return this.listSessionGraphLog(limit);
   }
 
   public async compactSession(
@@ -469,12 +484,31 @@ export class AgentManager {
     return result.ref;
   }
 
+  public async switchSessionCreateBranch(name: string): Promise<SessionRefInfo> {
+    return this.forkSessionBranch(name);
+  }
+
   public async checkoutSessionRef(ref: string): Promise<SessionCheckoutResult> {
     const runtime = this.registry.getActiveRuntime();
     const result = await this.sessionService.checkout(ref, runtime.getSnapshot());
     await runtime.replaceSnapshot(result.snapshot, result.head, result.ref);
     this.emitChange();
     return result;
+  }
+
+  public async switchSessionRef(ref: string): Promise<SessionCheckoutResult> {
+    return this.checkoutSessionRef(ref);
+  }
+
+  public async commitSession(message: string): Promise<SessionCommitRecord> {
+    const runtime = this.registry.getActiveRuntime();
+    const result = await this.sessionService.createCommit(
+      message,
+      runtime.getSnapshot(),
+    );
+    await runtime.refreshSessionState();
+    this.emitChange();
+    return result.commit;
   }
 
   public async createSessionTag(name: string): Promise<SessionRefInfo> {

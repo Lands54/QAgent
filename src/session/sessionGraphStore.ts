@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type {
   SessionBranchRef,
+  SessionCommitRecord,
   SessionNode,
   SessionRepoState,
   SessionTagRef,
@@ -29,6 +30,7 @@ export class SessionGraphStore {
     state: SessionRepoState;
     branches: SessionBranchRef[];
     tags: SessionTagRef[];
+    commits: SessionCommitRecord[];
     nodes: SessionNode[];
     heads: SessionWorkingHead[];
   }): Promise<void> {
@@ -36,6 +38,7 @@ export class SessionGraphStore {
     await this.saveState(input.state);
     await this.saveBranches(input.branches);
     await this.saveTags(input.tags);
+    await this.saveCommits(input.commits);
     await Promise.all([
       ...input.nodes.map(async (node) => this.saveNode(node)),
       ...input.heads.map(async (head) => this.saveHead(head)),
@@ -69,6 +72,19 @@ export class SessionGraphStore {
     await writeJson(
       this.getTagsPath(),
       [...tags].sort((left, right) => left.name.localeCompare(right.name)),
+    );
+  }
+
+  public async loadCommits(): Promise<SessionCommitRecord[]> {
+    return (
+      await readJsonIfExists<SessionCommitRecord[]>(this.getCommitsPath())
+    ) ?? [];
+  }
+
+  public async saveCommits(commits: SessionCommitRecord[]): Promise<void> {
+    await writeJson(
+      this.getCommitsPath(),
+      [...commits].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
     );
   }
 
@@ -136,6 +152,10 @@ export class SessionGraphStore {
 
   private getTagsPath(): string {
     return path.join(this.repoRoot, "tags.json");
+  }
+
+  private getCommitsPath(): string {
+    return path.join(this.repoRoot, "commits.json");
   }
 
   private getNodePath(nodeId: string): string {

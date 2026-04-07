@@ -275,12 +275,22 @@ export class AppController {
         this.agentManager.getSessionGraphStatus(),
       listSessionRefs: async () => this.agentManager.listSessionRefs(),
       listSessionHeads: async () => this.agentManager.listSessionHeads(),
+      listSessionCommits: async (limit) =>
+        this.agentManager.listSessionCommits(limit),
+      listSessionGraphLog: async (limit) =>
+        this.agentManager.listSessionGraphLog(limit),
       listSessionLog: async (limit) => this.agentManager.listSessionLog(limit),
       compactSession: async () => this.agentManager.compactSession(),
+      commitSession: async (message) =>
+        this.agentManager.commitSession(message),
       createSessionBranch: async (name) =>
         this.agentManager.createSessionBranch(name),
+      switchSessionCreateBranch: async (name) =>
+        this.agentManager.switchSessionCreateBranch(name),
       forkSessionBranch: async (name) =>
         this.agentManager.forkSessionBranch(name),
+      switchSessionRef: async (ref) =>
+        this.agentManager.switchSessionRef(ref),
       checkoutSessionRef: async (ref) =>
         this.agentManager.checkoutSessionRef(ref),
       createSessionTag: async (name) =>

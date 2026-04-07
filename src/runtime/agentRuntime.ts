@@ -671,9 +671,6 @@ export class HeadAgentRuntime {
           const nextStatus = this.kind === "task" ? "completed" : "idle";
           const nextDetail = this.kind === "task" ? "任务已完成" : detail;
           await this.setStatusInternal(nextStatus, nextDetail);
-          await this.options.sessionService.flushCheckpointIfDirty(
-            this.options.snapshot,
-          );
           await this.refreshSessionState();
           if (this.options.callbacks.onRunLoopCompleted) {
             await this.options.callbacks.onRunLoopCompleted(this);

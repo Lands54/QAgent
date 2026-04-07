@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { SessionGraphStore } from "../../src/session/index.js";
 import type {
   SessionBranchRef,
+  SessionCommitRecord,
   SessionNode,
   SessionRepoState,
   SessionSnapshot,
@@ -67,6 +68,16 @@ describe("SessionGraphStore", () => {
       snapshotHash: "hash_main",
       createdAt: "2026-01-01T00:00:00.000Z",
     };
+    const commits: SessionCommitRecord[] = [
+      {
+        id: "commit_main",
+        message: "初始化",
+        nodeId: "node_main",
+        headId: "head_main",
+        sessionId: "session_demo",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ];
     const heads: SessionWorkingHead[] = [
       {
         id: "head_main",
@@ -97,6 +108,7 @@ describe("SessionGraphStore", () => {
       state,
       branches,
       tags,
+      commits,
       nodes: [node],
       heads,
     });
@@ -105,6 +117,7 @@ describe("SessionGraphStore", () => {
     expect(await store.loadState()).toEqual(state);
     expect(await store.loadBranches()).toEqual(branches);
     expect(await store.loadTags()).toEqual(tags);
+    expect(await store.loadCommits()).toEqual(commits);
     expect(await store.loadNode("node_main")).toEqual(node);
     expect(await store.listNodes()).toEqual([node]);
     expect(await store.loadHead("head_main")).toEqual(heads[0]);

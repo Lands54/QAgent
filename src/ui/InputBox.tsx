@@ -76,7 +76,7 @@ export function InputBox({
             const selected = !isIdleMode && index === completionSelectedIndex;
             return (
               <Text key={suggestion.value} color={selected ? "cyan" : undefined}>
-                {selected ? "›" : isIdleMode ? "·" : " "} {suggestion.value}
+                {selected ? "›" : isIdleMode ? "·" : " "} {suggestion.displayValue ?? suggestion.value}
                 <Text color="gray">  {suggestion.description}</Text>
               </Text>
             );

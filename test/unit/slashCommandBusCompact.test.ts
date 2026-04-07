@@ -27,6 +27,7 @@ function buildBus() {
       helperAgentAutoCleanup: true,
       helperAgentCount: 0,
       legacyAgentCount: 0,
+      uiContextEnabled: false,
     }),
     getApprovalMode: () => "always",
     getModelStatus: () => ({
@@ -86,8 +87,15 @@ function buildBus() {
     listSessionHeads: vi.fn(async () => ({
       heads: [],
     })),
+    listSessionCommits: vi.fn(async () => ({
+      commits: [],
+    })),
+    listSessionGraphLog: vi.fn(async () => []),
     listSessionLog: vi.fn(async () => []),
     compactSession,
+    commitSession: vi.fn(async () => {
+      throw new Error("not used");
+    }),
     clearHelperAgents: vi.fn(async () => ({
       cleared: 0,
       skippedRunning: 0,
@@ -100,7 +108,13 @@ function buildBus() {
     createSessionBranch: vi.fn(async () => {
       throw new Error("not used");
     }),
+    switchSessionCreateBranch: vi.fn(async () => {
+      throw new Error("not used");
+    }),
     forkSessionBranch: vi.fn(async () => {
+      throw new Error("not used");
+    }),
+    switchSessionRef: vi.fn(async () => {
       throw new Error("not used");
     }),
     checkoutSessionRef: vi.fn(async () => {

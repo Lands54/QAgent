@@ -1,6 +1,7 @@
 export { SessionGraphStore } from "./sessionGraphStore.js";
 export { SessionService } from "./sessionService.js";
 export type {
+  SessionCommitResult,
   SessionCheckoutResult,
   SessionHeadForkResult,
   SessionHeadSwitchResult,

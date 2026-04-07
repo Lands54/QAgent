@@ -11,9 +11,14 @@ function buildSessionDeps(): Pick<
   SlashCommandDeps,
   | "getSessionGraphStatus"
   | "listSessionRefs"
+  | "listSessionCommits"
+  | "listSessionGraphLog"
   | "listSessionLog"
+  | "commitSession"
   | "createSessionBranch"
+  | "switchSessionCreateBranch"
   | "forkSessionBranch"
+  | "switchSessionRef"
   | "checkoutSessionRef"
   | "createSessionTag"
   | "mergeSessionRef"
@@ -67,6 +72,37 @@ function buildSessionDeps(): Pick<
         createdAt: "2026-01-01T00:00:00.000Z",
       },
     ]),
+    listSessionCommits: vi.fn(async () => ({
+      commits: [
+        {
+          id: "commit_main",
+          message: "初始化 session graph",
+          nodeId: "node_main",
+          headId: "head_main",
+          sessionId: "session_demo",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          current: true,
+        },
+      ],
+    })),
+    listSessionGraphLog: vi.fn(async () => [
+      {
+        id: "node_main",
+        kind: "root" as const,
+        parentNodeIds: [],
+        refs: ["branch:main"],
+        summaryTitle: "root:node_main",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]),
+    commitSession: vi.fn(async () => ({
+      id: "commit_feature_a",
+      message: "保存当前方案",
+      nodeId: "node_commit",
+      headId: "head_main",
+      sessionId: "session_demo",
+      createdAt: "2026-01-02T00:00:00.000Z",
+    })),
     createSessionBranch: vi.fn(async () => ({
       mode: "branch" as const,
       name: "feature-a",
@@ -91,6 +127,18 @@ function buildSessionDeps(): Pick<
       active: true,
       dirty: false,
     })),
+    switchSessionCreateBranch: vi.fn(async () => ({
+      mode: "branch" as const,
+      name: "feature-a",
+      label: "branch=feature-a",
+      headNodeId: "node_main",
+      workingHeadId: "head_feature_a",
+      workingHeadName: "feature-a",
+      sessionId: "session_feature_a",
+      writerLeaseBranch: "feature-a",
+      active: true,
+      dirty: false,
+    })),
     checkoutSessionRef: vi.fn(async () => ({
       ref: {
         mode: "detached-tag" as const,
@@ -104,6 +152,20 @@ function buildSessionDeps(): Pick<
         dirty: false,
       },
       message: "已切换到 detached=tag:baseline。\nworking session: session_demo\n工作区未自动回退。",
+    })),
+    switchSessionRef: vi.fn(async () => ({
+      ref: {
+        mode: "detached-tag" as const,
+        name: "baseline",
+        label: "detached=tag:baseline",
+        headNodeId: "node_main",
+        workingHeadId: "head_main",
+        workingHeadName: "main",
+        sessionId: "session_demo",
+        active: true,
+        dirty: false,
+      },
+      message: "已切换到 detached=tag:baseline。\nworking head: main\n工作区未自动回退。",
     })),
     createSessionTag: vi.fn(async () => ({
       mode: "branch" as const,
@@ -506,6 +568,7 @@ describe("SlashCommandBus", () => {
       helperAgentAutoCleanup: false,
       helperAgentCount: 3,
       legacyAgentCount: 2,
+      uiContextEnabled: false,
     }));
     const setHelperAgentAutoCleanupEnabled = vi.fn(async () => {});
     const clearHelperAgents = vi.fn(async () => ({
@@ -573,20 +636,39 @@ describe("SlashCommandBus", () => {
     expect(showResult.messages[0]?.content).toContain("不需要手动激活");
   });
 
-  it("支持 session 图命令", async () => {
+  it("支持新的 git 风格 session 命令", async () => {
     const { bus } = buildBus();
 
     const statusResult = await bus.execute("/session status");
-    const listResult = await bus.execute("/session list");
+    const branchListResult = await bus.execute("/session branch");
+    const tagListResult = await bus.execute("/session tag");
+    const commitResult = await bus.execute('/session commit -m "保存当前方案"');
     const logResult = await bus.execute("/session log --limit=5");
+    const graphLogResult = await bus.execute("/session graph log --limit=5");
+    const switchCreateResult = await bus.execute("/session switch -c feature-a");
+    const switchResult = await bus.execute("/session switch baseline");
+
+    expect(statusResult.messages[0]?.content).toContain("ref: branch=main");
+    expect(branchListResult.messages[0]?.content).toContain("* main -> node_main");
+    expect(tagListResult.messages[0]?.content).toContain("baseline -> node_main");
+    expect(commitResult.messages[0]?.content).toContain("commit_feature_a");
+    expect(logResult.messages[0]?.content).toContain("commit_main | 初始化 session graph | node_main");
+    expect(graphLogResult.messages[0]?.content).toContain("node_main | root");
+    expect(switchCreateResult.messages[0]?.content).toContain("feature-a");
+    expect(switchResult.messages[0]?.content).toContain("工作区未自动回退");
+  });
+
+  it("旧的 session 命令会返回迁移提示", async () => {
+    const { bus } = buildBus();
+
+    const listResult = await bus.execute("/session list");
     const forkResult = await bus.execute("/session fork feature-a");
     const checkoutResult = await bus.execute("/session checkout baseline");
 
-    expect(statusResult.messages[0]?.content).toContain("ref: branch=main");
-    expect(listResult.messages[0]?.content).toContain("* main -> node_main");
-    expect(logResult.messages[0]?.content).toContain("node_main | root");
-    expect(forkResult.messages[0]?.content).toContain("feature-a");
-    expect(checkoutResult.messages[0]?.content).toContain("工作区未自动回退");
+    expect(listResult.messages[0]?.content).toContain("/session branch");
+    expect(listResult.messages[0]?.content).toContain("/session tag");
+    expect(forkResult.messages[0]?.content).toContain("/session switch -c");
+    expect(checkoutResult.messages[0]?.content).toContain("/session switch <ref>");
   });
 
   it("支持 working head 命令", async () => {

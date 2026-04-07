@@ -7,6 +7,7 @@ export interface InputHistoryState {
 
 export interface CompletionSuggestion {
   value: string;
+  displayValue?: string;
   description: string;
   category: "slash" | "skill";
 }
@@ -60,14 +61,17 @@ const STATIC_COMPLETIONS: CompletionEntry[] = [
   { value: "/skills list", description: "列出当前可用 Skills", category: "slash" },
   { value: "/skills show ", description: "查看 Skill 详情", category: "slash" },
   { value: "/session status", description: "查看当前 session / ref / head 状态", category: "slash", featured: true },
+  { value: "/session commit -m ", displayValue: "/session commit -m \"<message>\"", description: "手动创建一条 session commit", category: "slash", featured: true },
   { value: "/session compact", description: "手动压缩当前会话上下文", category: "slash", featured: true },
-  { value: "/session list", description: "列出 branch/tag refs", category: "slash" },
-  { value: "/session log --limit=", description: "查看 session graph 日志", category: "slash" },
-  { value: "/session branch ", description: "创建 branch ref", category: "slash" },
-  { value: "/session fork ", description: "fork 出新的 branch 与 working head", category: "slash" },
-  { value: "/session checkout ", description: "切换到某个 ref", category: "slash" },
-  { value: "/session tag ", description: "创建 tag", category: "slash" },
-  { value: "/session merge ", description: "merge 某个 sourceRef", category: "slash" },
+  { value: "/session log --limit=", description: "查看 commit 历史", category: "slash" },
+  { value: "/session graph log --limit=", description: "查看底层 session graph 节点日志", category: "slash" },
+  { value: "/session switch ", displayValue: "/session switch <ref>", description: "切换到某个 branch/tag/commit/node", category: "slash" },
+  { value: "/session switch -c ", displayValue: "/session switch -c <branch>", description: "创建新分支并切换到新的 working head", category: "slash" },
+  { value: "/session branch", description: "列出全部 branch", category: "slash" },
+  { value: "/session branch ", displayValue: "/session branch <name>", description: "创建 branch ref", category: "slash" },
+  { value: "/session tag", description: "列出全部 tag", category: "slash" },
+  { value: "/session tag ", displayValue: "/session tag <name>", description: "创建 tag", category: "slash" },
+  { value: "/session merge ", displayValue: "/session merge <sourceRef>", description: "merge 某个 sourceRef", category: "slash" },
   { value: "/agent status", description: "查看当前或指定 agent 状态", category: "slash" },
   { value: "/agent list", description: "列出所有 agent", category: "slash", featured: true },
   { value: "/agent switch ", description: "切换到指定 agent", category: "slash" },
@@ -87,32 +91,50 @@ function normalizeSearchText(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function renderSuggestionValue(entry: Pick<CompletionSuggestion, "value" | "displayValue">): string {
+  return entry.displayValue ?? entry.value;
+}
+
 function scoreCompletionEntry(entry: CompletionEntry, query: string): number {
   if (!query) {
     return entry.featured ? 10_000 : 1_000;
   }
 
   const normalizedValue = entry.value.toLowerCase();
+  const normalizedDisplayValue = renderSuggestionValue(entry).toLowerCase();
   const normalizedDescription = entry.description.toLowerCase();
   const tokens = query.split(/\s+/u).filter(Boolean);
 
   if (normalizedValue === query) {
     return 20_000;
   }
+  if (normalizedDisplayValue === query) {
+    return 19_000;
+  }
   if (normalizedValue.startsWith(query)) {
     return 15_000 - normalizedValue.length;
+  }
+  if (normalizedDisplayValue.startsWith(query)) {
+    return 14_000 - normalizedDisplayValue.length;
   }
   if (tokens.every((token) => normalizedValue.includes(token))) {
     return 9_000 - normalizedValue.length;
   }
+  if (tokens.every((token) => normalizedDisplayValue.includes(token))) {
+    return 8_500 - normalizedDisplayValue.length;
+  }
   if (
     tokens.every((token) => {
-      return normalizedValue.includes(token) || normalizedDescription.includes(token);
+      return (
+        normalizedValue.includes(token)
+        || normalizedDisplayValue.includes(token)
+        || normalizedDescription.includes(token)
+      );
     })
   ) {
     return 6_000 - normalizedValue.length;
   }
-  if (normalizedValue.includes(query)) {
+  if (normalizedValue.includes(query) || normalizedDisplayValue.includes(query)) {
     return 3_000 - normalizedValue.length;
   }
   return 0;
@@ -217,8 +239,9 @@ export function buildAutocompleteEntries(
   }));
 
   return dedupeCompletionEntries([...STATIC_COMPLETIONS, ...dynamicEntries]).map(
-    ({ value, description, category }) => ({
+    ({ value, displayValue, description, category }) => ({
       value,
+      displayValue,
       description,
       category,
     }),
@@ -237,8 +260,9 @@ export function getCompletionPreview(
   if (!input.trim()) {
     return {
       mode: "idle",
-      suggestions: DEFAULT_COMMANDS.map(({ value, description, category }) => ({
+      suggestions: DEFAULT_COMMANDS.map(({ value, displayValue, description, category }) => ({
         value,
+        displayValue,
         description,
         category,
       })).slice(0, limit),
@@ -315,7 +339,7 @@ export function completeInput(
       hint:
         match.value === input
           ? undefined
-          : `补全: ${match.value} · ${match.description}`,
+          : `补全: ${renderSuggestionValue(match)} · ${match.description}`,
       nextSuggestionIndex: 0,
       cycleQuery: undefined,
     };
@@ -334,7 +358,7 @@ export function completeInput(
   const selected = preview.suggestions[index] ?? preview.suggestions[0]!;
   return {
     nextValue: selected.value,
-    hint: `补全: ${selected.value} · ${selected.description}`,
+    hint: `补全: ${renderSuggestionValue(selected)} · ${selected.description}`,
     nextSuggestionIndex: (index + 1) % preview.suggestions.length,
     cycleQuery,
   };

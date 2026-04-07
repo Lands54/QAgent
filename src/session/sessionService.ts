@@ -5,6 +5,8 @@ import type {
   SessionAbstractAsset,
   SessionAssetProvider,
   SessionBranchRef,
+  SessionCommitListView,
+  SessionCommitRecord,
   SessionEvent,
   SessionHeadAttachment,
   SessionHeadListItem,
@@ -74,6 +76,10 @@ export interface SessionHeadSwitchResult extends SessionMutationResult {
   snapshot: SessionSnapshot;
 }
 
+export interface SessionCommitResult extends SessionMutationResult {
+  commit: SessionCommitRecord;
+}
+
 interface ForkHeadOptions {
   sourceHeadId?: string;
   sourceRef?: string;
@@ -99,6 +105,7 @@ export class SessionService {
   private repoState?: SessionRepoState;
   private branches: SessionBranchRef[] = [];
   private tags: SessionTagRef[] = [];
+  private commits: SessionCommitRecord[] = [];
   private heads: SessionWorkingHead[] = [];
   private lastLoadInfoMessage?: string;
 
@@ -228,11 +235,13 @@ export class SessionService {
     };
     this.branches = [mainBranch];
     this.tags = [];
+    this.commits = [];
     this.heads = [head];
     await this.graphStore.initializeRepo({
       state: this.repoState,
       branches: this.branches,
       tags: this.tags,
+      commits: this.commits,
       nodes: [rootNode],
       heads: [head],
     });
@@ -390,7 +399,25 @@ export class SessionService {
     };
   }
 
-  public async log(limit = 20): Promise<SessionLogEntry[]> {
+  public async listCommits(
+    limit = 20,
+    snapshot?: SessionSnapshot,
+  ): Promise<SessionCommitListView> {
+    await this.ensureRepoLoaded();
+    const status = await this.getStatus(snapshot);
+
+    return {
+      commits: [...this.commits]
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .slice(0, limit)
+        .map((commit) => ({
+          ...commit,
+          current: commit.nodeId === status.headNodeId,
+        })),
+    };
+  }
+
+  public async graphLog(limit = 20): Promise<SessionLogEntry[]> {
     await this.ensureRepoLoaded();
     const nodes = await this.graphStore.listNodes();
     const refsByNode = new Map<string, string[]>();
@@ -427,6 +454,49 @@ export class SessionService {
         summaryTitle: node.abstractAssets[0]?.title,
         createdAt: node.createdAt,
       }));
+  }
+
+  public async log(limit = 20): Promise<SessionLogEntry[]> {
+    return this.graphLog(limit);
+  }
+
+  public async createCommit(
+    message: string,
+    snapshot: SessionSnapshot,
+  ): Promise<SessionCommitResult> {
+    await this.ensureRepoLoaded();
+    const trimmedMessage = message.trim();
+    if (!trimmedMessage) {
+      throw new Error("commit message 不能为空。");
+    }
+
+    const checkpointNode = await this.ensureSnapshotNode(
+      snapshot.workingHeadId,
+      snapshot,
+      {
+        force: false,
+        kind: "checkpoint",
+      },
+    );
+    const head = await this.requireHead(snapshot.workingHeadId);
+    const commit: SessionCommitRecord = {
+      id: createId("commit"),
+      message: trimmedMessage,
+      nodeId: checkpointNode?.id ?? head.currentNodeId,
+      headId: head.id,
+      sessionId: head.sessionId,
+      createdAt: new Date().toISOString(),
+    };
+    this.commits.push(commit);
+    await this.graphStore.saveCommits(this.commits);
+    await this.saveRepoMetadata();
+
+    return {
+      commit,
+      ref: await this.getHeadStatus(head.id, snapshot),
+      head,
+      message: `已创建 commit ${commit.id}。`,
+    };
   }
 
   public async createBranch(
@@ -1084,6 +1154,7 @@ export class SessionService {
     }
     this.branches = await this.graphStore.loadBranches();
     this.tags = await this.graphStore.loadTags();
+    this.commits = await this.graphStore.loadCommits();
     this.heads = await this.graphStore.listHeads();
   }
 
@@ -1216,6 +1287,7 @@ export class SessionService {
   private async resolveRef(ref: string): Promise<
     | { kind: "branch"; ref: SessionBranchRef; node: SessionNode }
     | { kind: "tag"; ref: SessionTagRef; node: SessionNode }
+    | { kind: "commit"; commit: SessionCommitRecord; node: SessionNode }
     | { kind: "node"; node: SessionNode }
   > {
     const branch = this.branches.find((item) => item.name === ref);
@@ -1233,6 +1305,15 @@ export class SessionService {
         kind: "tag",
         ref: tag,
         node: await this.requireNode(tag.targetNodeId),
+      };
+    }
+
+    const commit = this.commits.find((item) => item.id === ref);
+    if (commit) {
+      return {
+        kind: "commit",
+        commit,
+        node: await this.requireNode(commit.nodeId),
       };
     }
 

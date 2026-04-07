@@ -4,6 +4,7 @@ import type {
   ApprovalMode,
   MemoryRecord,
   ModelProvider,
+  SessionCommitListView,
   SessionHeadListView,
   SessionListView,
   SessionLogEntry,
@@ -67,6 +68,8 @@ interface SlashCommandDependencies {
   getSessionGraphStatus: () => Promise<SessionRefInfo>;
   listSessionRefs: () => Promise<SessionListView>;
   listSessionHeads: () => Promise<SessionHeadListView>;
+  listSessionCommits: (limit?: number) => Promise<SessionCommitListView>;
+  listSessionGraphLog: (limit?: number) => Promise<SessionLogEntry[]>;
   listSessionLog: (limit?: number) => Promise<SessionLogEntry[]>;
   compactSession: () => Promise<{
     compacted: boolean;
@@ -76,8 +79,18 @@ interface SlashCommandDependencies {
     keptGroups: number;
     removedGroups: number;
   }>;
+  commitSession: (message: string) => Promise<{
+    id: string;
+    message: string;
+    nodeId: string;
+    headId: string;
+    sessionId: string;
+    createdAt: string;
+  }>;
   createSessionBranch: (name: string) => Promise<SessionRefInfo>;
+  switchSessionCreateBranch: (name: string) => Promise<SessionRefInfo>;
   forkSessionBranch: (name: string) => Promise<SessionRefInfo>;
+  switchSessionRef: (ref: string) => Promise<SessionCheckoutResultLike>;
   checkoutSessionRef: (ref: string) => Promise<SessionCheckoutResultLike>;
   createSessionTag: (name: string) => Promise<SessionRefInfo>;
   mergeSessionRef: (ref: string) => Promise<SessionRefInfo>;
@@ -121,6 +134,28 @@ function splitArgs(input: string): string[] {
   );
 }
 
+function parseLimit(args: string[], fallback = 20): number {
+  const limitArg = args.find((arg) => arg.startsWith("--limit="));
+  if (!limitArg) {
+    return fallback;
+  }
+  const parsed = Number(limitArg.slice("--limit=".length));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseMessageFlag(args: string[]): string | undefined {
+  const messageIndex = args.findIndex((arg) => arg === "-m");
+  if (messageIndex >= 0) {
+    return args[messageIndex + 1];
+  }
+
+  const inlineArg = args.find((arg) => arg.startsWith("-m="));
+  if (!inlineArg) {
+    return undefined;
+  }
+  return inlineArg.slice("-m=".length);
+}
+
 function helpMessage(): string {
   return [
     "可用命令：",
@@ -156,12 +191,15 @@ function helpMessage(): string {
     "/agent interrupt",
     "/agent resume",
     "/session status",
+    "/session commit -m \"<message>\"",
     "/session compact",
-    "/session list",
     "/session log [--limit=N]",
+    "/session graph log [--limit=N]",
+    "/session switch <ref>",
+    "/session switch -c <branch>",
+    "/session branch",
     "/session branch <name>",
-    "/session fork <name>",
-    "/session checkout <ref>",
+    "/session tag",
     "/session tag <name>",
     "/session merge <sourceRef>",
     "/session head status",
@@ -866,22 +904,6 @@ export class SlashCommandBus {
       };
     }
 
-    if (subcommand === "list") {
-      const refs = await this.deps.listSessionRefs();
-      const lines = [
-        ...refs.branches.map((branch) =>
-          `${branch.current ? "*" : " "} ${branch.name} -> ${branch.targetNodeId}`,
-        ),
-        ...refs.tags.map((tag) =>
-          `${tag.current ? "*" : " "} ${tag.name} -> ${tag.targetNodeId}`,
-        ),
-      ];
-      return {
-        handled: true,
-        messages: [message("info", lines.join("\n"))],
-      };
-    }
-
     if (subcommand === "compact") {
       const result = await this.deps.compactSession();
       return {
@@ -901,26 +923,95 @@ export class SlashCommandBus {
       };
     }
 
-    if (subcommand === "log") {
-      const limitArg = args.find((arg) => arg.startsWith("--limit="));
-      const limit = limitArg ? Number(limitArg.slice("--limit=".length)) : 20;
-      const log = await this.deps.listSessionLog(limit);
+    if (subcommand === "commit") {
+      const commitMessage = parseMessageFlag(args);
+      if (!commitMessage?.trim()) {
+        return {
+          handled: true,
+          messages: [message("error", "用法：/session commit -m \"<message>\"")],
+        };
+      }
+      const commit = await this.deps.commitSession(commitMessage);
       return {
         handled: true,
         messages: [
           message(
             "info",
-            log
-              .map((entry) =>
-                `${entry.id} | ${entry.kind} | refs=${entry.refs.join(",")} | ${entry.summaryTitle ?? ""}`,
-              )
-              .join("\n"),
+            [
+              `已创建 commit ${commit.id}`,
+              `message: ${commit.message}`,
+              `node: ${commit.nodeId}`,
+              `createdAt: ${commit.createdAt}`,
+            ].join("\n"),
+          ),
+        ],
+      };
+    }
+
+    if (subcommand === "log") {
+      const commits = await this.deps.listSessionCommits(parseLimit(args));
+      return {
+        handled: true,
+        messages: [
+          message(
+            "info",
+            commits.commits.length > 0
+              ? commits.commits
+                .map((entry) =>
+                  `${entry.current ? "*" : " "} ${entry.id} | ${entry.message} | ${entry.nodeId} | ${entry.createdAt}`,
+                )
+                .join("\n")
+              : "暂无 commit 记录。",
+          ),
+        ],
+      };
+    }
+
+    if (subcommand === "graph") {
+      const graphSubcommand = args[0];
+      if (graphSubcommand !== "log") {
+        return {
+          handled: true,
+          messages: [message("error", "用法：/session graph log [--limit=N]")],
+        };
+      }
+      const log = await this.deps.listSessionGraphLog(parseLimit(args.slice(1)));
+      return {
+        handled: true,
+        messages: [
+          message(
+            "info",
+            log.length > 0
+              ? log
+                .map((entry) =>
+                  `${entry.id} | ${entry.kind} | refs=${entry.refs.join(",")} | ${entry.summaryTitle ?? ""}`,
+                )
+                .join("\n")
+              : "暂无 session graph 节点。",
           ),
         ],
       };
     }
 
     if (subcommand === "branch") {
+      if (args.length === 0) {
+        const refs = await this.deps.listSessionRefs();
+        return {
+          handled: true,
+          messages: [
+            message(
+              "info",
+              refs.branches.length > 0
+                ? refs.branches
+                  .map((branch) =>
+                    `${branch.current ? "*" : " "} ${branch.name} -> ${branch.targetNodeId}`,
+                  )
+                  .join("\n")
+                : "暂无 branch。",
+            ),
+          ],
+        };
+      }
       const name = args[0];
       if (!name) {
         return {
@@ -935,30 +1026,32 @@ export class SlashCommandBus {
       };
     }
 
-    if (subcommand === "fork") {
-      const name = args[0];
-      if (!name) {
+    if (subcommand === "switch") {
+      if (args[0] === "-c") {
+        const branchName = args[1];
+        if (!branchName) {
+          return {
+            handled: true,
+            messages: [message("error", "用法：/session switch -c <branch>")],
+          };
+        }
+        const ref = await this.deps.switchSessionCreateBranch(branchName);
         return {
           handled: true,
-          messages: [message("error", "用法：/session fork <name>")],
+          messages: [
+            message("info", `已创建并切换到分支 ${branchName}，当前 ref=${ref.label}`),
+          ],
         };
       }
-      const ref = await this.deps.forkSessionBranch(name);
-      return {
-        handled: true,
-        messages: [message("info", `已 fork 到分支 ${name}，当前 ref=${ref.label}`)],
-      };
-    }
 
-    if (subcommand === "checkout") {
       const refName = args[0];
       if (!refName) {
         return {
           handled: true,
-          messages: [message("error", "用法：/session checkout <ref>")],
+          messages: [message("error", "用法：/session switch <ref>")],
         };
       }
-      const result = await this.deps.checkoutSessionRef(refName);
+      const result = await this.deps.switchSessionRef(refName);
       return {
         handled: true,
         messages: [message("info", result.message)],
@@ -966,6 +1059,24 @@ export class SlashCommandBus {
     }
 
     if (subcommand === "tag") {
+      if (args.length === 0) {
+        const refs = await this.deps.listSessionRefs();
+        return {
+          handled: true,
+          messages: [
+            message(
+              "info",
+              refs.tags.length > 0
+                ? refs.tags
+                  .map((tag) =>
+                    `${tag.current ? "*" : " "} ${tag.name} -> ${tag.targetNodeId}`,
+                  )
+                  .join("\n")
+                : "暂无 tag。",
+            ),
+          ],
+        };
+      }
       const name = args[0];
       if (!name) {
         return {
@@ -992,6 +1103,42 @@ export class SlashCommandBus {
       return {
         handled: true,
         messages: [message("info", `已 merge ${refName}，当前 ref=${ref.label}`)],
+      };
+    }
+
+    if (subcommand === "list") {
+      return {
+        handled: true,
+        messages: [
+          message(
+            "error",
+            "/session list 已废弃。请改用 /session branch 查看分支，或 /session tag 查看标签。",
+          ),
+        ],
+      };
+    }
+
+    if (subcommand === "fork") {
+      return {
+        handled: true,
+        messages: [
+          message(
+            "error",
+            "/session fork 已废弃。请改用 /session switch -c <branch>。",
+          ),
+        ],
+      };
+    }
+
+    if (subcommand === "checkout") {
+      return {
+        handled: true,
+        messages: [
+          message(
+            "error",
+            "/session checkout 已废弃。请改用 /session switch <ref>。",
+          ),
+        ],
       };
     }
 
