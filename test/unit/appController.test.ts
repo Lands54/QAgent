@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { AppController } from "../../src/runtime/appController.js";
-import type { SessionEvent } from "../../src/types.js";
+import type { RuntimeEvent, SessionEvent } from "../../src/types.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -124,6 +124,29 @@ describe("AppController", () => {
         );
       })).toBe(true);
     } finally {
+      await controller.dispose();
+    }
+  });
+
+  it("slash 命令也会发出统一的 command.completed 运行事件", async () => {
+    const projectDir = await makeTempDir("qagent-app-controller-command-event-");
+    const controller = await AppController.create({
+      cwd: projectDir,
+    });
+    const events: RuntimeEvent[] = [];
+    const unsubscribe = controller.subscribeRuntimeEvents((event) => {
+      events.push(event);
+    });
+
+    try {
+      await controller.submitInput("/debug ui-context on");
+
+      const commandEvent = events.find((event) => event.type === "command.completed");
+      expect(commandEvent?.payload.domain).toBe("debug");
+      expect(commandEvent?.payload.status).toBe("success");
+      expect(commandEvent?.payload.code).toBe("debug.ui_context.updated");
+    } finally {
+      unsubscribe();
       await controller.dispose();
     }
   });

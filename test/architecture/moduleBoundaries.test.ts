@@ -9,7 +9,8 @@ const typesFile = path.join(srcRoot, "types.ts");
 const sourceExtensions = new Set([".ts", ".tsx"]);
 
 const allowedModuleDeps = new Map<string, Set<string>>([
-  ["cli", new Set(["runtime", "types", "ui"])],
+  ["cli", new Set(["command", "runtime", "types", "ui"])],
+  ["command", new Set(["types", "utils"])],
   ["config", new Set(["types", "utils"])],
   ["context", new Set(["types", "utils"])],
   ["memory", new Set(["types", "utils"])],
@@ -18,6 +19,7 @@ const allowedModuleDeps = new Map<string, Set<string>>([
     "runtime",
     new Set([
       "config",
+      "command",
       "context",
       "memory",
       "model",

@@ -16,6 +16,14 @@ import type {
   ToolMode,
   ToolResult,
 } from "../types.js";
+import { ApprovalRequiredInterruptError } from "./runtimeErrors.js";
+
+interface ApprovalRequestContext {
+  step: number;
+  assistantMessageId: string;
+  toolCalls: ReadonlyArray<ToolCall>;
+  nextToolCallIndex: number;
+}
 
 interface AgentRunnerDependencies {
   config: RuntimeConfig;
@@ -34,8 +42,11 @@ interface AgentRunnerDependencies {
   commitAssistantTurn: (input: {
     content: string;
     toolCalls: ToolCall[];
-  }) => Promise<void>;
+  }) => Promise<{
+    assistantMessageId?: string;
+  }>;
   commitToolResult: (result: ToolResult) => Promise<void>;
+  onToolStart?: (toolCall: ToolCall) => Promise<void>;
   emitInfo: (message: string) => Promise<void>;
   emitError: (message: string) => Promise<void>;
   setStatus: (
@@ -45,7 +56,10 @@ interface AgentRunnerDependencies {
   startAssistantDraft: () => Promise<void>;
   pushAssistantDraft: (delta: string) => Promise<void>;
   finishAssistantDraft: () => Promise<void>;
-  requestApproval: (request: ApprovalRequest) => Promise<ApprovalDecision>;
+  requestApproval: (
+    request: ApprovalRequest,
+    context: ApprovalRequestContext,
+  ) => Promise<ApprovalDecision>;
 }
 
 export class AgentRunner {
@@ -58,7 +72,12 @@ export class AgentRunner {
     return this.running;
   }
 
-  public async runLoop(): Promise<void> {
+  public async runLoop(input?: {
+    startStep?: number;
+    toolCalls?: ReadonlyArray<ToolCall>;
+    nextToolCallIndex?: number;
+    assistantMessageId?: string;
+  }): Promise<void> {
     if (this.running) {
       return;
     }
@@ -67,12 +86,33 @@ export class AgentRunner {
     this.abortController = new AbortController();
 
     try {
+      let pendingToolCalls = input?.toolCalls;
+      let pendingToolCallIndex = input?.nextToolCallIndex ?? 0;
+      let pendingAssistantMessageId = input?.assistantMessageId ?? "";
       for (
-        let step = 1;
+        let step = input?.startStep ?? 1;
         step <= this.deps.config.runtime.maxAgentSteps;
         step += 1
       ) {
         this.ensureNotAborted();
+
+        if (pendingToolCalls && pendingToolCalls.length > 0) {
+          await this.deps.setStatus(
+            "running",
+            `Agent 正在继续执行，第 ${step}/${this.deps.config.runtime.maxAgentSteps} 步`,
+          );
+          await this.executeToolCalls({
+            step,
+            assistantMessageId: pendingAssistantMessageId,
+            toolCalls: pendingToolCalls,
+            nextToolCallIndex: pendingToolCallIndex,
+          });
+          pendingToolCalls = undefined;
+          pendingToolCallIndex = 0;
+          pendingAssistantMessageId = "";
+          continue;
+        }
+
         await this.deps.beforeModelTurn?.();
         await this.deps.setStatus(
           "running",
@@ -113,52 +153,30 @@ export class AgentRunner {
         );
 
         await this.deps.finishAssistantDraft();
-        await this.deps.commitAssistantTurn({
+        const committedAssistantTurn = await this.deps.commitAssistantTurn({
           content: result.assistantText,
           toolCalls: result.toolCalls,
-        });
+        }) ?? {};
 
         if (result.toolCalls.length === 0) {
           await this.deps.setStatus("idle", "等待输入");
           return;
         }
 
-        for (const toolCall of result.toolCalls) {
-          this.ensureNotAborted();
-
-          const assessment = this.deps.approvalPolicy.evaluate(toolCall);
-          let approved = true;
-          if (assessment.requiresApproval && assessment.request) {
-            const decision = await this.deps.requestApproval(assessment.request);
-            approved = decision.approved;
-          }
-
-          const toolResult = approved
-            ? await this.deps.toolRegistry.execute(toolCall, {
-                timeoutMs: this.deps.config.runtime.shellCommandTimeoutMs,
-                signal: this.abortController.signal,
-              })
-            : {
-                callId: toolCall.id,
-                name: "shell" as const,
-                command: toolCall.input.command,
-                status: "rejected" as const,
-                exitCode: null,
-                stdout: "",
-                stderr: "命令执行被用户拒绝。",
-                cwd: this.deps.getShellCwd(),
-                durationMs: 0,
-                startedAt: new Date().toISOString(),
-                finishedAt: new Date().toISOString(),
-              };
-
-          await this.deps.commitToolResult(toolResult);
-        }
+        await this.executeToolCalls({
+          step,
+          assistantMessageId: committedAssistantTurn.assistantMessageId ?? "",
+          toolCalls: result.toolCalls,
+          nextToolCallIndex: 0,
+        });
       }
 
       await this.deps.emitInfo("达到最大自治步数，已停止当前任务。");
       await this.deps.setStatus("idle", "等待输入");
     } catch (error) {
+      if (error instanceof ApprovalRequiredInterruptError) {
+        return;
+      }
       if ((error as Error).name === "AbortError") {
         await this.deps.emitInfo("Agent 已被中断。");
         await this.deps.setStatus("interrupted", "已中断");
@@ -178,5 +196,57 @@ export class AgentRunner {
 
   private ensureNotAborted(): void {
     this.abortController?.signal.throwIfAborted();
+  }
+
+  private async executeToolCalls(
+    context: ApprovalRequestContext,
+  ): Promise<void> {
+    for (
+      let index = context.nextToolCallIndex;
+      index < context.toolCalls.length;
+      index += 1
+    ) {
+      this.ensureNotAborted();
+
+      const toolCall = context.toolCalls[index];
+      if (!toolCall) {
+        continue;
+      }
+      const assessment = this.deps.approvalPolicy.evaluate(toolCall);
+      let approved = true;
+      if (assessment.requiresApproval && assessment.request) {
+        const decision = await this.deps.requestApproval(assessment.request, {
+          ...context,
+          nextToolCallIndex: index,
+        });
+        approved = decision.approved;
+      }
+
+      const toolResult = approved
+        ? await this.executeApprovedTool(toolCall)
+        : {
+            callId: toolCall.id,
+            name: "shell" as const,
+            command: toolCall.input.command,
+            status: "rejected" as const,
+            exitCode: null,
+            stdout: "",
+            stderr: "命令执行被用户拒绝。",
+            cwd: this.deps.getShellCwd(),
+            durationMs: 0,
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+          };
+
+      await this.deps.commitToolResult(toolResult);
+    }
+  }
+
+  private async executeApprovedTool(toolCall: ToolCall): Promise<ToolResult> {
+    await this.deps.onToolStart?.(toolCall);
+    return this.deps.toolRegistry.execute(toolCall, {
+      timeoutMs: this.deps.config.runtime.shellCommandTimeoutMs,
+      signal: this.abortController?.signal,
+    });
   }
 }

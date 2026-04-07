@@ -1,6 +1,7 @@
 import type {
   AgentKind,
   ApprovalMode,
+  PendingApprovalCheckpoint,
   PromptProfile,
   SessionAbstractAsset,
   SessionAssetProvider,
@@ -274,6 +275,33 @@ export class SessionService {
     }
     head.updatedAt = new Date().toISOString();
     await this.graphStore.saveHead(head);
+  }
+
+  public async getPendingApprovalCheckpoint(
+    headId?: string,
+  ): Promise<PendingApprovalCheckpoint | undefined> {
+    const head = await this.getHead(headId);
+    return this.sessionStore.loadPendingApprovalCheckpoint(head.id);
+  }
+
+  public async savePendingApprovalCheckpoint(
+    checkpoint: PendingApprovalCheckpoint,
+  ): Promise<void> {
+    await this.ensureRepoLoaded();
+    await this.sessionStore.savePendingApprovalCheckpoint(
+      checkpoint.headId,
+      checkpoint,
+    );
+    const head = await this.requireHead(checkpoint.headId);
+    head.runtimeState.status = "awaiting-approval";
+    head.status = "awaiting-approval";
+    head.updatedAt = new Date().toISOString();
+    await this.graphStore.saveHead(head);
+  }
+
+  public async clearPendingApprovalCheckpoint(headId: string): Promise<void> {
+    await this.ensureRepoLoaded();
+    await this.sessionStore.clearPendingApprovalCheckpoint(headId);
   }
 
   public async flushCheckpointIfDirty(
@@ -946,8 +974,8 @@ export class SessionService {
 
     const targetHead = await this.requireHead(targetHeadId);
     const sourceHead = await this.requireHead(sourceHeadId);
-    if (targetHead.currentNodeId === sourceHead.currentNodeId) {
-      throw new Error("sourceHead 与 targetHead 指向同一个 node，无法 merge。");
+    if (targetHead.id === sourceHead.id) {
+      throw new Error("sourceHead 与 targetHead 相同，无法 merge。");
     }
 
     return this.mergeResolvedSourceIntoHead(targetHead, sourceHead, assets);

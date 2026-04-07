@@ -12,6 +12,8 @@ import type {
   ApprovalMode,
   MemoryRecord,
   ModelClient,
+  PendingApprovalCheckpoint,
+  RuntimeEvent,
   RuntimeConfig,
   SessionCommitListView,
   SessionCommitRecord,
@@ -37,6 +39,7 @@ import {
 } from "./compactSessionService.js";
 
 type Listener = () => void;
+type RuntimeEventListener = (event: RuntimeEvent) => void;
 
 export interface AgentManagerInitializationInput {
   cwd: string;
@@ -111,6 +114,13 @@ export class AgentManager {
     this.events.on("change", listener);
     return () => {
       this.events.off("change", listener);
+    };
+  }
+
+  public subscribeRuntimeEvents(listener: RuntimeEventListener): () => void {
+    this.events.on("runtime-event", listener);
+    return () => {
+      this.events.off("runtime-event", listener);
     };
   }
 
@@ -277,6 +287,7 @@ export class AgentManager {
     options?: {
       activate?: boolean;
       skipFetchMemoryHook?: boolean;
+      approvalMode?: "interactive" | "checkpoint";
     },
   ): Promise<void> {
     const resolvedAgentId = this.navigation.resolveAgentId(agentId);
@@ -291,7 +302,60 @@ export class AgentManager {
     );
     await runtime.submitInput(input, {
       modelInputAppendix,
+      approvalMode: options?.approvalMode,
     });
+  }
+
+  public async runAgentPrompt(
+    input: string,
+    options?: {
+      agentId?: string;
+      activate?: boolean;
+      approvalMode?: "interactive" | "checkpoint";
+    },
+  ): Promise<{
+    settled: "completed" | "approval_required" | "interrupted" | "error";
+    agent: AgentViewState;
+    checkpoint?: PendingApprovalCheckpoint;
+    uiMessages: ReadonlyArray<UIMessage>;
+  }> {
+    const targetAgentId = options?.agentId ?? this.registry.getActiveAgentId();
+    const runtime = this.registry.requireRuntime(targetAgentId);
+    const beforeUiCount = runtime.getSnapshot().uiMessages.length;
+    await this.submitInputToAgent(targetAgentId, input, {
+      activate: options?.activate,
+      approvalMode: options?.approvalMode ?? "checkpoint",
+    });
+    const uiMessages = runtime.getSnapshot().uiMessages.slice(beforeUiCount);
+    const checkpoint = runtime.getPendingApprovalCheckpoint();
+    const agent = runtime.getViewState();
+    if (checkpoint) {
+      return {
+        settled: "approval_required",
+        agent,
+        checkpoint,
+        uiMessages,
+      };
+    }
+    if (agent.status === "error") {
+      return {
+        settled: "error",
+        agent,
+        uiMessages,
+      };
+    }
+    if (agent.status === "interrupted") {
+      return {
+        settled: "interrupted",
+        agent,
+        uiMessages,
+      };
+    }
+    return {
+      settled: "completed",
+      agent,
+      uiMessages,
+    };
   }
 
   public async interruptAgent(agentId?: string): Promise<void> {
@@ -314,6 +378,71 @@ export class AgentManager {
   ): Promise<void> {
     const resolvedAgentId = this.navigation.resolveAgentId(agentId);
     await this.registry.requireRuntime(resolvedAgentId).resolveApproval(approved);
+  }
+
+  public getPendingApprovalCheckpoint(input?: {
+    checkpointId?: string;
+    agentId?: string;
+    headId?: string;
+  }): PendingApprovalCheckpoint | undefined {
+    const runtime = this.findRuntimeForPendingApproval(input);
+    return runtime?.getPendingApprovalCheckpoint();
+  }
+
+  public async resolvePendingApprovalCheckpoint(
+    approved: boolean,
+    input?: {
+      checkpointId?: string;
+      agentId?: string;
+      headId?: string;
+    },
+  ): Promise<{
+    settled: "completed" | "approval_required" | "interrupted" | "error";
+    agent: AgentViewState;
+    checkpoint?: PendingApprovalCheckpoint;
+    uiMessages: ReadonlyArray<UIMessage>;
+  }> {
+    const runtime = this.findRuntimeForPendingApproval(input);
+    if (!runtime) {
+      throw new Error("当前没有待处理的审批请求。");
+    }
+    const existingCheckpoint = runtime.getPendingApprovalCheckpoint()
+      ?? await this.sessionService.getPendingApprovalCheckpoint(runtime.headId);
+    if (!existingCheckpoint) {
+      throw new Error("当前没有待处理的审批请求。");
+    }
+    const beforeUiCount = runtime.getSnapshot().uiMessages.length;
+    await runtime.resolveApproval(approved);
+    const uiMessages = runtime.getSnapshot().uiMessages.slice(beforeUiCount);
+    const checkpoint = runtime.getPendingApprovalCheckpoint();
+    const agent = runtime.getViewState();
+    if (checkpoint) {
+      return {
+        settled: "approval_required",
+        agent,
+        checkpoint,
+        uiMessages,
+      };
+    }
+    if (agent.status === "error") {
+      return {
+        settled: "error",
+        agent,
+        uiMessages,
+      };
+    }
+    if (agent.status === "interrupted") {
+      return {
+        settled: "interrupted",
+        agent,
+        uiMessages,
+      };
+    }
+    return {
+      settled: "completed",
+      agent,
+      uiMessages,
+    };
   }
 
   public async clearActiveAgentUi(): Promise<void> {
@@ -705,10 +834,38 @@ export class AgentManager {
       onBeforeModelTurn: async (runtime: HeadAgentRuntime) => {
         await this.hookPipeline.handleBeforeModelTurn(runtime);
       },
+      onRuntimeEvent: (event) => {
+        this.emitRuntimeEvent(event);
+      },
     };
   }
 
   private emitChange(): void {
     this.events.emit("change");
+  }
+
+  private emitRuntimeEvent(event: RuntimeEvent): void {
+    this.events.emit("runtime-event", event);
+  }
+
+  private findRuntimeForPendingApproval(input?: {
+    checkpointId?: string;
+    agentId?: string;
+    headId?: string;
+  }): HeadAgentRuntime | undefined {
+    if (input?.checkpointId) {
+      return this.registry.getEntries().find((entry) => {
+        return entry.runtime.getPendingApprovalCheckpoint()?.checkpointId === input.checkpointId;
+      })?.runtime;
+    }
+    if (input?.agentId) {
+      return this.registry.requireRuntime(this.navigation.resolveAgentId(input.agentId));
+    }
+    if (input?.headId) {
+      return this.registry.getEntries().find((entry) => entry.runtime.headId === input.headId)?.runtime;
+    }
+    return this.registry.getEntries().find((entry) => {
+      return Boolean(entry.runtime.getPendingApprovalCheckpoint());
+    })?.runtime;
   }
 }
