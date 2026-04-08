@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 
 import { AgentManager } from "./agentManager.js";
+import { CommandService } from "../command/index.js";
 import {
   defaultBaseUrlForProvider,
   loadRuntimeConfig,
@@ -13,21 +14,25 @@ import { createModelClient } from "../model/index.js";
 import { SessionService } from "../session/index.js";
 import { SkillRegistry } from "../skills/index.js";
 import { ApprovalPolicy } from "../tool/index.js";
+import type {
+  ApprovalMode,
+  CliOptions,
+  CommandRequest,
+  CommandResult,
+  ModelClient,
+  ModelProvider,
+  RuntimeEvent,
+  RuntimeConfig,
+} from "../types.js";
 import { AppStateAssembler } from "./application/appStateAssembler.js";
 import {
   createEmptyState,
   type AppState,
 } from "./appState.js";
 import { SlashCommandBus } from "./slashCommandBus.js";
-import type {
-  ApprovalMode,
-  CliOptions,
-  ModelClient,
-  ModelProvider,
-  RuntimeConfig,
-} from "../types.js";
 
 type Listener = (state: AppState) => void;
+type RuntimeEventListener = (event: RuntimeEvent) => void;
 
 export class AppController {
   public static async create(cliOptions: CliOptions): Promise<AppController> {
@@ -47,6 +52,7 @@ export class AppController {
   private modelClient: ModelClient;
   private state: AppState;
   private slashBus?: SlashCommandBus;
+  private readonly commandService: CommandService;
   private exitResolver?: () => void;
   private readonly exitPromise: Promise<void>;
 
@@ -69,6 +75,93 @@ export class AppController {
       this.approvalPolicy,
       () => this.skillRegistry.getAll(),
     );
+    this.commandService = new CommandService({
+      getSessionId: () => this.state.sessionId,
+      getActiveHeadId: () => this.state.activeWorkingHeadId,
+      getActiveAgentId: () => this.state.activeAgentId,
+      getShellCwd: () => this.state.shellCwd,
+      getHookStatus: () => this.agentManager.getHookStatus(),
+      getDebugStatus: async () => this.agentManager.getDebugStatus(),
+      getApprovalMode: () => this.approvalPolicy.getMode(),
+      getModelStatus: () => this.getModelStatus(),
+      getStatusLine: () =>
+        `status=${this.state.status.mode} | detail=${this.state.status.detail} | agent=${this.state.activeWorkingHeadName ?? "N/A"} | session=${this.state.sessionId} | ref=${this.state.sessionRef?.label ?? "N/A"} | shell=${this.state.shellCwd}`,
+      getAvailableSkills: () => this.skillRegistry.getAll(),
+      setApprovalMode: async (mode) => {
+        await this.setApprovalMode(mode);
+      },
+      setFetchMemoryHookEnabled: async (enabled) => {
+        this.agentManager.setFetchMemoryHookEnabled(enabled);
+      },
+      setSaveMemoryHookEnabled: async (enabled) => {
+        this.agentManager.setSaveMemoryHookEnabled(enabled);
+      },
+      setAutoCompactHookEnabled: async (enabled) => {
+        this.agentManager.setAutoCompactHookEnabled(enabled);
+      },
+      setUiContextEnabled: async (enabled) => {
+        await this.agentManager.setUiContextEnabled(enabled);
+      },
+      setHelperAgentAutoCleanupEnabled: async (enabled) => {
+        this.agentManager.setHelperAgentAutoCleanupEnabled(enabled);
+      },
+      setModelProvider: async (provider) => {
+        await this.setModelProvider(provider);
+      },
+      setModelName: async (model) => {
+        await this.setModelName(model);
+      },
+      setModelApiKey: async (apiKey) => {
+        await this.setModelApiKey(apiKey);
+      },
+      listMemory: async (limit) => this.agentManager.listMemory(limit),
+      saveMemory: async (input) => this.agentManager.saveMemory(input),
+      showMemory: async (id) => this.agentManager.showMemory(id),
+      getAgentStatus: async (agentId) => this.agentManager.getAgentStatus(agentId),
+      listAgents: async () => this.agentManager.listAgents(),
+      spawnAgent: async (name, kind) => {
+        return kind === "task"
+          ? this.agentManager.spawnTaskAgent({ name })
+          : this.agentManager.spawnInteractiveAgent({ name });
+      },
+      switchAgent: async (agentId) => this.agentManager.switchAgent(agentId),
+      switchAgentRelative: async (offset) => this.agentManager.switchAgentRelative(offset),
+      closeAgent: async (agentId) => this.agentManager.closeAgent(agentId),
+      interruptAgent: async () => this.agentManager.interruptAgent(),
+      resumeAgent: async () => this.agentManager.resumeAgent(),
+      getSessionGraphStatus: async () => this.agentManager.getSessionGraphStatus(),
+      listSessionRefs: async () => this.agentManager.listSessionRefs(),
+      listSessionHeads: async () => this.agentManager.listSessionHeads(),
+      listSessionCommits: async (limit) => this.agentManager.listSessionCommits(limit),
+      listSessionGraphLog: async (limit) => this.agentManager.listSessionGraphLog(limit),
+      listSessionLog: async (limit) => this.agentManager.listSessionLog(limit),
+      compactSession: async () => this.agentManager.compactSession(),
+      commitSession: async (message) => this.agentManager.commitSession(message),
+      createSessionBranch: async (name) => this.agentManager.createSessionBranch(name),
+      switchSessionCreateBranch: async (name) =>
+        this.agentManager.switchSessionCreateBranch(name),
+      switchSessionRef: async (ref) => this.agentManager.switchSessionRef(ref),
+      createSessionTag: async (name) => this.agentManager.createSessionTag(name),
+      mergeSessionRef: async (ref) => this.agentManager.mergeSessionRef(ref),
+      forkSessionHead: async (name) => this.agentManager.forkSessionHead(name),
+      switchSessionHead: async (headId) => this.agentManager.switchSessionHead(headId),
+      attachSessionHead: async (headId, ref) => this.agentManager.attachSessionHead(headId, ref),
+      detachSessionHead: async (headId) => this.agentManager.detachSessionHead(headId),
+      mergeSessionHead: async (sourceHeadId) => this.agentManager.mergeSessionHead(sourceHeadId),
+      closeSessionHead: async (headId) => this.agentManager.closeSessionHead(headId),
+      clearHelperAgents: async () => this.agentManager.clearHelperAgents(),
+      clearLegacyAgents: async () => this.agentManager.clearLegacyAgents(),
+      clearUi: async () => this.agentManager.clearActiveAgentUi(),
+      runPrompt: async (prompt, input) =>
+        this.agentManager.runAgentPrompt(prompt, {
+          agentId: input?.agentId,
+          approvalMode: input?.approvalMode,
+        }),
+      getPendingApproval: async (input) =>
+        this.agentManager.getPendingApprovalCheckpoint(input),
+      resolvePendingApproval: async (approved, input) =>
+        this.agentManager.resolvePendingApprovalCheckpoint(approved, input),
+    });
     this.exitPromise = new Promise<void>((resolve) => {
       this.exitResolver = resolve;
     });
@@ -85,14 +178,24 @@ export class AppController {
     };
   }
 
+  public subscribeRuntimeEvents(listener: RuntimeEventListener): () => void {
+    this.events.on("runtime-event", listener);
+    return () => {
+      this.events.off("runtime-event", listener);
+    };
+  }
+
   public async submitInput(input: string): Promise<void> {
     const trimmed = input.trim();
     if (!trimmed) {
       return;
     }
 
-    const slashResult = await this.getSlashBus().execute(trimmed);
+    const slashResult = await this.getSlashBus().executeDetailed(trimmed);
     if (slashResult.handled) {
+      if (slashResult.request && slashResult.result) {
+        this.emitCommandLifecycleEvents(slashResult.request, slashResult.result);
+      }
       await this.agentManager.recordSlashCommandOnActiveAgent(
         trimmed,
         slashResult.messages,
@@ -107,6 +210,12 @@ export class AppController {
     }
 
     await this.agentManager.submitInputToActiveAgent(trimmed);
+  }
+
+  public async executeCommand(request: CommandRequest): Promise<CommandResult> {
+    const result = await this.commandService.execute(request);
+    this.emitCommandLifecycleEvents(request, result);
+    return result;
   }
 
   public async approvePendingRequest(approved: boolean): Promise<void> {
@@ -218,92 +327,11 @@ export class AppController {
     this.agentManager.subscribe(() => {
       this.refreshState();
     });
-
-    this.slashBus = new SlashCommandBus({
-      getSessionId: () => this.state.sessionId,
-      getActiveHeadId: () => this.state.activeWorkingHeadId,
-      getActiveAgentId: () => this.state.activeAgentId,
-      getShellCwd: () => this.state.shellCwd,
-      getHookStatus: () => this.agentManager.getHookStatus(),
-      getApprovalMode: () => this.approvalPolicy.getMode(),
-      getModelStatus: () => this.getModelStatus(),
-      getStatusLine: () =>
-        `status=${this.state.status.mode} | detail=${this.state.status.detail} | agent=${this.state.activeWorkingHeadName ?? "N/A"} | session=${this.state.sessionId} | ref=${this.state.sessionRef?.label ?? "N/A"} | shell=${this.state.shellCwd}`,
-      getAvailableSkills: () => this.skillRegistry.getAll(),
-      setApprovalMode: async (mode) => {
-        await this.setApprovalMode(mode);
-      },
-      setFetchMemoryHookEnabled: async (enabled) => {
-        this.agentManager.setFetchMemoryHookEnabled(enabled);
-      },
-      setSaveMemoryHookEnabled: async (enabled) => {
-        this.agentManager.setSaveMemoryHookEnabled(enabled);
-      },
-      setAutoCompactHookEnabled: async (enabled) => {
-        this.agentManager.setAutoCompactHookEnabled(enabled);
-      },
-      getDebugStatus: async () => this.agentManager.getDebugStatus(),
-      setUiContextEnabled: async (enabled) => {
-        await this.agentManager.setUiContextEnabled(enabled);
-      },
-      setHelperAgentAutoCleanupEnabled: async (enabled) => {
-        this.agentManager.setHelperAgentAutoCleanupEnabled(enabled);
-      },
-      clearHelperAgents: async () => this.agentManager.clearHelperAgents(),
-      clearLegacyAgents: async () => this.agentManager.clearLegacyAgents(),
-      setModelProvider: async (provider) => {
-        await this.setModelProvider(provider);
-      },
-      setModelName: async (model) => {
-        await this.setModelName(model);
-      },
-      setModelApiKey: async (apiKey) => {
-        await this.setModelApiKey(apiKey);
-      },
-      listMemory: async (limit) => this.agentManager.listMemory(limit),
-      saveMemory: async (input) => this.agentManager.saveMemory(input),
-      showMemory: async (id) => this.agentManager.showMemory(id),
-      getAgentStatus: async (agentId) => this.agentManager.getAgentStatus(agentId),
-      listAgents: async () => this.agentManager.listAgents(),
-      spawnAgent: async (name, kind) => {
-        return kind === "task"
-          ? this.agentManager.spawnTaskAgent({ name })
-          : this.agentManager.spawnInteractiveAgent({ name });
-      },
-      switchAgent: async (agentId) => this.agentManager.switchAgent(agentId),
-      switchAgentRelative: async (offset) => this.agentManager.switchAgentRelative(offset),
-      closeAgent: async (agentId) => this.agentManager.closeAgent(agentId),
-      interruptAgent: async () => this.agentManager.interruptAgent(),
-      resumeAgent: async () => this.agentManager.resumeAgent(),
-      getSessionGraphStatus: async () =>
-        this.agentManager.getSessionGraphStatus(),
-      listSessionRefs: async () => this.agentManager.listSessionRefs(),
-      listSessionHeads: async () => this.agentManager.listSessionHeads(),
-      listSessionLog: async (limit) => this.agentManager.listSessionLog(limit),
-      compactSession: async () => this.agentManager.compactSession(),
-      createSessionBranch: async (name) =>
-        this.agentManager.createSessionBranch(name),
-      forkSessionBranch: async (name) =>
-        this.agentManager.forkSessionBranch(name),
-      checkoutSessionRef: async (ref) =>
-        this.agentManager.checkoutSessionRef(ref),
-      createSessionTag: async (name) =>
-        this.agentManager.createSessionTag(name),
-      mergeSessionRef: async (ref) =>
-        this.agentManager.mergeSessionRef(ref),
-      forkSessionHead: async (name) =>
-        this.agentManager.forkSessionHead(name),
-      switchSessionHead: async (headId) =>
-        this.agentManager.switchSessionHead(headId),
-      attachSessionHead: async (headId, ref) =>
-        this.agentManager.attachSessionHead(headId, ref),
-      detachSessionHead: async (headId) =>
-        this.agentManager.detachSessionHead(headId),
-      mergeSessionHead: async (sourceHeadId) =>
-        this.agentManager.mergeSessionHead(sourceHeadId),
-      closeSessionHead: async (headId) =>
-        this.agentManager.closeSessionHead(headId),
+    this.agentManager.subscribeRuntimeEvents((event) => {
+      this.emitRuntimeEvent(event);
     });
+
+    this.slashBus = new SlashCommandBus(this.commandService);
 
     this.refreshState(initialized.infoMessage);
   }
@@ -349,6 +377,60 @@ export class AppController {
       autoCompactThresholdTokens: this.config.runtime.autoCompactThresholdTokens,
     });
     this.events.emit("state", this.state);
+  }
+
+  private emitRuntimeEvent(event: RuntimeEvent): void {
+    this.events.emit("runtime-event", event);
+  }
+
+  private emitCommandLifecycleEvents(
+    request: CommandRequest,
+    result: CommandResult,
+  ): void {
+    if (result.status === "success") {
+      if (request.domain === "session") {
+        this.emitRuntimeEvent({
+          id: `event-command-session-${Date.now()}`,
+          type: "session.changed",
+          createdAt: new Date().toISOString(),
+          sessionId: this.state.sessionId,
+          headId: this.state.activeWorkingHeadId,
+          agentId: this.state.activeAgentId,
+          payload: {
+            action: request.action,
+            ref: (result.payload as { ref?: AppState["sessionRef"] } | undefined)?.ref,
+          },
+        });
+      }
+      if (request.domain === "agent") {
+        this.emitRuntimeEvent({
+          id: `event-command-agent-${Date.now()}`,
+          type: "agent.changed",
+          createdAt: new Date().toISOString(),
+          sessionId: this.state.sessionId,
+          headId: this.state.activeWorkingHeadId,
+          agentId: this.state.activeAgentId,
+          payload: {
+            action: request.action,
+            agent: (result.payload as { agent?: AppState["agents"][number] } | undefined)?.agent,
+          },
+        });
+      }
+    }
+    this.emitRuntimeEvent({
+      id: `event-command-complete-${Date.now()}`,
+      type: "command.completed",
+      createdAt: new Date().toISOString(),
+      sessionId: this.state.sessionId,
+      headId: this.state.activeWorkingHeadId,
+      agentId: this.state.activeAgentId,
+      payload: {
+        domain: request.domain,
+        status: result.status,
+        code: result.code,
+        result,
+      },
+    });
   }
 }
 

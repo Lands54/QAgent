@@ -84,6 +84,280 @@ export interface CliOptions {
   help?: boolean;
 }
 
+export type CommandDomain =
+  | "run"
+  | "model"
+  | "tool"
+  | "hook"
+  | "debug"
+  | "memory"
+  | "skills"
+  | "agent"
+  | "session"
+  | "approval"
+  | "clear";
+
+export interface CommandMessage {
+  level: "info" | "error";
+  text: string;
+  title?: string;
+}
+
+export interface PendingApprovalResumeState {
+  step: number;
+  toolCalls: ReadonlyArray<ToolCall>;
+  nextToolCallIndex: number;
+}
+
+export interface PendingApprovalCheckpoint {
+  checkpointId: string;
+  agentId: string;
+  headId: string;
+  sessionId: string;
+  toolCall: ToolCall;
+  approvalRequest: ApprovalRequest;
+  assistantMessageId: string;
+  createdAt: string;
+  resumeState: PendingApprovalResumeState;
+}
+
+export type CommandRequest =
+  | {
+      domain: "run";
+      prompt: string;
+      agentId?: string;
+      modelInputAppendix?: string;
+    }
+  | {
+      domain: "model";
+      action: "status" | "provider" | "name" | "apikey";
+      provider?: ModelProvider;
+      model?: string;
+      apiKey?: string;
+    }
+  | {
+      domain: "tool";
+      action: "status" | "confirm";
+      mode?: ApprovalMode;
+    }
+  | {
+      domain: "hook";
+      action: "status" | "fetch-memory" | "save-memory" | "auto-compact";
+      enabled?: boolean;
+    }
+  | {
+      domain: "debug";
+      action:
+        | "helper-agent-status"
+        | "helper-agent-autocleanup"
+        | "helper-agent-clear"
+        | "legacy-clear"
+        | "ui-context-status"
+        | "ui-context-set";
+      enabled?: boolean;
+    }
+  | {
+      domain: "memory";
+      action: "list" | "show" | "save";
+      name?: string;
+      description?: string;
+      content?: string;
+      scope?: SkillScope;
+    }
+  | {
+      domain: "skills";
+      action: "list" | "show";
+      key?: string;
+    }
+  | {
+      domain: "agent";
+      action:
+        | "status"
+        | "list"
+        | "spawn"
+        | "switch"
+        | "next"
+        | "prev"
+        | "close"
+        | "interrupt"
+        | "resume";
+      agentId?: string;
+      name?: string;
+      kind?: AgentKind;
+    }
+  | {
+      domain: "session";
+      action:
+        | "status"
+        | "compact"
+        | "commit"
+        | "log"
+        | "graph-log"
+        | "branch-list"
+        | "branch-create"
+        | "switch-create-branch"
+        | "switch"
+        | "tag-list"
+        | "tag-create"
+        | "merge"
+        | "head-status"
+        | "head-list"
+        | "head-fork"
+        | "head-switch"
+        | "head-attach"
+        | "head-detach"
+        | "head-merge"
+        | "head-close";
+      ref?: string;
+      name?: string;
+      headId?: string;
+      sourceHeadId?: string;
+      message?: string;
+      limit?: number;
+    }
+  | {
+      domain: "approval";
+      action: "status" | "approve" | "reject";
+      checkpointId?: string;
+      agentId?: string;
+      headId?: string;
+    }
+  | {
+      domain: "clear";
+    };
+
+export type CommandResultStatus =
+  | "success"
+  | "validation_error"
+  | "runtime_error"
+  | "approval_required";
+
+export interface CommandResultBase<TStatus extends CommandResultStatus = CommandResultStatus> {
+  status: TStatus;
+  code: string;
+  exitCode: number;
+  messages: ReadonlyArray<CommandMessage>;
+  payload?: unknown;
+}
+
+export type CommandResult =
+  | CommandResultBase<"success">
+  | CommandResultBase<"validation_error">
+  | CommandResultBase<"runtime_error">
+  | (CommandResultBase<"approval_required"> & {
+      payload: {
+        checkpoint: PendingApprovalCheckpoint;
+        uiMessages?: ReadonlyArray<UIMessage>;
+      };
+    });
+
+export interface RuntimeEventBase<
+  TType extends string,
+  TPayload extends object,
+> {
+  id: string;
+  type: TType;
+  createdAt: string;
+  sessionId: string;
+  headId: string;
+  agentId: string;
+  payload: TPayload;
+}
+
+export type StatusChangedRuntimeEvent = RuntimeEventBase<
+  "status.changed",
+  {
+    status: AgentLifecycleStatus;
+    detail: string;
+  }
+>;
+
+export type AssistantDeltaRuntimeEvent = RuntimeEventBase<
+  "assistant.delta",
+  {
+    delta: string;
+    text: string;
+  }
+>;
+
+export type AssistantCompletedRuntimeEvent = RuntimeEventBase<
+  "assistant.completed",
+  {
+    assistantMessageId: string;
+    content: string;
+    toolCalls: ReadonlyArray<ToolCall>;
+  }
+>;
+
+export type ToolStartedRuntimeEvent = RuntimeEventBase<
+  "tool.started",
+  {
+    toolCall: ToolCall;
+  }
+>;
+
+export type ToolFinishedRuntimeEvent = RuntimeEventBase<
+  "tool.finished",
+  {
+    result: ToolResult;
+  }
+>;
+
+export type ApprovalRequiredRuntimeEvent = RuntimeEventBase<
+  "approval.required",
+  {
+    checkpoint: PendingApprovalCheckpoint;
+  }
+>;
+
+export type ApprovalResolvedRuntimeEvent = RuntimeEventBase<
+  "approval.resolved",
+  {
+    checkpointId: string;
+    approved: boolean;
+    requestId: string;
+    toolCall: ToolCall;
+  }
+>;
+
+export type SessionChangedRuntimeEvent = RuntimeEventBase<
+  "session.changed",
+  {
+    action: string;
+    ref?: SessionRefInfo;
+  }
+>;
+
+export type AgentChangedRuntimeEvent = RuntimeEventBase<
+  "agent.changed",
+  {
+    action: string;
+    agent?: AgentViewState;
+  }
+>;
+
+export type CommandCompletedRuntimeEvent = RuntimeEventBase<
+  "command.completed",
+  {
+    domain: CommandDomain;
+    status: CommandResultStatus;
+    code: string;
+    result: CommandResult;
+  }
+>;
+
+export type RuntimeEvent =
+  | StatusChangedRuntimeEvent
+  | AssistantDeltaRuntimeEvent
+  | AssistantCompletedRuntimeEvent
+  | ToolStartedRuntimeEvent
+  | ToolFinishedRuntimeEvent
+  | ApprovalRequiredRuntimeEvent
+  | ApprovalResolvedRuntimeEvent
+  | SessionChangedRuntimeEvent
+  | AgentChangedRuntimeEvent
+  | CommandCompletedRuntimeEvent;
+
 export interface InstructionLayer {
   id: string;
   source:
@@ -366,6 +640,15 @@ export interface SessionTagRef {
   createdAt: string;
 }
 
+export interface SessionCommitRecord {
+  id: string;
+  message: string;
+  nodeId: string;
+  headId: string;
+  sessionId: string;
+  createdAt: string;
+}
+
 export type SessionAttachmentMode = "branch" | "tag" | "detached-node";
 
 export type SessionHeadAttachment =
@@ -447,6 +730,14 @@ export interface SessionListItem {
 export interface SessionListView {
   branches: SessionListItem[];
   tags: SessionListItem[];
+}
+
+export interface SessionCommitListItem extends SessionCommitRecord {
+  current: boolean;
+}
+
+export interface SessionCommitListView {
+  commits: SessionCommitListItem[];
 }
 
 export interface SessionHeadListItem {

@@ -162,6 +162,105 @@ describe("SessionService", () => {
     expect(detachedSnapshot.modelMessages.at(-1)?.content).toContain("worker 分支总结");
   });
 
+  it("dirty snapshot 上 createCommit 会先 materialize checkpoint node", async () => {
+    const root = await makeTempDir("qagent-session-commit-dirty-");
+    const service = new SessionService(root);
+    const graphStore = new SessionGraphStore(root);
+    const initialized = await service.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    const dirtySnapshot = withAssistantMessage(
+      initialized.snapshot,
+      "dirty commit summary",
+    );
+
+    await service.persistWorkingSnapshot(dirtySnapshot);
+    const beforeNodes = await graphStore.listNodes();
+    const result = await service.createCommit("保存 dirty 状态", dirtySnapshot);
+    const afterNodes = await graphStore.listNodes();
+    const commits = await graphStore.loadCommits();
+
+    expect(afterNodes).toHaveLength(beforeNodes.length + 1);
+    expect(afterNodes.at(-1)?.kind).toBe("checkpoint");
+    expect(result.commit.nodeId).toBe(afterNodes.at(-1)?.id);
+    expect(commits.at(-1)?.message).toBe("保存 dirty 状态");
+  });
+
+  it("clean snapshot 上 createCommit 只创建 commit record，不新增 node", async () => {
+    const root = await makeTempDir("qagent-session-commit-clean-");
+    const service = new SessionService(root);
+    const graphStore = new SessionGraphStore(root);
+    const initialized = await service.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+
+    const beforeNodes = await graphStore.listNodes();
+    const result = await service.createCommit("标记初始状态", initialized.snapshot);
+    const afterNodes = await graphStore.listNodes();
+    const commits = await graphStore.loadCommits();
+
+    expect(afterNodes).toHaveLength(beforeNodes.length);
+    expect(result.commit.nodeId).toBe(initialized.head.currentNodeId);
+    expect(commits.at(-1)?.id).toBe(result.commit.id);
+    expect(commits.at(-1)?.message).toBe("标记初始状态");
+  });
+
+  it("checkout 支持 commit id，并优先按 branch > tag > commit > node 解析", async () => {
+    const root = await makeTempDir("qagent-session-commit-ref-");
+    const service = new SessionService(root);
+    const graphStore = new SessionGraphStore(root);
+    const initialized = await service.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    const rootNodeId = initialized.head.currentNodeId;
+
+    const firstSnapshot = withAssistantMessage(
+      initialized.snapshot,
+      "first commit summary",
+    );
+    await service.persistWorkingSnapshot(firstSnapshot);
+    const firstCommit = await service.createCommit("first", firstSnapshot);
+
+    const secondSnapshot = withAssistantMessage(
+      await service.getHeadSnapshot(initialized.head.id),
+      "second checkpoint summary",
+    );
+    await service.persistWorkingSnapshot(secondSnapshot);
+    await service.flushCheckpointIfDirty(secondSnapshot);
+
+    const existingCommits = await graphStore.loadCommits();
+    await graphStore.saveCommits([
+      ...existingCommits,
+      {
+        id: rootNodeId,
+        message: "prefer commit over raw node id",
+        nodeId: firstCommit.commit.nodeId,
+        headId: initialized.head.id,
+        sessionId: initialized.head.sessionId,
+        createdAt: "2026-01-03T00:00:00.000Z",
+      },
+    ]);
+
+    await service.dispose();
+    const resumedService = new SessionService(root);
+    const resumed = await resumedService.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    const checkout = await resumedService.checkout(rootNodeId, resumed.snapshot);
+
+    expect(checkout.head.currentNodeId).toBe(firstCommit.commit.nodeId);
+    expect(checkout.snapshot.modelMessages.at(-1)?.content).toBe("first commit summary");
+    await resumedService.dispose();
+  });
+
   it("已有 repo 时，显式 resume 指定 sessionId 会切换到对应 working head", async () => {
     const root = await makeTempDir("qagent-session-resume-");
     const service = new SessionService(root);

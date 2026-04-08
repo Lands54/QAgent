@@ -129,6 +129,27 @@ describe("inputEnhancements", () => {
     expect(candidates).toContain("/memory save --name= --description=");
   });
 
+  it("会包含新的 git 风格 session 命令模板", () => {
+    const candidates = buildAutocompleteCandidates([]);
+
+    expect(candidates).toContain("/session commit -m ");
+    expect(candidates).toContain("/session switch ");
+    expect(candidates).toContain("/session graph log --limit=");
+    expect(candidates).not.toContain("/session fork ");
+    expect(candidates).not.toContain("/session checkout ");
+  });
+
+  it("session 补全预览会显示明确占位，而不是依赖尾随空格区分", () => {
+    const preview = getCompletionPreview("/session tag", []);
+
+    expect(preview.suggestions.map((item) => item.displayValue ?? item.value)).toContain(
+      "/session tag",
+    );
+    expect(preview.suggestions.map((item) => item.displayValue ?? item.value)).toContain(
+      "/session tag <name>",
+    );
+  });
+
   it("会包含 helper agent debug 命令模板", () => {
     const candidates = buildAutocompleteCandidates([]);
 

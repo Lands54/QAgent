@@ -178,6 +178,122 @@ describe("session journal integration", () => {
     }
   });
 
+  it("普通对话结束后仍会 autosave snapshot/events，但不会自动新增 checkpoint node", async () => {
+    const projectDir = await makeTempDir("qagent-session-no-auto-checkpoint-");
+    const config = buildConfig(projectDir);
+    const agentManager = await createAgentManager(
+      config,
+      new JournalAwareModelClient(),
+    );
+
+    try {
+      agentManager.setSaveMemoryHookEnabled(false);
+      agentManager.setAutoCompactHookEnabled(false);
+      const beforeLog = await agentManager.listSessionGraphLog();
+
+      await agentManager.submitInputToActiveAgent("请继续整理 autosave 与 checkpoint 的边界");
+
+      const runtime = agentManager.getActiveRuntime();
+      const afterLog = await agentManager.listSessionGraphLog();
+      const events = await readEvents(
+        config.resolvedPaths.sessionRoot,
+        runtime.headId,
+      );
+
+      expect(beforeLog).toHaveLength(1);
+      expect(afterLog).toHaveLength(1);
+      expect(afterLog[0]?.kind).toBe("root");
+      expect(events.some((event) => {
+        return (
+          event.type === "conversation.entry.appended"
+          && event.payload.entryKind === "assistant-turn"
+        );
+      })).toBe(true);
+    } finally {
+      await agentManager.dispose();
+    }
+  });
+
+  it("退出前 dirty 的会话仍会补一个 checkpoint node", async () => {
+    const projectDir = await makeTempDir("qagent-session-exit-checkpoint-");
+    const config = buildConfig(projectDir);
+    const agentManager = await createAgentManager(
+      config,
+      new JournalAwareModelClient(),
+    );
+
+    try {
+      const runtime = agentManager.getActiveRuntime();
+      await runtime.seedConversation({
+        modelMessages: [
+          {
+            id: "assistant-1",
+            role: "assistant",
+            content: "尚未提交的退出前内容",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        lastUserPrompt: "退出前整理状态",
+      });
+
+      const beforeLog = await agentManager.listSessionGraphLog();
+      await agentManager.flushCheckpointsOnExit();
+      const afterLog = await agentManager.listSessionGraphLog();
+
+      expect(beforeLog).toHaveLength(1);
+      expect(afterLog).toHaveLength(2);
+      expect(afterLog[0]?.kind).toBe("checkpoint");
+    } finally {
+      await agentManager.dispose();
+    }
+  });
+
+  it("手动 commit 后可以通过 commit id 切回对应 snapshot", async () => {
+    const projectDir = await makeTempDir("qagent-session-commit-switch-");
+    const config = buildConfig(projectDir);
+    const agentManager = await createAgentManager(
+      config,
+      new JournalAwareModelClient(),
+    );
+
+    try {
+      const runtime = agentManager.getActiveRuntime();
+      await runtime.seedConversation({
+        modelMessages: [
+          {
+            id: "assistant-1",
+            role: "assistant",
+            content: "commit 前的上下文",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        lastUserPrompt: "先保存第一版",
+      });
+
+      const commit = await agentManager.commitSession("保存第一版");
+      await runtime.seedConversation({
+        modelMessages: [
+          {
+            id: "assistant-2",
+            role: "assistant",
+            content: "commit 之后的新上下文",
+            createdAt: "2026-01-02T00:00:00.000Z",
+          },
+        ],
+        lastUserPrompt: "继续推进第二版",
+      });
+
+      await agentManager.switchSessionRef(commit.id);
+      const snapshot = agentManager.getActiveRuntime().getSnapshot();
+      const commits = await agentManager.listSessionCommits();
+
+      expect(snapshot.modelMessages.at(-1)?.content).toBe("commit 前的上下文");
+      expect(commits.commits.some((item) => item.id === commit.id)).toBe(true);
+    } finally {
+      await agentManager.dispose();
+    }
+  });
+
   it("compact 后会追加 conversation.compacted，且旧 entry 原文仍保留在 appended journal 中", async () => {
     const projectDir = await makeTempDir("qagent-session-journal-compact-");
     const config = buildConfig(projectDir);

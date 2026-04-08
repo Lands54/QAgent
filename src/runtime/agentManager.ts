@@ -12,7 +12,11 @@ import type {
   ApprovalMode,
   MemoryRecord,
   ModelClient,
+  PendingApprovalCheckpoint,
+  RuntimeEvent,
   RuntimeConfig,
+  SessionCommitListView,
+  SessionCommitRecord,
   SessionHeadListView,
   SessionListView,
   SessionLogEntry,
@@ -35,11 +39,13 @@ import {
 } from "./compactSessionService.js";
 
 type Listener = () => void;
+type RuntimeEventListener = (event: RuntimeEvent) => void;
 
 interface PendingAgentInput {
   input: string;
   options?: {
     skipFetchMemoryHook?: boolean;
+    approvalMode?: "interactive" | "checkpoint";
   };
   resolve: () => void;
   reject: (error: unknown) => void;
@@ -123,22 +129,41 @@ export class AgentManager {
     };
   }
 
+  public subscribeRuntimeEvents(listener: RuntimeEventListener): () => void {
+    this.events.on("runtime-event", listener);
+    return () => {
+      this.events.off("runtime-event", listener);
+    };
+  }
+
   public async initialize(
     input: AgentManagerInitializationInput,
   ): Promise<SessionInitializationResult> {
     const initialized = await this.sessionService.initialize(input);
     this.registry.initializeActiveAgent(initialized.head.id);
 
-    const runtime = await this.runtimeFactory.createFromSessionState(
-      initialized.head,
-      initialized.snapshot,
-      this.createRuntimeCallbacks(),
-      initialized.ref,
-    );
-    this.registry.set(initialized.head.id, {
-      runtime,
-      queuedInputCount: 0,
-    });
+    const headsView = await this.sessionService.listHeads(initialized.snapshot);
+    for (const item of headsView.heads) {
+      const head = await this.sessionService.getHead(item.id);
+      const snapshot =
+        head.id === initialized.head.id
+          ? initialized.snapshot
+          : await this.sessionService.getHeadSnapshot(head.id);
+      const ref =
+        head.id === initialized.head.id
+          ? initialized.ref
+          : await this.sessionService.getHeadStatus(head.id, snapshot);
+      const runtime = await this.runtimeFactory.createFromSessionState(
+        head,
+        snapshot,
+        this.createRuntimeCallbacks(),
+        ref,
+      );
+      this.registry.set(head.id, {
+        runtime,
+        queuedInputCount: 0,
+      });
+    }
 
     this.emitChange();
     return initialized;
@@ -282,6 +307,7 @@ export class AgentManager {
     options?: {
       activate?: boolean;
       skipFetchMemoryHook?: boolean;
+      approvalMode?: "interactive" | "checkpoint";
     },
   ): Promise<void> {
     const resolvedAgentId = this.navigation.resolveAgentId(agentId);
@@ -295,6 +321,7 @@ export class AgentManager {
         input,
         options: {
           skipFetchMemoryHook: options?.skipFetchMemoryHook,
+          approvalMode: options?.approvalMode,
         },
         resolve,
         reject,
@@ -304,6 +331,58 @@ export class AgentManager {
       this.scheduleInputDrain(resolvedAgentId);
       this.emitChange();
     });
+  }
+
+  public async runAgentPrompt(
+    input: string,
+    options?: {
+      agentId?: string;
+      activate?: boolean;
+      approvalMode?: "interactive" | "checkpoint";
+    },
+  ): Promise<{
+    settled: "completed" | "approval_required" | "interrupted" | "error";
+    agent: AgentViewState;
+    checkpoint?: PendingApprovalCheckpoint;
+    uiMessages: ReadonlyArray<UIMessage>;
+  }> {
+    const targetAgentId = options?.agentId ?? this.registry.getActiveAgentId();
+    const runtime = this.registry.requireRuntime(targetAgentId);
+    const beforeUiCount = runtime.getSnapshot().uiMessages.length;
+    await this.submitInputToAgent(targetAgentId, input, {
+      activate: options?.activate,
+      approvalMode: options?.approvalMode ?? "checkpoint",
+    });
+    const uiMessages = runtime.getSnapshot().uiMessages.slice(beforeUiCount);
+    const checkpoint = runtime.getPendingApprovalCheckpoint();
+    const agent = runtime.getViewState();
+    if (checkpoint) {
+      return {
+        settled: "approval_required",
+        agent,
+        checkpoint,
+        uiMessages,
+      };
+    }
+    if (agent.status === "error") {
+      return {
+        settled: "error",
+        agent,
+        uiMessages,
+      };
+    }
+    if (agent.status === "interrupted") {
+      return {
+        settled: "interrupted",
+        agent,
+        uiMessages,
+      };
+    }
+    return {
+      settled: "completed",
+      agent,
+      uiMessages,
+    };
   }
 
   public async interruptAgent(agentId?: string): Promise<void> {
@@ -326,6 +405,71 @@ export class AgentManager {
   ): Promise<void> {
     const resolvedAgentId = this.navigation.resolveAgentId(agentId);
     await this.registry.requireRuntime(resolvedAgentId).resolveApproval(approved);
+  }
+
+  public getPendingApprovalCheckpoint(input?: {
+    checkpointId?: string;
+    agentId?: string;
+    headId?: string;
+  }): PendingApprovalCheckpoint | undefined {
+    const runtime = this.findRuntimeForPendingApproval(input);
+    return runtime?.getPendingApprovalCheckpoint();
+  }
+
+  public async resolvePendingApprovalCheckpoint(
+    approved: boolean,
+    input?: {
+      checkpointId?: string;
+      agentId?: string;
+      headId?: string;
+    },
+  ): Promise<{
+    settled: "completed" | "approval_required" | "interrupted" | "error";
+    agent: AgentViewState;
+    checkpoint?: PendingApprovalCheckpoint;
+    uiMessages: ReadonlyArray<UIMessage>;
+  }> {
+    const runtime = this.findRuntimeForPendingApproval(input);
+    if (!runtime) {
+      throw new Error("当前没有待处理的审批请求。");
+    }
+    const existingCheckpoint = runtime.getPendingApprovalCheckpoint()
+      ?? await this.sessionService.getPendingApprovalCheckpoint(runtime.headId);
+    if (!existingCheckpoint) {
+      throw new Error("当前没有待处理的审批请求。");
+    }
+    const beforeUiCount = runtime.getSnapshot().uiMessages.length;
+    await runtime.resolveApproval(approved);
+    const uiMessages = runtime.getSnapshot().uiMessages.slice(beforeUiCount);
+    const checkpoint = runtime.getPendingApprovalCheckpoint();
+    const agent = runtime.getViewState();
+    if (checkpoint) {
+      return {
+        settled: "approval_required",
+        agent,
+        checkpoint,
+        uiMessages,
+      };
+    }
+    if (agent.status === "error") {
+      return {
+        settled: "error",
+        agent,
+        uiMessages,
+      };
+    }
+    if (agent.status === "interrupted") {
+      return {
+        settled: "interrupted",
+        agent,
+        uiMessages,
+      };
+    }
+    return {
+      settled: "completed",
+      agent,
+      uiMessages,
+    };
   }
 
   public async clearActiveAgentUi(): Promise<void> {
@@ -360,7 +504,11 @@ export class AgentManager {
   }
 
   public async dispose(): Promise<void> {
-    await this.lifecycle.disposeAll();
+    try {
+      await this.lifecycle.disposeAll();
+    } finally {
+      await this.sessionService.dispose();
+    }
   }
 
   public async switchAgent(agentId: string): Promise<AgentViewState> {
@@ -426,8 +574,21 @@ export class AgentManager {
     );
   }
 
+  public async listSessionCommits(
+    limit?: number,
+  ): Promise<SessionCommitListView> {
+    return this.sessionService.listCommits(
+      limit,
+      this.registry.getActiveRuntime().getSnapshot(),
+    );
+  }
+
+  public async listSessionGraphLog(limit?: number): Promise<SessionLogEntry[]> {
+    return this.sessionService.graphLog(limit);
+  }
+
   public async listSessionLog(limit?: number): Promise<SessionLogEntry[]> {
-    return this.sessionService.log(limit);
+    return this.listSessionGraphLog(limit);
   }
 
   public async compactSession(
@@ -484,12 +645,31 @@ export class AgentManager {
     return result.ref;
   }
 
+  public async switchSessionCreateBranch(name: string): Promise<SessionRefInfo> {
+    return this.forkSessionBranch(name);
+  }
+
   public async checkoutSessionRef(ref: string): Promise<SessionCheckoutResult> {
     const runtime = this.registry.getActiveRuntime();
     const result = await this.sessionService.checkout(ref, runtime.getSnapshot());
     await runtime.replaceSnapshot(result.snapshot, result.head, result.ref);
     this.emitChange();
     return result;
+  }
+
+  public async switchSessionRef(ref: string): Promise<SessionCheckoutResult> {
+    return this.checkoutSessionRef(ref);
+  }
+
+  public async commitSession(message: string): Promise<SessionCommitRecord> {
+    const runtime = this.registry.getActiveRuntime();
+    const result = await this.sessionService.createCommit(
+      message,
+      runtime.getSnapshot(),
+    );
+    await runtime.refreshSessionState();
+    this.emitChange();
+    return result.commit;
   }
 
   public async createSessionTag(name: string): Promise<SessionRefInfo> {
@@ -687,6 +867,9 @@ export class AgentManager {
       onBeforeModelTurn: async (runtime: HeadAgentRuntime) => {
         await this.hookPipeline.handleBeforeModelTurn(runtime);
       },
+      onRuntimeEvent: (event) => {
+        this.emitRuntimeEvent(event);
+      },
     };
   }
 
@@ -731,6 +914,7 @@ export class AgentManager {
         );
         await runtime.submitInput(next.input, {
           modelInputAppendix,
+          approvalMode: next.options?.approvalMode,
         });
         next.resolve();
       } catch (error) {
@@ -760,6 +944,10 @@ export class AgentManager {
     const agentIds = new Set(this.registry.getAgentIds());
     for (const agentId of [...this.pendingInputsByAgent.keys()]) {
       if (!agentIds.has(agentId)) {
+        const queue = this.pendingInputsByAgent.get(agentId) ?? [];
+        for (const pending of queue) {
+          pending.reject(new Error(`agent 已不存在，无法继续处理排队输入：${agentId}`));
+        }
         this.pendingInputsByAgent.delete(agentId);
       }
     }
@@ -768,5 +956,30 @@ export class AgentManager {
         this.inputDrainByAgent.delete(agentId);
       }
     }
+  }
+
+  private emitRuntimeEvent(event: RuntimeEvent): void {
+    this.events.emit("runtime-event", event);
+  }
+
+  private findRuntimeForPendingApproval(input?: {
+    checkpointId?: string;
+    agentId?: string;
+    headId?: string;
+  }): HeadAgentRuntime | undefined {
+    if (input?.checkpointId) {
+      return this.registry.getEntries().find((entry) => {
+        return entry.runtime.getPendingApprovalCheckpoint()?.checkpointId === input.checkpointId;
+      })?.runtime;
+    }
+    if (input?.agentId) {
+      return this.registry.requireRuntime(this.navigation.resolveAgentId(input.agentId));
+    }
+    if (input?.headId) {
+      return this.registry.getEntries().find((entry) => entry.runtime.headId === input.headId)?.runtime;
+    }
+    return this.registry.getEntries().find((entry) => {
+      return Boolean(entry.runtime.getPendingApprovalCheckpoint());
+    })?.runtime;
   }
 }

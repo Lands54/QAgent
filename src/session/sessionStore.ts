@@ -1,7 +1,12 @@
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 
-import type { ApprovalMode, SessionEvent, SessionSnapshot } from "../types.js";
+import type {
+  ApprovalMode,
+  PendingApprovalCheckpoint,
+  SessionEvent,
+  SessionSnapshot,
+} from "../types.js";
 import {
   normalizeSessionSnapshot,
 } from "./domain/sessionDomain.js";
@@ -105,6 +110,30 @@ export class SessionStore {
     });
   }
 
+  public async loadPendingApprovalCheckpoint(
+    workingHeadId: string,
+  ): Promise<PendingApprovalCheckpoint | undefined> {
+    return readJsonIfExists<PendingApprovalCheckpoint>(
+      this.getPendingApprovalCheckpointPath(workingHeadId),
+    );
+  }
+
+  public async savePendingApprovalCheckpoint(
+    workingHeadId: string,
+    checkpoint: PendingApprovalCheckpoint,
+  ): Promise<void> {
+    await ensureDir(this.getHeadDir(workingHeadId));
+    await writeJson(this.getPendingApprovalCheckpointPath(workingHeadId), checkpoint);
+  }
+
+  public async clearPendingApprovalCheckpoint(
+    workingHeadId: string,
+  ): Promise<void> {
+    await rm(this.getPendingApprovalCheckpointPath(workingHeadId), {
+      force: true,
+    });
+  }
+
   private getHeadsRoot(): string {
     return path.join(this.sessionRoot, "__heads");
   }
@@ -119,5 +148,9 @@ export class SessionStore {
 
   private getEventLogPath(workingHeadId: string): string {
     return path.join(this.getHeadDir(workingHeadId), "events.ndjson");
+  }
+
+  private getPendingApprovalCheckpointPath(workingHeadId: string): string {
+    return path.join(this.getHeadDir(workingHeadId), "pending-approval.json");
   }
 }

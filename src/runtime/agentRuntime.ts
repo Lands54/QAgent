@@ -1,4 +1,5 @@
 import { AgentRunner } from "./agentRunner.js";
+import { ApprovalRequiredInterruptError } from "./runtimeErrors.js";
 import type { PromptAssembler } from "../context/index.js";
 import { MemoryService } from "../memory/index.js";
 import {
@@ -34,7 +35,9 @@ import type {
   LlmMessage,
   MemoryRecord,
   ModelClient,
+  PendingApprovalCheckpoint,
   PromptProfile,
+  RuntimeEvent,
   RuntimeConfig,
   SessionRefInfo,
   SessionEvent,
@@ -49,8 +52,11 @@ import { createId, firstLine, formatDuration } from "../utils/index.js";
 
 interface PendingApprovalState {
   request: ApprovalRequest;
-  resolve: (decision: ApprovalDecision) => void;
+  checkpoint: PendingApprovalCheckpoint;
+  resolve?: (decision: ApprovalDecision) => void;
 }
+
+type ApprovalHandlingMode = "interactive" | "checkpoint";
 
 export interface AgentRuntimePolicy {
   kind: AgentKind;
@@ -68,6 +74,7 @@ export interface AgentRuntimeCallbacks {
   onStateChanged: (runtime: HeadAgentRuntime) => void;
   onRunLoopCompleted?: (runtime: HeadAgentRuntime) => Promise<void>;
   onBeforeModelTurn?: (runtime: HeadAgentRuntime) => Promise<void>;
+  onRuntimeEvent?: (event: RuntimeEvent) => void;
 }
 
 export interface HeadAgentRuntimeOptions {
@@ -167,6 +174,7 @@ export class HeadAgentRuntime {
   private modelClient: ModelClient;
   private readonly policy: AgentRuntimePolicy;
   private readonly runtimeApprovalPolicy: ApprovalPolicy;
+  private approvalHandlingMode: ApprovalHandlingMode = "interactive";
 
   public constructor(private readonly options: HeadAgentRuntimeOptions) {
     this.config = options.config;
@@ -258,6 +266,10 @@ export class HeadAgentRuntime {
     return this.pendingApproval?.request;
   }
 
+  public getPendingApprovalCheckpoint(): PendingApprovalCheckpoint | undefined {
+    return this.pendingApproval?.checkpoint;
+  }
+
   public isRunning(): boolean {
     return this.agentRunner.isRunning();
   }
@@ -269,6 +281,19 @@ export class HeadAgentRuntime {
         this.options.head.id,
         this.options.snapshot,
       );
+    const pendingCheckpoint =
+      await this.options.sessionService.getPendingApprovalCheckpoint(this.headId);
+    if (pendingCheckpoint) {
+      this.pendingApproval = {
+        request: pendingCheckpoint.approvalRequest,
+        checkpoint: pendingCheckpoint,
+      };
+      this.status = "awaiting-approval";
+      this.statusDetail = firstLine(
+        pendingCheckpoint.approvalRequest.summary,
+        "等待审批",
+      );
+    }
     this.options.callbacks.onStateChanged(this);
   }
 
@@ -434,6 +459,7 @@ export class HeadAgentRuntime {
     input: string,
     options?: {
       modelInputAppendix?: string;
+      approvalMode?: ApprovalHandlingMode;
     },
   ): Promise<void> {
     const trimmed = input.trim();
@@ -500,6 +526,7 @@ export class HeadAgentRuntime {
     );
     await this.persistSnapshot();
 
+    this.approvalHandlingMode = options?.approvalMode ?? "interactive";
     await this.runLoop();
   }
 
@@ -522,19 +549,38 @@ export class HeadAgentRuntime {
   }
 
   public async resolveApproval(approved: boolean): Promise<void> {
-    if (!this.pendingApproval) {
+    const pending = this.pendingApproval
+      ?? await this.restorePendingApprovalFromCheckpoint();
+    if (!pending) {
       return;
     }
-    const pending = this.pendingApproval;
-    this.pendingApproval = undefined;
-    this.status = approved ? "running" : "interrupted";
-    this.statusDetail = approved ? "审批已通过，继续执行" : "审批已拒绝";
-    this.options.callbacks.onStateChanged(this);
-    pending.resolve({
-      requestId: pending.request.id,
+
+    await this.options.sessionService.clearPendingApprovalCheckpoint(this.headId);
+    this.emitRuntimeEvent("approval.resolved", {
+      checkpointId: pending.checkpoint.checkpointId,
       approved,
-      decidedAt: new Date().toISOString(),
+      requestId: pending.request.id,
+      toolCall: pending.request.toolCall,
     });
+
+    if (pending.resolve) {
+      await this.setStatusInternal(
+        "running",
+        approved ? "审批已通过，继续执行" : "审批已拒绝，继续记录结果",
+      );
+      pending.resolve({
+        requestId: pending.request.id,
+        approved,
+        decidedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    await this.setStatusInternal(
+      "running",
+      approved ? "审批已通过，继续执行" : "审批已拒绝，继续记录结果",
+    );
+    await this.resumeFromPendingApproval(pending.checkpoint, approved);
   }
 
   public async refreshSessionState(): Promise<void> {
@@ -651,6 +697,11 @@ export class HeadAgentRuntime {
       commitAssistantTurn: async ({ content, toolCalls }) =>
         this.commitAssistantTurn({ content, toolCalls }),
       commitToolResult: async (result) => this.commitToolResult(result),
+      onToolStart: async (toolCall) => {
+        this.emitRuntimeEvent("tool.started", {
+          toolCall,
+        });
+      },
       emitInfo: async (message) => {
         await this.appendUiOnlyMessage({
           id: createId("ui"),
@@ -672,9 +723,6 @@ export class HeadAgentRuntime {
           const nextStatus = this.kind === "task" ? "completed" : "idle";
           const nextDetail = this.kind === "task" ? "任务已完成" : detail;
           await this.setStatusInternal(nextStatus, nextDetail);
-          await this.options.sessionService.flushCheckpointIfDirty(
-            this.options.snapshot,
-          );
           await this.refreshSessionState();
           if (this.options.callbacks.onRunLoopCompleted) {
             await this.options.callbacks.onRunLoopCompleted(this);
@@ -690,13 +738,17 @@ export class HeadAgentRuntime {
       },
       pushAssistantDraft: async (delta) => {
         this.draftAssistantText = `${this.draftAssistantText}${delta}`;
+        this.emitRuntimeEvent("assistant.delta", {
+          delta,
+          text: this.draftAssistantText,
+        });
         this.options.callbacks.onStateChanged(this);
       },
       finishAssistantDraft: async () => {
         this.draftAssistantText = "";
         this.options.callbacks.onStateChanged(this);
       },
-      requestApproval: async (request) => this.requestApproval(request),
+      requestApproval: async (request, context) => this.requestApproval(request, context),
     });
   }
 
@@ -761,15 +813,47 @@ export class HeadAgentRuntime {
 
   private async requestApproval(
     request: ApprovalRequest,
+    context: {
+      step: number;
+      assistantMessageId: string;
+      toolCalls: ReadonlyArray<ToolCall>;
+      nextToolCallIndex: number;
+    },
   ): Promise<ApprovalDecision> {
-    this.pendingApproval = undefined;
+    const checkpoint: PendingApprovalCheckpoint = {
+      checkpointId: createId("approval"),
+      agentId: this.agentId,
+      headId: this.headId,
+      sessionId: this.sessionId,
+      toolCall: request.toolCall,
+      approvalRequest: request,
+      assistantMessageId: context.assistantMessageId,
+      createdAt: new Date().toISOString(),
+      resumeState: {
+        step: context.step,
+        toolCalls: [...context.toolCalls],
+        nextToolCallIndex: context.nextToolCallIndex,
+      },
+    };
+    this.pendingApproval = {
+      request,
+      checkpoint,
+    };
+    await this.options.sessionService.savePendingApprovalCheckpoint(checkpoint);
     await this.setStatusInternal(
       "awaiting-approval",
       firstLine(request.summary, "等待审批"),
     );
+    this.emitRuntimeEvent("approval.required", {
+      checkpoint,
+    });
+    if (this.approvalHandlingMode === "checkpoint") {
+      throw new ApprovalRequiredInterruptError(checkpoint);
+    }
     return new Promise<ApprovalDecision>((resolve) => {
       this.pendingApproval = {
         request,
+        checkpoint,
         resolve,
       };
       this.options.callbacks.onStateChanged(this);
@@ -779,12 +863,15 @@ export class HeadAgentRuntime {
   private async commitAssistantTurn(input: {
     content: string;
     toolCalls: ToolCall[];
-  }): Promise<void> {
+  }): Promise<{
+    assistantMessageId?: string;
+  }> {
     if (!input.content && input.toolCalls.length === 0) {
-      return;
+      return {};
     }
 
     const now = new Date().toISOString();
+    const assistantMessageId = createId("llm");
     await this.appendConversationEntryInternal(
       createConversationEntry({
         kind: "assistant-turn",
@@ -798,7 +885,7 @@ export class HeadAgentRuntime {
             }
           : undefined,
         model: {
-          id: createId("llm"),
+          id: assistantMessageId,
           role: "assistant",
           content: input.content,
           toolCalls: input.toolCalls.length > 0 ? input.toolCalls : undefined,
@@ -806,6 +893,14 @@ export class HeadAgentRuntime {
         },
       }),
     );
+    this.emitRuntimeEvent("assistant.completed", {
+      assistantMessageId,
+      content: input.content,
+      toolCalls: input.toolCalls,
+    });
+    return {
+      assistantMessageId,
+    };
   }
 
   private async commitToolResult(result: {
@@ -838,6 +933,9 @@ export class HeadAgentRuntime {
         },
       }),
     );
+    this.emitRuntimeEvent("tool.finished", {
+      result,
+    });
   }
 
   private async setStatusInternal(
@@ -858,6 +956,10 @@ export class HeadAgentRuntime {
       }),
     );
     await this.persistSnapshot();
+    this.emitRuntimeEvent("status.changed", {
+      status,
+      detail,
+    });
     this.options.callbacks.onStateChanged(this);
   }
 
@@ -918,5 +1020,108 @@ export class HeadAgentRuntime {
       this.options.snapshot,
       mapLifecycleStatusToHeadStatus(this.status),
     );
+  }
+
+  private emitRuntimeEvent<
+    TType extends RuntimeEvent["type"],
+  >(
+    type: TType,
+    payload: Extract<RuntimeEvent, { type: TType }>["payload"],
+  ): void {
+    this.options.callbacks.onRuntimeEvent?.({
+      id: createId("event"),
+      type,
+      createdAt: new Date().toISOString(),
+      sessionId: this.sessionId,
+      headId: this.headId,
+      agentId: this.agentId,
+      payload,
+    } as Extract<RuntimeEvent, { type: TType }>);
+  }
+
+  private async restorePendingApprovalFromCheckpoint(): Promise<PendingApprovalState | undefined> {
+    const checkpoint =
+      await this.options.sessionService.getPendingApprovalCheckpoint(this.headId);
+    if (!checkpoint) {
+      return undefined;
+    }
+    const restored = {
+      request: checkpoint.approvalRequest,
+      checkpoint,
+    };
+    this.pendingApproval = restored;
+    return restored;
+  }
+
+  private async resumeFromPendingApproval(
+    checkpoint: PendingApprovalCheckpoint,
+    approved: boolean,
+  ): Promise<void> {
+    const currentToolCall = checkpoint.resumeState.toolCalls[
+      checkpoint.resumeState.nextToolCallIndex
+    ];
+    if (!currentToolCall) {
+      await this.agentRunner.runLoop({
+        startStep: checkpoint.resumeState.step + 1,
+      });
+      return;
+    }
+
+    const toolResult = approved
+      ? await this.executeToolCall(currentToolCall)
+      : {
+          callId: currentToolCall.id,
+          name: "shell" as const,
+          command: currentToolCall.input.command,
+          status: "rejected" as const,
+          exitCode: null,
+          stdout: "",
+          stderr: "命令执行被用户拒绝。",
+          cwd: this.getShellCwd(),
+          durationMs: 0,
+          startedAt: new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+        };
+    await this.commitToolResult(toolResult);
+
+    const nextToolCallIndex = checkpoint.resumeState.nextToolCallIndex + 1;
+    if (nextToolCallIndex < checkpoint.resumeState.toolCalls.length) {
+      this.approvalHandlingMode = "checkpoint";
+      await this.agentRunner.runLoop({
+        startStep: checkpoint.resumeState.step,
+        toolCalls: checkpoint.resumeState.toolCalls,
+        nextToolCallIndex,
+        assistantMessageId: checkpoint.assistantMessageId,
+      });
+      return;
+    }
+
+    this.approvalHandlingMode = "checkpoint";
+    await this.agentRunner.runLoop({
+      startStep: checkpoint.resumeState.step + 1,
+    });
+  }
+
+  private async executeToolCall(
+    toolCall: ToolCall,
+  ): Promise<{
+    callId: string;
+    name: "shell";
+    command: string;
+    status: "success" | "error" | "rejected" | "timeout" | "cancelled";
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+    cwd: string;
+    durationMs: number;
+    startedAt: string;
+    finishedAt: string;
+  }> {
+    this.emitRuntimeEvent("tool.started", {
+      toolCall,
+    });
+    return this.toolRegistry.execute(toolCall, {
+      timeoutMs: this.buildRuntimeConfig().runtime.shellCommandTimeoutMs,
+    });
   }
 }
