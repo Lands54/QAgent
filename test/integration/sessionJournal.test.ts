@@ -15,6 +15,7 @@ import type {
   RuntimeConfig,
   SessionEvent,
 } from "../../src/types.js";
+import { getDefaultTestShellExecutable } from "../helpers/hostShellFixture.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -62,7 +63,7 @@ function buildConfig(
     },
     tool: {
       approvalMode: "always",
-      shellExecutable: "/bin/zsh",
+      shellExecutable: getDefaultTestShellExecutable(),
     },
     cli: {},
   };

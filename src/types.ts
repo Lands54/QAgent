@@ -486,6 +486,7 @@ export interface AgentViewState extends AgentRecord {
   sessionRefLabel?: string;
   shellCwd: string;
   dirty: boolean;
+  queuedInputCount: number;
   pendingApproval?: ApprovalRequest;
   lastUserPrompt?: string;
 }

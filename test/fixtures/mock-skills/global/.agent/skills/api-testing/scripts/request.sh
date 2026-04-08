@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-echo "mock api request"
+echo "模拟 API 请求"

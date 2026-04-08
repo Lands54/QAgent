@@ -1,6 +1,6 @@
 ---
 name: Bad-Uppercase
-description: This skill should be rejected because the name is invalid.
+description: 这个 Skill 应该被拒绝，因为名称不合法。
 ---
 
-# Invalid Skill
+# 非法 Skill

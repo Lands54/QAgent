@@ -53,6 +53,7 @@ export class AgentNavigationService {
       );
       this.input.registry.set(result.head.id, {
         runtime,
+        queuedInputCount: 0,
       });
     } else {
       await runtime.replaceSnapshot(result.snapshot, result.head, result.ref);

@@ -295,6 +295,7 @@ export class HeadAgentRuntime {
       sessionRefLabel: this.ref?.label,
       shellCwd: this.getShellCwd(),
       dirty: this.ref?.dirty ?? false,
+      queuedInputCount: 0,
       pendingApproval: this.pendingApproval?.request,
       lastUserPrompt: this.options.snapshot.lastUserPrompt,
       createdAt: this.options.head.createdAt,

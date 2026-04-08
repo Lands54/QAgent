@@ -7,6 +7,10 @@ import {
   buildMockSkillResolvedPaths,
 } from "../helpers/mockSkillFixture.js";
 
+function normalizeSeparators(value: string | undefined): string | undefined {
+  return value?.replace(/\\/gu, "/");
+}
+
 describe("SkillRegistry", () => {
   it("能从 mock fixture 中发现 5 个有效 Skill，并保留目录与正文信息", async () => {
     const registry = new SkillRegistry(buildMockSkillResolvedPaths());
@@ -24,11 +28,11 @@ describe("SkillRegistry", () => {
       scope: "global",
       name: "api-testing",
     });
-    expect(registry.find("repo-maintenance")?.directoryPath).toContain(
+    expect(normalizeSeparators(registry.find("repo-maintenance")?.directoryPath)).toContain(
       "/project/.agent/skills/repo-maintenance",
     );
     expect(registry.find("incident-triage")?.content).toContain(
-      "GLOBAL BODY MARKER: incident-triage",
+      "全局正文标记：incident-triage",
     );
   });
 

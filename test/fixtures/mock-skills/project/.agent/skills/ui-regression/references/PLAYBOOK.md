@@ -1,3 +1,3 @@
-# UI Regression Playbook
+# UI 回归手册
 
-Take a screenshot, compare layout, then inspect DOM or styles.
+先截图，对比布局，再检查 DOM 或样式。

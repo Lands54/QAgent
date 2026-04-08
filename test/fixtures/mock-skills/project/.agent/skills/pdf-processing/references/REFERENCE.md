@@ -1,3 +1,3 @@
-# PDF Reference
+# PDF 参考
 
-Use this reference when extracting PDF text or metadata.
+提取 PDF 文本或元数据时，请参考这里。

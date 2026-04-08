@@ -39,6 +39,7 @@ export interface AppState {
   agents: AgentViewState[];
   shouldExit: boolean;
   lastUserPrompt?: string;
+  queuedInputCount: number;
   currentTokenEstimate: number;
   autoCompactThresholdTokens: number;
   helperActivities: string[];
@@ -67,6 +68,7 @@ export function createEmptyState(cwd: string): AppState {
     pendingApprovals: {},
     agents: [],
     shouldExit: false,
+    queuedInputCount: 0,
     currentTokenEstimate: 0,
     autoCompactThresholdTokens: 0,
     helperActivities: [],

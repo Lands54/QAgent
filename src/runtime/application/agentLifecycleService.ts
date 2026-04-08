@@ -102,6 +102,7 @@ export class AgentLifecycleService {
 
     this.input.registry.set(result.head.id, {
       runtime,
+      queuedInputCount: 0,
       sourceAgentId,
       mergeIntoAgentId: options.mergeIntoAgentId,
       mergeAssets: options.mergeAssets,

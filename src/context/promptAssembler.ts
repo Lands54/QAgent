@@ -47,7 +47,7 @@ function baseInstruction(
   return {
     id: createId("instruction"),
     source: "base",
-    title: "Base Runtime Rules",
+    title: "基础运行规则",
     content,
     priority: 1000,
   };
@@ -70,7 +70,7 @@ function skillCatalogLayer(
   return {
     id: createId("instruction"),
     source: "skill-catalog",
-    title: "Available Skill Metadata",
+    title: "可用 Skill 元数据",
     content: [
       "以下 YAML 是当前可用的全部 Skill 元信息索引。这里不会自动注入每个 Skill 的正文内容。",
       "当某个任务需要某个 Skill 时，你应当使用 shell 进入对应 skill 目录，自行读取该 skill 的 `SKILL.md`，并按需使用该目录中的 `scripts/`、`references/`、`assets/` 等资源。",
@@ -89,7 +89,7 @@ function _memoryLayers(relevantMemories: MemoryRecord[]): InstructionLayer[] {
   return relevantMemories.map((memory, index) => ({
     id: createId("instruction"),
     source: "memory",
-    title: `Memory: ${memory.name}`,
+    title: `记忆：${memory.name}`,
     content: [
       "以下是与当前任务相关的 memory 索引与摘要，不会自动注入完整正文。",
       `name: ${memory.name}`,
@@ -125,7 +125,7 @@ function _sessionDigestLayer(
   return {
     id: createId("instruction"),
     source: "session-digest",
-    title: "Recent Session Digest",
+    title: "最近会话摘要",
     content: digest,
     priority: 60,
   };

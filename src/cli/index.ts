@@ -1,4 +1,6 @@
 import { render } from "ink";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 
 import { createAppController } from "../runtime/index.js";
@@ -66,8 +68,9 @@ export function parseCliArgs(argv: string[]): CliOptions {
     }
 
     if (current === "resume") {
-      options.resumeSessionId = argv[index + 1] ?? "latest";
-      if (argv[index + 1]) {
+      const next = argv[index + 1];
+      options.resumeSessionId = !next || next.startsWith("-") ? "latest" : next;
+      if (next && !next.startsWith("-")) {
         index += 1;
       }
       continue;
@@ -81,6 +84,15 @@ export function parseCliArgs(argv: string[]): CliOptions {
   }
 
   return options;
+}
+
+function isMainModule(): boolean {
+  const entryPath = process.argv[1];
+  if (!entryPath) {
+    return false;
+  }
+
+  return path.resolve(fileURLToPath(import.meta.url)) === path.resolve(entryPath);
 }
 
 export async function runCli(argv: string[]): Promise<void> {
@@ -104,7 +116,7 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule()) {
   runCli(process.argv.slice(2)).catch((error) => {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;

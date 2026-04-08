@@ -23,6 +23,7 @@ import type {
   ToolCall,
   ToolResult,
 } from "../../src/types.js";
+import { getDefaultTestShellExecutable } from "../helpers/hostShellFixture.js";
 import {
   VALID_MOCK_SKILL_NAMES,
   buildMockSkillResolvedPaths,
@@ -107,7 +108,7 @@ describe("AgentRunner", () => {
       },
       tool: {
         approvalMode: "always",
-        shellExecutable: "/bin/zsh",
+        shellExecutable: getDefaultTestShellExecutable(),
       },
       cli: {},
     };
@@ -288,8 +289,8 @@ describe("AgentRunner", () => {
     for (const skillName of VALID_MOCK_SKILL_NAMES) {
       expect(systemPrompt).toContain(`name: "${skillName}"`);
     }
-    expect(systemPrompt).not.toContain("PROJECT BODY MARKER: pdf-processing");
-    expect(systemPrompt).not.toContain("GLOBAL BODY MARKER: api-testing");
+    expect(systemPrompt).not.toContain("项目正文标记：pdf-processing");
+    expect(systemPrompt).not.toContain("全局正文标记：api-testing");
   });
 
   it("default agent 会把动态运行时信息放到 user message 前缀，而不是 system prompt", async () => {
@@ -325,7 +326,7 @@ describe("AgentRunner", () => {
       },
       tool: {
         approvalMode: "always",
-        shellExecutable: "/bin/zsh",
+        shellExecutable: getDefaultTestShellExecutable(),
       },
       cli: {},
     };
@@ -376,7 +377,7 @@ describe("AgentRunner", () => {
     expect(request?.systemPrompt).toContain("你是一个终端 Agent。");
     expect(request?.systemPrompt).not.toContain("当前时间：");
     expect(request?.systemPrompt).not.toContain(projectDir);
-    expect(request?.systemPrompt).not.toContain("Recent Session Digest");
+    expect(request?.systemPrompt).not.toContain("最近会话摘要");
     expect(request?.systemPrompt).not.toContain("## Memory:");
     expect(lastMessage?.role).toBe("user");
     expect(lastMessage?.content).toContain("当前时间：");
@@ -419,7 +420,7 @@ describe("AgentRunner", () => {
       },
       tool: {
         approvalMode: "always",
-        shellExecutable: "/bin/zsh",
+        shellExecutable: getDefaultTestShellExecutable(),
       },
       cli: {},
     };
@@ -534,7 +535,7 @@ describe("AgentRunner", () => {
       },
       tool: {
         approvalMode: "always",
-        shellExecutable: "/bin/zsh",
+        shellExecutable: getDefaultTestShellExecutable(),
       },
       cli: {},
     };
@@ -626,7 +627,7 @@ describe("AgentRunner", () => {
       },
       tool: {
         approvalMode: "always",
-        shellExecutable: "/bin/zsh",
+        shellExecutable: getDefaultTestShellExecutable(),
       },
       cli: {},
     };
@@ -705,7 +706,7 @@ describe("AgentRunner", () => {
       },
       tool: {
         approvalMode: "always",
-        shellExecutable: "/bin/zsh",
+        shellExecutable: getDefaultTestShellExecutable(),
       },
       cli: {},
     };

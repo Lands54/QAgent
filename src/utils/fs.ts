@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export async function pathExists(targetPath: string): Promise<boolean> {
@@ -39,8 +39,26 @@ export async function writeJson(
   targetPath: string,
   value: unknown,
 ): Promise<void> {
+  await writeTextAtomically(targetPath, JSON.stringify(value, null, 2));
+}
+
+export async function writeTextAtomically(
+  targetPath: string,
+  content: string,
+): Promise<void> {
   await ensureDir(path.dirname(targetPath));
-  await writeFile(targetPath, JSON.stringify(value, null, 2), "utf8");
+  const temporaryPath = path.join(
+    path.dirname(targetPath),
+    `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.${Math.random()
+      .toString(16)
+      .slice(2)}.tmp`,
+  );
+  try {
+    await writeFile(temporaryPath, content, "utf8");
+    await rename(temporaryPath, targetPath);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
 }
 
 export async function appendNdjson(

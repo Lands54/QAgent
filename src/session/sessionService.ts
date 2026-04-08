@@ -38,7 +38,10 @@ import {
   snapshotHash,
   V1_INCOMPATIBLE_MESSAGE,
 } from "./domain/sessionDomain.js";
-import { SessionGraphStore } from "./sessionGraphStore.js";
+import {
+  SessionGraphStore,
+  type SessionHeadLockHandle,
+} from "./sessionGraphStore.js";
 import { SessionStore } from "./sessionStore.js";
 import { createId } from "../utils/index.js";
 
@@ -91,16 +94,25 @@ interface ForkHeadOptions {
 }
 
 export class SessionService {
+  private static readonly REPO_LOCK_TIMEOUT_MS = 5_000;
+  private static readonly REPO_LOCK_POLL_INTERVAL_MS = 50;
+  private static readonly HEAD_LOCK_STALE_AFTER_MS = 30_000;
+  private static readonly HEAD_LOCK_HEARTBEAT_MS = 10_000;
+
   private readonly sessionStore: SessionStore;
   private readonly graphStore: SessionGraphStore;
   private readonly assetProviders: SessionAssetProvider[];
   private readonly assetOverlayService: AssetOverlayService;
   private readonly repoMigrationService: SessionRepoMigrationService;
+  private readonly clientId = createId("session-client");
   private repoState?: SessionRepoState;
   private branches: SessionBranchRef[] = [];
   private tags: SessionTagRef[] = [];
   private heads: SessionWorkingHead[] = [];
   private lastLoadInfoMessage?: string;
+  private repoLockDepth = 0;
+  private activeHeadLock?: SessionHeadLockHandle;
+  private headLockHeartbeat?: ReturnType<typeof setInterval>;
 
   public constructor(
     private readonly sessionRoot: string,
@@ -137,8 +149,9 @@ export class SessionService {
   public async initialize(
     input: SessionInitializationInput,
   ): Promise<SessionInitializationResult> {
+    this.lastLoadInfoMessage = undefined;
+    return this.withRepoLock(async () => {
     if (await this.graphStore.repoExists()) {
-      this.lastLoadInfoMessage = undefined;
       await this.loadRepo();
 
       if (input.resumeSessionId && input.resumeSessionId !== "latest") {
@@ -150,6 +163,7 @@ export class SessionService {
         await this.saveRepoMetadata();
       }
 
+      await this.acquireActiveHeadLock(this.requireRepoState().activeWorkingHeadId);
       const head = await this.getActiveHead();
       const snapshot = await this.loadWorkingSnapshot(head.id);
       return {
@@ -236,22 +250,36 @@ export class SessionService {
       nodes: [rootNode],
       heads: [head],
     });
+    await this.acquireActiveHeadLock(head.id);
 
     return {
       snapshot,
       ref: await this.getHeadStatus(head.id, snapshot),
       head,
     };
+    });
   }
 
   public async persistWorkingEvent(event: SessionEvent): Promise<void> {
     await this.sessionStore.appendEvent(event);
   }
 
+  public async dispose(): Promise<void> {
+    this.stopHeadLockHeartbeat();
+    await this.withRepoLock(async () => {
+      await this.releaseActiveHeadLock();
+    });
+    this.repoState = undefined;
+    this.branches = [];
+    this.tags = [];
+    this.heads = [];
+  }
+
   public async persistWorkingSnapshot(
     snapshot: SessionSnapshot,
     status?: SessionWorkingHead["status"],
   ): Promise<void> {
+    return this.withRepoMutation(async () => {
     await this.ensureRepoLoaded();
     await this.sessionStore.saveSnapshot(snapshot);
     const head = await this.requireHead(snapshot.workingHeadId);
@@ -265,16 +293,19 @@ export class SessionService {
     }
     head.updatedAt = new Date().toISOString();
     await this.graphStore.saveHead(head);
+    });
   }
 
   public async flushCheckpointIfDirty(
     snapshot: SessionSnapshot,
   ): Promise<boolean> {
-    const node = await this.ensureSnapshotNode(snapshot.workingHeadId, snapshot, {
-      force: false,
-      kind: "checkpoint",
+    return this.withRepoMutation(async () => {
+      const node = await this.ensureSnapshotNode(snapshot.workingHeadId, snapshot, {
+        force: false,
+        kind: "checkpoint",
+      });
+      return Boolean(node);
     });
-    return Boolean(node);
   }
 
   public async flushCheckpointOnExit(
@@ -286,11 +317,13 @@ export class SessionService {
   public async flushCompactSnapshot(
     snapshot: SessionSnapshot,
   ): Promise<boolean> {
-    const node = await this.ensureSnapshotNode(snapshot.workingHeadId, snapshot, {
-      force: false,
-      kind: "compact",
+    return this.withRepoMutation(async () => {
+      const node = await this.ensureSnapshotNode(snapshot.workingHeadId, snapshot, {
+        force: false,
+        kind: "compact",
+      });
+      return Boolean(node);
     });
-    return Boolean(node);
   }
 
   public async getActiveHead(): Promise<SessionWorkingHead> {
@@ -433,6 +466,7 @@ export class SessionService {
     name: string,
     snapshot: SessionSnapshot,
   ): Promise<SessionMutationResult> {
+    return this.withRepoMutation(async () => {
     await this.ensureRepoLoaded();
     this.assertValidRefName(name, "branch");
     this.assertRefNameAvailable(name);
@@ -455,6 +489,7 @@ export class SessionService {
       head,
       message: `已创建分支 ${name}，当前未切换。`,
     };
+    });
   }
 
   public async forkBranch(
@@ -527,106 +562,112 @@ export class SessionService {
     headId: string,
     currentSnapshot?: SessionSnapshot,
   ): Promise<SessionHeadSwitchResult> {
-    await this.ensureRepoLoaded();
-    const previousHead = await this.getActiveHead();
-    if (currentSnapshot && previousHead.id === currentSnapshot.workingHeadId) {
-      await this.ensureSnapshotNode(previousHead.id, currentSnapshot, {
-        force: false,
-        kind: "checkpoint",
-      });
-    }
+    return this.withRepoMutation(async () => {
+      await this.ensureRepoLoaded();
+      const previousHead = await this.getActiveHead();
+      if (currentSnapshot && previousHead.id === currentSnapshot.workingHeadId) {
+        await this.ensureSnapshotNode(previousHead.id, currentSnapshot, {
+          force: false,
+          kind: "checkpoint",
+        });
+      }
 
-    const nextHead = await this.requireHead(headId);
-    if (nextHead.status === "closed") {
-      throw new Error(`working head 已关闭：${nextHead.name}`);
-    }
+      const nextHead = await this.requireHead(headId);
+      if (nextHead.status === "closed") {
+        throw new Error(`working head 已关闭：${nextHead.name}`);
+      }
 
-    this.requireRepoState().activeWorkingHeadId = nextHead.id;
-    await this.saveRepoMetadata();
-    const snapshot = await this.loadWorkingSnapshot(nextHead.id);
-    return {
-      snapshot,
-      ref: await this.getHeadStatus(nextHead.id, snapshot),
-      head: nextHead,
-      message: `已切换到 working head ${nextHead.name}。`,
-    };
+      this.requireRepoState().activeWorkingHeadId = nextHead.id;
+      await this.saveRepoMetadata();
+      await this.acquireActiveHeadLock(nextHead.id);
+      const snapshot = await this.loadWorkingSnapshot(nextHead.id);
+      return {
+        snapshot,
+        ref: await this.getHeadStatus(nextHead.id, snapshot),
+        head: nextHead,
+        message: `已切换到 working head ${nextHead.name}。`,
+      };
+    });
   }
 
   public async forkHead(
     name: string,
     options: ForkHeadOptions = {},
   ): Promise<SessionHeadForkResult> {
-    await this.ensureRepoLoaded();
-    this.assertHeadNameAvailable(name);
-    const sourceHead =
-      options.sourceHeadId
-        ? await this.requireHead(options.sourceHeadId)
-        : await this.getActiveHead();
-    const sourceSnapshot = await this.loadWorkingSnapshot(sourceHead.id);
-    const headId = createId("head");
-    const now = new Date().toISOString();
-    const head: SessionWorkingHead = {
-      id: headId,
-      name,
-      currentNodeId: sourceHead.currentNodeId,
-      sessionId: createId("session"),
-      attachment:
-        options.attachment ?? {
-          mode: "detached-node",
-          name: sourceHead.currentNodeId,
-          nodeId: sourceHead.currentNodeId,
+    return this.withRepoMutation(async () => {
+      await this.ensureRepoLoaded();
+      this.assertHeadNameAvailable(name);
+      const sourceHead =
+        options.sourceHeadId
+          ? await this.requireHead(options.sourceHeadId)
+          : await this.getActiveHead();
+      const sourceSnapshot = await this.loadWorkingSnapshot(sourceHead.id);
+      const headId = createId("head");
+      const now = new Date().toISOString();
+      const head: SessionWorkingHead = {
+        id: headId,
+        name,
+        currentNodeId: sourceHead.currentNodeId,
+        sessionId: createId("session"),
+        attachment:
+          options.attachment ?? {
+            mode: "detached-node",
+            name: sourceHead.currentNodeId,
+            nodeId: sourceHead.currentNodeId,
+          },
+        writerLease: undefined,
+        runtimeState: {
+          shellCwd: sourceSnapshot.shellCwd,
+          agentKind: options.runtimeState?.agentKind
+            ?? sourceHead.runtimeState.agentKind
+            ?? "interactive",
+          autoMemoryFork: options.runtimeState?.autoMemoryFork
+            ?? sourceHead.runtimeState.autoMemoryFork
+            ?? true,
+          retainOnCompletion: options.runtimeState?.retainOnCompletion
+            ?? sourceHead.runtimeState.retainOnCompletion
+            ?? true,
+          promptProfile: options.runtimeState?.promptProfile
+            ?? sourceHead.runtimeState.promptProfile
+            ?? "default",
+          toolMode: options.runtimeState?.toolMode
+            ?? sourceHead.runtimeState.toolMode
+            ?? "shell",
+          uiContextEnabled: options.runtimeState?.uiContextEnabled
+            ?? sourceHead.runtimeState.uiContextEnabled
+            ?? false,
+          status: "idle",
         },
-      writerLease: undefined,
-      runtimeState: {
-        shellCwd: sourceSnapshot.shellCwd,
-        agentKind: options.runtimeState?.agentKind
-          ?? sourceHead.runtimeState.agentKind
-          ?? "interactive",
-        autoMemoryFork: options.runtimeState?.autoMemoryFork
-          ?? sourceHead.runtimeState.autoMemoryFork
-          ?? true,
-        retainOnCompletion: options.runtimeState?.retainOnCompletion
-          ?? sourceHead.runtimeState.retainOnCompletion
-          ?? true,
-        promptProfile: options.runtimeState?.promptProfile
-          ?? sourceHead.runtimeState.promptProfile
-          ?? "default",
-        toolMode: options.runtimeState?.toolMode
-          ?? sourceHead.runtimeState.toolMode
-          ?? "shell",
-        uiContextEnabled: options.runtimeState?.uiContextEnabled
-          ?? sourceHead.runtimeState.uiContextEnabled
-          ?? false,
+        assetState: {},
         status: "idle",
-      },
-      assetState: {},
-      status: "idle",
-      createdAt: now,
-      updatedAt: now,
-    };
-    const snapshot = cloneSnapshotForHead(sourceSnapshot, head);
-    await this.sessionStore.saveSnapshot(snapshot);
-    head.assetState = await this.runForkProviders(head, snapshot, sourceHead);
-    if (options.acquireWriterLease && head.attachment.mode === "branch") {
-      await this.assertWriterLeaseAvailable(head.id, head.attachment.name);
-      head.writerLease = {
-        branchName: head.attachment.name,
-        acquiredAt: now,
+        createdAt: now,
+        updatedAt: now,
       };
-    }
-    this.heads.push(head);
-    await this.graphStore.saveHead(head);
-    if (options.activate) {
-      this.requireRepoState().activeWorkingHeadId = head.id;
-      await this.saveRepoMetadata();
-    }
+      const snapshot = cloneSnapshotForHead(sourceSnapshot, head);
+      await this.sessionStore.saveSnapshot(snapshot);
+      head.assetState = await this.runForkProviders(head, snapshot, sourceHead);
+      if (options.acquireWriterLease && head.attachment.mode === "branch") {
+        await this.assertWriterLeaseAvailable(head.id, head.attachment.name);
+        head.writerLease = {
+          branchName: head.attachment.name,
+          acquiredAt: now,
+        };
+      }
+      this.heads.push(head);
+      await this.graphStore.saveHead(head);
+      if (options.activate) {
+        this.requireRepoState().activeWorkingHeadId = head.id;
+        await this.saveRepoMetadata();
+        await this.acquireActiveHeadLock(head.id);
+      }
 
-    return {
-      snapshot,
-      ref: await this.getHeadStatus(head.id, snapshot),
-      head,
-      message: `已创建 working head ${name}。`,
-    };
+      return {
+        snapshot,
+        ref: await this.getHeadStatus(head.id, snapshot),
+        head,
+        message: `已创建 working head ${name}。`,
+      };
+    });
   }
 
   public async checkout(
@@ -1058,7 +1099,7 @@ export class SessionService {
   }
 
   private async ensureRepoLoaded(): Promise<void> {
-    if (this.repoState) {
+    if (this.repoState && this.repoLockDepth > 0) {
       return;
     }
     await this.loadRepo();
@@ -1309,6 +1350,78 @@ export class SessionService {
       counter += 1;
     }
     return candidate;
+  }
+
+  private async withRepoMutation<T>(callback: () => Promise<T>): Promise<T> {
+    return this.withRepoLock(async () => {
+      await this.loadRepo();
+      return callback();
+    });
+  }
+
+  private async withRepoLock<T>(callback: () => Promise<T>): Promise<T> {
+    if (this.repoLockDepth > 0) {
+      return callback();
+    }
+
+    const lock = await this.graphStore.acquireRepoLock({
+      clientId: this.clientId,
+      timeoutMs: SessionService.REPO_LOCK_TIMEOUT_MS,
+      pollIntervalMs: SessionService.REPO_LOCK_POLL_INTERVAL_MS,
+    });
+    this.repoLockDepth += 1;
+    try {
+      return await callback();
+    } finally {
+      this.repoLockDepth -= 1;
+      await this.graphStore.releaseRepoLock(lock);
+    }
+  }
+
+  private async acquireActiveHeadLock(headId: string): Promise<void> {
+    if (this.activeHeadLock?.headId === headId) {
+      await this.graphStore.refreshHeadLock(this.activeHeadLock);
+      this.startHeadLockHeartbeat(this.activeHeadLock);
+      return;
+    }
+
+    const nextLock = await this.graphStore.acquireHeadLock(headId, {
+      clientId: this.clientId,
+      staleAfterMs: SessionService.HEAD_LOCK_STALE_AFTER_MS,
+    });
+    const previousLock = this.activeHeadLock;
+    this.activeHeadLock = nextLock;
+    this.startHeadLockHeartbeat(nextLock);
+    if (previousLock) {
+      await this.graphStore.releaseHeadLock(previousLock);
+    }
+  }
+
+  private async releaseActiveHeadLock(): Promise<void> {
+    const currentLock = this.activeHeadLock;
+    if (!currentLock) {
+      return;
+    }
+    this.activeHeadLock = undefined;
+    await this.graphStore.releaseHeadLock(currentLock);
+  }
+
+  private startHeadLockHeartbeat(lock: SessionHeadLockHandle): void {
+    this.stopHeadLockHeartbeat();
+    this.headLockHeartbeat = setInterval(() => {
+      void this.graphStore.refreshHeadLock(lock).catch(() => {
+        this.stopHeadLockHeartbeat();
+      });
+    }, SessionService.HEAD_LOCK_HEARTBEAT_MS);
+    this.headLockHeartbeat.unref?.();
+  }
+
+  private stopHeadLockHeartbeat(): void {
+    if (!this.headLockHeartbeat) {
+      return;
+    }
+    clearInterval(this.headLockHeartbeat);
+    this.headLockHeartbeat = undefined;
   }
 
   private async saveRepoMetadata(): Promise<void> {

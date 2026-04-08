@@ -36,6 +36,15 @@ import {
 
 type Listener = () => void;
 
+interface PendingAgentInput {
+  input: string;
+  options?: {
+    skipFetchMemoryHook?: boolean;
+  };
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
 export interface AgentManagerInitializationInput {
   cwd: string;
   shellCwd: string;
@@ -52,6 +61,8 @@ export class AgentManager {
   private readonly hookPipeline: HookPipeline;
   private readonly lastAutoMemoryForkSourceHashByAgent = new Map<string, string>();
   private readonly autoCompactFailureCountByAgent = new Map<string, number>();
+  private readonly pendingInputsByAgent = new Map<string, PendingAgentInput[]>();
+  private readonly inputDrainByAgent = new Map<string, Promise<void>>();
   private fetchMemoryHookEnabled = true;
   private saveMemoryHookEnabled = true;
   private autoCompactHookEnabled = true;
@@ -118,27 +129,16 @@ export class AgentManager {
     const initialized = await this.sessionService.initialize(input);
     this.registry.initializeActiveAgent(initialized.head.id);
 
-    const headsView = await this.sessionService.listHeads(initialized.snapshot);
-    for (const item of headsView.heads) {
-      const head = await this.sessionService.getHead(item.id);
-      const snapshot =
-        head.id === initialized.head.id
-          ? initialized.snapshot
-          : await this.sessionService.getHeadSnapshot(head.id);
-      const ref =
-        head.id === initialized.head.id
-          ? initialized.ref
-          : await this.sessionService.getHeadStatus(head.id, snapshot);
-      const runtime = await this.runtimeFactory.createFromSessionState(
-        head,
-        snapshot,
-        this.createRuntimeCallbacks(),
-        ref,
-      );
-      this.registry.set(head.id, {
-        runtime,
-      });
-    }
+    const runtime = await this.runtimeFactory.createFromSessionState(
+      initialized.head,
+      initialized.snapshot,
+      this.createRuntimeCallbacks(),
+      initialized.ref,
+    );
+    this.registry.set(initialized.head.id, {
+      runtime,
+      queuedInputCount: 0,
+    });
 
     this.emitChange();
     return initialized;
@@ -232,7 +232,14 @@ export class AgentManager {
     const resolvedAgentId = agentId
       ? this.navigation.resolveAgentId(agentId)
       : this.registry.getActiveAgentId();
-    return this.registry.requireRuntime(resolvedAgentId).getViewState();
+    const entry = this.registry.getEntry(resolvedAgentId);
+    if (!entry) {
+      throw new Error(`鏈壘鍒?agent锛?{resolvedAgentId}`);
+    }
+    return {
+      ...entry.runtime.getViewState(),
+      queuedInputCount: entry.queuedInputCount ?? 0,
+    };
   }
 
   public getActiveRuntime(): HeadAgentRuntime {
@@ -281,14 +288,21 @@ export class AgentManager {
     if (options?.activate) {
       await this.navigation.switchAgent(resolvedAgentId);
     }
-    const runtime = this.registry.requireRuntime(resolvedAgentId);
-    const modelInputAppendix = await this.hookPipeline.buildModelInputAppendix(
-      runtime,
-      input,
-      options?.skipFetchMemoryHook,
-    );
-    await runtime.submitInput(input, {
-      modelInputAppendix,
+
+    return new Promise<void>((resolve, reject) => {
+      const queue = this.pendingInputsByAgent.get(resolvedAgentId) ?? [];
+      queue.push({
+        input,
+        options: {
+          skipFetchMemoryHook: options?.skipFetchMemoryHook,
+        },
+        resolve,
+        reject,
+      });
+      this.pendingInputsByAgent.set(resolvedAgentId, queue);
+      this.updateQueuedInputCount(resolvedAgentId);
+      this.scheduleInputDrain(resolvedAgentId);
+      this.emitChange();
     });
   }
 
@@ -461,11 +475,12 @@ export class AgentManager {
       this.createRuntimeCallbacks(),
       result.ref,
     );
-    this.registry.set(result.head.id, {
-      runtime: nextRuntime,
-    });
-    this.registry.setActiveAgentId(result.head.id);
-    this.emitChange();
+      this.registry.set(result.head.id, {
+        runtime: nextRuntime,
+        queuedInputCount: 0,
+      });
+      this.registry.setActiveAgentId(result.head.id);
+      this.emitChange();
     return result.ref;
   }
 
@@ -510,11 +525,12 @@ export class AgentManager {
       this.createRuntimeCallbacks(),
       result.ref,
     );
-    this.registry.set(result.head.id, {
-      runtime,
-    });
-    this.emitChange();
-    return result.ref;
+      this.registry.set(result.head.id, {
+        runtime,
+        queuedInputCount: 0,
+      });
+      this.emitChange();
+      return result.ref;
   }
 
   public async switchSessionHead(headId: string): Promise<SessionRefInfo> {
@@ -675,6 +691,82 @@ export class AgentManager {
   }
 
   private emitChange(): void {
+    this.syncQueueStateWithRegistry();
     this.events.emit("change");
+  }
+
+  private scheduleInputDrain(agentId: string): void {
+    if (this.inputDrainByAgent.has(agentId)) {
+      return;
+    }
+
+    const drain = this.drainAgentInputQueue(agentId).finally(() => {
+      this.inputDrainByAgent.delete(agentId);
+      if ((this.pendingInputsByAgent.get(agentId)?.length ?? 0) > 0) {
+        this.scheduleInputDrain(agentId);
+      }
+    });
+    this.inputDrainByAgent.set(agentId, drain);
+  }
+
+  private async drainAgentInputQueue(agentId: string): Promise<void> {
+    while (true) {
+      const queue = this.pendingInputsByAgent.get(agentId);
+      const next = queue?.[0];
+      if (!queue || !next) {
+        this.updateQueuedInputCount(agentId);
+        this.emitChange();
+        return;
+      }
+
+      this.updateQueuedInputCount(agentId);
+      this.emitChange();
+
+      try {
+        const runtime = this.registry.requireRuntime(agentId);
+        const modelInputAppendix = await this.hookPipeline.buildModelInputAppendix(
+          runtime,
+          next.input,
+          next.options?.skipFetchMemoryHook,
+        );
+        await runtime.submitInput(next.input, {
+          modelInputAppendix,
+        });
+        next.resolve();
+      } catch (error) {
+        next.reject(error);
+      } finally {
+        queue.shift();
+        if (queue.length === 0) {
+          this.pendingInputsByAgent.delete(agentId);
+        }
+        this.updateQueuedInputCount(agentId);
+        this.emitChange();
+      }
+    }
+  }
+
+  private updateQueuedInputCount(agentId: string): void {
+    const entry = this.registry.getEntry(agentId);
+    if (!entry) {
+      return;
+    }
+
+    const queued = this.pendingInputsByAgent.get(agentId)?.length ?? 0;
+    entry.queuedInputCount = Math.max(queued - (this.inputDrainByAgent.has(agentId) ? 1 : 0), 0);
+  }
+
+  private syncQueueStateWithRegistry(): void {
+    const agentIds = new Set(this.registry.getAgentIds());
+    for (const agentId of [...this.pendingInputsByAgent.keys()]) {
+      if (!agentIds.has(agentId)) {
+        this.pendingInputsByAgent.delete(agentId);
+      }
+    }
+    for (const agentId of [...this.inputDrainByAgent.keys()]) {
+      if (!agentIds.has(agentId)) {
+        this.inputDrainByAgent.delete(agentId);
+      }
+    }
   }
 }

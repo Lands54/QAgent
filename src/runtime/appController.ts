@@ -106,7 +106,7 @@ export class AppController {
       return;
     }
 
-    void this.agentManager.submitInputToActiveAgent(trimmed);
+    await this.agentManager.submitInputToActiveAgent(trimmed);
   }
 
   public async approvePendingRequest(approved: boolean): Promise<void> {
@@ -128,7 +128,11 @@ export class AppController {
   }
 
   public async dispose(): Promise<void> {
-    await this.agentManager.dispose();
+    try {
+      await this.agentManager.dispose();
+    } finally {
+      await this.sessionService.dispose();
+    }
   }
 
   public async interruptAgent(): Promise<void> {

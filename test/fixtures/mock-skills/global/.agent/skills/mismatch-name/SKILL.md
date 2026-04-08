@@ -1,6 +1,6 @@
 ---
 name: different-name
-description: This skill should be rejected because the name does not match the parent directory.
+description: 这个 Skill 应该被拒绝，因为名称与父目录不匹配。
 ---
 
-# Invalid Skill
+# 非法 Skill

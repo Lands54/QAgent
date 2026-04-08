@@ -11,6 +11,7 @@ interface StatusBarProps {
   shellCwd: string;
   approvalMode: string;
   status: AgentStatus;
+  queuedInputCount: number;
   skillCount: number;
   agentCount: number;
 }
@@ -24,6 +25,7 @@ export function StatusBar({
   shellCwd,
   approvalMode,
   status,
+  queuedInputCount,
   skillCount,
   agentCount,
 }: StatusBarProps) {
@@ -50,7 +52,7 @@ export function StatusBar({
         agent={workingHeadName ?? "N/A"} ({workingHeadId || "N/A"}) | kind={agentKind ?? "N/A"} | session={sessionId || "N/A"}
       </Text>
       <Text>
-        status={status.mode} | detail={status.detail} | ref={sessionRefLabel ?? "N/A"}
+        status={status.mode} | queue={queuedInputCount} | detail={status.detail} | ref={sessionRefLabel ?? "N/A"}
       </Text>
       <Text>
         shell={shellCwd} | approval={approvalMode} | skills={skillCount} | agents={agentCount}

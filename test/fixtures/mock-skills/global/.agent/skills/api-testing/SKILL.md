@@ -1,10 +1,10 @@
 ---
 name: api-testing
-description: Test HTTP APIs, validate request and response payloads, and inspect status codes. Use when the task involves endpoints, headers, payloads, or API debugging.
+description: 测试 HTTP API、校验请求与响应载荷，并检查状态码。适用于涉及接口、请求头、载荷或 API 调试的任务。
 ---
 
-# API Testing
+# API 测试
 
-GLOBAL BODY MARKER: api-testing
+全局正文标记：api-testing
 
-Read references and scripts in this folder when working with APIs.
+处理 API 任务时，请先阅读这个目录里的参考资料和脚本。

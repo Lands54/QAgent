@@ -23,6 +23,7 @@ export function AgentList({ agents, activeAgentId }: AgentListProps) {
           </Text>
           <Text color="gray">
             status={agent.status}
+            {agent.queuedInputCount > 0 ? ` | queue=${agent.queuedInputCount}` : ""}
             {agent.helperType ? ` | helper=${agent.helperType}` : ""}
             {agent.pendingApproval ? " | pending=approval" : ""}
             {agent.sessionRefLabel ? ` | ref=${agent.sessionRefLabel}` : ""}

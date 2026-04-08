@@ -1,10 +1,10 @@
 ---
 name: incident-triage
-description: Triage incidents, gather evidence, and structure response steps. Use when the task mentions outages, alerts, incidents, or service degradation.
+description: 排查事故、收集证据并整理响应步骤。适用于任务提到宕机、告警、事故或服务降级时。
 ---
 
-# Incident Triage
+# 事故分诊
 
-GLOBAL BODY MARKER: incident-triage
+全局正文标记：incident-triage
 
-Start with the runbook and then gather logs through shell.
+先阅读处理手册，再通过 shell 收集日志。

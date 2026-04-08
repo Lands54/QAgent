@@ -1,10 +1,10 @@
 ---
 name: repo-maintenance
-description: Clean branches, inspect git state, and prepare repositories for safe changes. Use when the task involves git hygiene, repository cleanup, or release prep.
+description: 清理分支、检查 git 状态，并为安全改动准备仓库。适用于涉及 git 卫生、仓库清理或发布准备的任务。
 ---
 
-# Repo Maintenance
+# 仓库维护
 
-PROJECT BODY MARKER: repo-maintenance
+项目正文标记：repo-maintenance
 
-Prefer scripts and references in this folder before inventing workflows.
+在自行发明流程之前，优先使用这个目录里的脚本和参考资料。

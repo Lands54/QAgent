@@ -89,6 +89,7 @@ export class AppStateAssembler {
       agents: input.agents,
       shouldExit: input.previousState.shouldExit,
       lastUserPrompt: snapshot.lastUserPrompt,
+      queuedInputCount: input.activeView.queuedInputCount,
       currentTokenEstimate: budget.currentTokens,
       autoCompactThresholdTokens: budget.thresholdTokens,
       helperActivities: buildHelperActivities(input.agents),

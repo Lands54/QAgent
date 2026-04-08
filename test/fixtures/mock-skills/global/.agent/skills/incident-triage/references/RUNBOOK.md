@@ -1,3 +1,3 @@
-# Incident Runbook
+# 事故处理手册
 
-Check user impact, timeline, scope, and mitigation steps.
+检查用户影响、时间线、范围和缓解步骤。

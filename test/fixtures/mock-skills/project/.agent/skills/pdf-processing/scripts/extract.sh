@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-echo "mock pdf extraction"
+echo "模拟 PDF 提取"

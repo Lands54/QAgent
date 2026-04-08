@@ -143,7 +143,7 @@ export function App({ controller }: AppProps) {
     }
   }
 
-  function handleSubmit(nextValue: string) {
+  async function handleSubmit(nextValue: string) {
     const trimmed = nextValue.trim();
     setCompletionHint(undefined);
     setCompletionSuggestionIndex(0);
@@ -156,7 +156,7 @@ export function App({ controller }: AppProps) {
       setInput("");
       return;
     }
-    void controller.submitInput(trimmed);
+    await controller.submitInput(trimmed);
     setInput("");
   }
 
@@ -181,6 +181,7 @@ export function App({ controller }: AppProps) {
         shellCwd={state.shellCwd}
         approvalMode={state.approvalMode}
         status={state.status}
+        queuedInputCount={state.queuedInputCount}
         skillCount={state.availableSkills.length}
         agentCount={state.agents.length}
       />

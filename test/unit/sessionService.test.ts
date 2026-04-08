@@ -87,12 +87,12 @@ describe("SessionService", () => {
 
     const mainSnapshot = withAssistantMessage(
       initialized.snapshot,
-      "main branch summary",
+      "main 分支总结",
     );
     await service.persistWorkingSnapshot(mainSnapshot);
     await service.createBranch("alt", mainSnapshot);
     const altCheckout = await service.checkout("alt", mainSnapshot);
-    const altSnapshot = withAssistantMessage(altCheckout.snapshot, "alt branch summary");
+    const altSnapshot = withAssistantMessage(altCheckout.snapshot, "alt 分支总结");
     await service.persistWorkingSnapshot(altSnapshot);
     const backToMain = await service.checkout("main", altSnapshot);
     await service.merge("alt", backToMain.snapshot);
@@ -116,7 +116,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("同一 branch 同时只允许一个 writer head", async () => {
+  it("同一分支同时只允许一个 writer head", async () => {
     const root = await makeTempDir("qagent-session-writer-");
     const service = new SessionService(root);
     const initialized = await service.initialize({
@@ -149,7 +149,7 @@ describe("SessionService", () => {
 
     const workerSnapshot = withAssistantMessage(
       detached.snapshot,
-      "worker branch summary",
+      "worker 分支总结",
     );
     await service.persistWorkingSnapshot(workerSnapshot);
     await service.flushCheckpointIfDirty(workerSnapshot);
@@ -159,7 +159,7 @@ describe("SessionService", () => {
 
     expect(mainSnapshot.modelMessages).toHaveLength(0);
     expect(detachedSnapshot.modelMessages.at(-1)?.role).toBe("assistant");
-    expect(detachedSnapshot.modelMessages.at(-1)?.content).toContain("worker branch summary");
+    expect(detachedSnapshot.modelMessages.at(-1)?.content).toContain("worker 分支总结");
   });
 
   it("已有 repo 时，显式 resume 指定 sessionId 会切换到对应 working head", async () => {
@@ -207,7 +207,7 @@ describe("SessionService", () => {
       approvalMode: "always",
       uiMessages: [],
       modelMessages: [],
-      lastUserPrompt: "hello legacy",
+      lastUserPrompt: "旧版主会话",
     };
     const extraSnapshot = {
       sessionId: extraSessionId,
@@ -218,7 +218,7 @@ describe("SessionService", () => {
       approvalMode: "always",
       uiMessages: [],
       modelMessages: [],
-      lastUserPrompt: "extra legacy",
+      lastUserPrompt: "旧版附加会话",
     };
 
     await writeJson(path.join(root, "__repo", "state.json"), {
@@ -273,5 +273,60 @@ describe("SessionService", () => {
     expect(migratedState?.version).toBe(2);
     expect(migratedState?.activeWorkingHeadId).toBe(activeSessionId);
     expect(migratedNode?.snapshot.workingHeadId).toBe(activeSessionId);
+  });
+  it("两个服务实例分别创建分支时会保留完整 branch 元数据", async () => {
+    const root = await makeTempDir("qagent-session-concurrent-branches-");
+    const seed = new SessionService(root);
+    const initialized = await seed.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    const worker = await seed.forkHead("worker-b", {
+      sourceHeadId: initialized.head.id,
+      activate: false,
+    });
+    await (seed as unknown as { dispose?: () => Promise<void> }).dispose?.();
+
+    const serviceA = new SessionService(root);
+    const serviceB = new SessionService(root);
+    const mainHead = await serviceA.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    const workerHead = await serviceB.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+      resumeSessionId: worker.head.sessionId,
+    });
+
+    await serviceA.createBranch("branch-a", mainHead.snapshot);
+    await serviceB.createBranch("branch-b", workerHead.snapshot);
+
+    const refs = await new SessionService(root).listRefs();
+
+    expect(refs.branches.map((branch) => branch.name)).toEqual(
+      expect.arrayContaining(["main", "branch-a", "branch-b"]),
+    );
+  });
+
+  it("第二个实例初始化同一个 working head 时会被拒绝", async () => {
+  const root = await makeTempDir("qagent-session-head-lock-");
+    const serviceA = new SessionService(root);
+    await serviceA.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+
+    await expect(
+      new SessionService(root).initialize({
+        cwd: "/tmp/project",
+        shellCwd: "/tmp/project",
+        approvalMode: "always",
+      }),
+    ).rejects.toThrow(/working head/i);
   });
 });

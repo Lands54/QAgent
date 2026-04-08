@@ -22,6 +22,10 @@ import type {
   ResolvedPaths,
   RuntimeConfig,
 } from "../../src/types.js";
+import {
+  buildProjectMemoryWriteCommand,
+  getNativeHostShellFixture,
+} from "../helpers/hostShellFixture.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -48,6 +52,8 @@ class MemoryForkModelClient implements ModelClient {
   private turn = 0;
   public readonly requests: ModelTurnRequest[] = [];
 
+  public constructor(private readonly shell = getNativeHostShellFixture()) {}
+
   public async runTurn(
     request: ModelTurnRequest,
   ): Promise<ModelTurnResult> {
@@ -63,17 +69,14 @@ class MemoryForkModelClient implements ModelClient {
             name: "shell",
             createdAt: new Date().toISOString(),
             input: {
-              command: [
-                "mkdir -p \"$QAGENT_PROJECT_MEMORY_DIR/auto-summary\"",
-                "cat > \"$QAGENT_PROJECT_MEMORY_DIR/auto-summary/MEMORY.md\" <<'EOF'",
+              command: buildProjectMemoryWriteCommand(this.shell, [
                 "---",
                 "name: auto-summary",
-                "description: 自动总结上一轮长期偏好",
+                "description: 自动总结最近一次 runLoop 的经验",
                 "---",
                 "",
-                "用户偏好持续使用中文，并且需要在 runLoop 结束后沉淀记忆。",
-                "EOF",
-              ].join("\n"),
+                "沉淀最近一次 runLoop 中值得长期保留的指导。",
+              ].join("\n")),
             },
           },
         ],
@@ -82,7 +85,7 @@ class MemoryForkModelClient implements ModelClient {
     }
 
     return {
-      assistantText: "已写入新的 project memory，总结了上一轮的偏好。",
+      assistantText: "已更新 project memory，写入最近一次 runLoop 的长期指导。",
       toolCalls: [],
       finishReason: "stop",
     };
@@ -102,7 +105,7 @@ describe("AutoMemoryForkService", () => {
         baseUrl: "https://example.invalid/v1",
         model: "test-model",
         temperature: 0,
-        systemPrompt: "你是一个记忆整理代理。",
+        systemPrompt: "你是一个运行时测试代理。",
       },
       runtime: {
         maxAgentSteps: 6,
@@ -116,7 +119,7 @@ describe("AutoMemoryForkService", () => {
       },
       tool: {
         approvalMode: "always",
-        shellExecutable: "/bin/zsh",
+        shellExecutable: getNativeHostShellFixture().executable,
       },
       cli: {},
     };
@@ -141,20 +144,18 @@ describe("AutoMemoryForkService", () => {
       shellCwd: projectDir,
       approvalMode: "always",
     });
-    const service = new AutoMemoryForkService(
-      agentManager,
-    );
+    const service = new AutoMemoryForkService(agentManager);
     const modelMessages: LlmMessage[] = [
       {
         id: "user-1",
         role: "user",
-        content: "给记忆系统加自动总结",
+        content: "请记住最近一次 runLoop 中值得长期保留的指导。",
         createdAt: new Date().toISOString(),
       },
       {
         id: "assistant-1",
         role: "assistant",
-        content: "我会在 runLoop 结束后补一个记忆整理流程。",
+        content: "我会把这些 runLoop 指导整理进记忆。",
         createdAt: new Date().toISOString(),
       },
     ];
@@ -164,7 +165,7 @@ describe("AutoMemoryForkService", () => {
       targetAgentId: initialized.head.id,
       targetSnapshot: initialized.snapshot,
       availableSkills: [],
-      lastUserPrompt: "给记忆系统加自动总结",
+      lastUserPrompt: "请记住最近一次 runLoop 中值得长期保留的指导。",
       modelMessages,
     });
     const targetHead = await sessionService.getHead(initialized.head.id);
@@ -176,9 +177,8 @@ describe("AutoMemoryForkService", () => {
     const request = modelClient.requests[0];
     const lastMessage = request?.messages.at(-1);
 
-    expect(result.report).toContain("已写入新的 project memory");
+    expect(result.report).toContain("已更新 project memory");
     expect(request?.systemPrompt).toContain("MEMORY.md");
-    expect(request?.systemPrompt).not.toContain("JSON 结构");
     expect(request?.systemPrompt).toContain("kebab-case");
     expect(request?.systemPrompt).toContain(
       "优先把新信息整合进最匹配的现有 memory",
@@ -189,30 +189,29 @@ describe("AutoMemoryForkService", () => {
     expect(request?.systemPrompt).toContain(
       "禁止创建旧格式 `*.json` memory 文件",
     );
-    expect(request?.systemPrompt).toContain(
-      "name: reply-language",
-    );
-    expect(request?.systemPrompt).not.toContain("Available Skill Metadata");
-    expect(request?.systemPrompt).not.toContain("Recent Session Digest");
+    expect(request?.systemPrompt).toContain("name: reply-language");
+    expect(request?.systemPrompt).not.toContain("可用 Skill 元数据");
+    expect(request?.systemPrompt).not.toContain("最近会话摘要");
     expect(request?.systemPrompt).not.toContain("## Memory:");
-    expect(request?.systemPrompt).not.toContain("当前时间：");
     expect(request?.systemPrompt).not.toContain(memoryState.projectMemoryDir);
     expect(lastMessage?.role).toBe("user");
     expect(lastMessage?.content).toContain("当前时间：");
-    expect(lastMessage?.content).toMatch(/project memory 工作区：.*\/project-memory/u);
-    expect(lastMessage?.content).toMatch(/global memory 工作区：.*\/global-memory/u);
-    expect(lastMessage?.content).toContain("上一轮用户任务：给记忆系统加自动总结");
-    expect(lastMessage?.content).toContain(
-      "第一步先查看已有 memory 目录与 `MEMORY.md`",
-    );
-    expect(lastMessage?.content).toContain(
-      "优先修改最匹配的现有 memory",
-    );
+    expect(lastMessage?.content).toContain("project memory");
+    expect(lastMessage?.content).toContain("global memory");
+    expect(lastMessage?.content).toContain("runLoop");
+    expect(lastMessage?.content).toContain("MEMORY.md");
+    expect(lastMessage?.content).toContain("上一轮用户任务：请记住最近一次 runLoop 中值得长期保留的指导。");
+    expect(lastMessage?.content).toContain("第一步先查看已有 memory 目录与 `MEMORY.md`");
+    expect(lastMessage?.content).toContain("优先修改最匹配的现有 memory");
+    expect(lastMessage?.content).toContain("$QAGENT_PROJECT_MEMORY_DIR");
+    expect(lastMessage?.content).toContain("$QAGENT_GLOBAL_MEMORY_DIR");
     expect(merged?.scope).toBe("project");
     expect(merged?.path).toBe(
       path.join(memoryState.projectMemoryDir, "auto-summary", "MEMORY.md"),
     );
-    expect(merged?.description).toBe("自动总结上一轮长期偏好");
-    expect(merged?.content).toContain("runLoop 结束后沉淀记忆");
+    expect(merged?.description).toBe("自动总结最近一次 runLoop 的经验");
+    expect(merged?.content).toContain(
+      "沉淀最近一次 runLoop 中值得长期保留的指导。",
+    );
   });
 });

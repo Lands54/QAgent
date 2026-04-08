@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { PromptAssembler } from "../../src/context/promptAssembler.js";
 import { SkillRegistry } from "../../src/skills/skillRegistry.js";
 import type { MemoryRecord, RuntimeConfig, SkillManifest } from "../../src/types.js";
+import { getDefaultTestShellExecutable } from "../helpers/hostShellFixture.js";
 import {
   VALID_MOCK_SKILL_NAMES,
   buildMockSkillResolvedPaths,
@@ -45,7 +46,7 @@ describe("PromptAssembler", () => {
       },
       tool: {
         approvalMode: "always",
-        shellExecutable: "/bin/zsh",
+        shellExecutable: getDefaultTestShellExecutable(),
       },
       cli: {},
     };
@@ -54,20 +55,20 @@ describe("PromptAssembler", () => {
       {
         id: "project:pdf-processing",
         name: "pdf-processing",
-        description: "Use when working with PDF files.",
+        description: "适用于处理 PDF 文件。",
         scope: "project",
         directoryPath: "/tmp/project/.agent/skills/pdf-processing",
         filePath: "/tmp/project/.agent/skills/pdf-processing/SKILL.md",
-        content: "# body",
+        content: "# 正文",
       },
       {
         id: "global:data-analysis",
         name: "data-analysis",
-        description: "Use when analyzing structured datasets.",
+        description: "适用于分析结构化数据集。",
         scope: "global",
         directoryPath: "/tmp/home/.agent/skills/data-analysis",
         filePath: "/tmp/home/.agent/skills/data-analysis/SKILL.md",
-        content: "# body",
+        content: "# 正文",
       },
     ];
 
@@ -83,7 +84,7 @@ describe("PromptAssembler", () => {
     expect(assembled.systemPrompt).toContain("skills:");
     expect(assembled.systemPrompt).toContain('name: "pdf-processing"');
     expect(assembled.systemPrompt).toContain(
-      'description: "Use when working with PDF files."',
+      'description: "适用于处理 PDF 文件。"',
     );
     expect(assembled.systemPrompt).toContain(
       "不会自动注入每个 Skill 的正文内容",
@@ -115,10 +116,10 @@ describe("PromptAssembler", () => {
     }
 
     expect(assembled.systemPrompt).not.toContain(
-      "PROJECT BODY MARKER: pdf-processing",
+      "项目正文标记：pdf-processing",
     );
     expect(assembled.systemPrompt).not.toContain(
-      "GLOBAL BODY MARKER: api-testing",
+      "全局正文标记：api-testing",
     );
   });
 
@@ -151,7 +152,7 @@ describe("PromptAssembler", () => {
           scope: "project",
           directoryPath: "/tmp/project/.agent/skills/pdf-processing",
           filePath: "/tmp/project/.agent/skills/pdf-processing/SKILL.md",
-          content: "# body",
+          content: "# 正文",
         },
       ],
       relevantMemories: memories,
@@ -168,8 +169,8 @@ describe("PromptAssembler", () => {
 
     expect(assembled.systemPrompt).toContain("skills:");
     expect(assembled.systemPrompt).toContain('name: "pdf-processing"');
-    expect(assembled.systemPrompt).not.toContain("Memory: reply-language");
-    expect(assembled.systemPrompt).not.toContain("Recent Session Digest");
+    expect(assembled.systemPrompt).not.toContain("记忆：reply-language");
+    expect(assembled.systemPrompt).not.toContain("最近会话摘要");
     expect(assembled.systemPrompt).not.toContain("当前时间：");
     expect(assembled.systemPrompt).not.toContain("当前 shell 工作目录：");
     expect(assembled.systemPrompt).not.toContain("当前工具审批模式：");
@@ -194,7 +195,7 @@ describe("PromptAssembler", () => {
           scope: "project",
           directoryPath: "/tmp/project/.agent/skills/pdf-processing",
           filePath: "/tmp/project/.agent/skills/pdf-processing/SKILL.md",
-          content: "# body",
+          content: "# 正文",
         },
       ],
       relevantMemories: [
@@ -224,8 +225,8 @@ describe("PromptAssembler", () => {
 
     expect(assembled.systemPrompt).toContain("你是自动记忆整理代理。");
     expect(assembled.systemPrompt).not.toContain("skills:");
-    expect(assembled.systemPrompt).not.toContain("Memory: reply-language");
-    expect(assembled.systemPrompt).not.toContain("Recent Session Digest");
+    expect(assembled.systemPrompt).not.toContain("记忆：reply-language");
+    expect(assembled.systemPrompt).not.toContain("最近会话摘要");
     expect(assembled.systemPrompt).not.toContain("当前时间：");
     expect(assembled.systemPrompt).not.toContain(config.cwd);
   });
@@ -249,7 +250,7 @@ describe("PromptAssembler", () => {
           scope: "project",
           directoryPath: "/tmp/project/.agent/skills/pdf-processing",
           filePath: "/tmp/project/.agent/skills/pdf-processing/SKILL.md",
-          content: "# body",
+          content: "# 正文",
         },
       ],
       relevantMemories: [],

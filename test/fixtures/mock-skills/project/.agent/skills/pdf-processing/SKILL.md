@@ -1,10 +1,10 @@
 ---
 name: pdf-processing
-description: Extract text, inspect metadata, and manipulate PDF files. Use when the user mentions PDF files, forms, OCR, or document extraction.
+description: 提取文本、检查元数据并处理 PDF 文件。适用于用户提到 PDF、表单、OCR 或文档提取的任务。
 ---
 
-# PDF Processing
+# PDF 处理
 
-PROJECT BODY MARKER: pdf-processing
+项目正文标记：pdf-processing
 
-Use the files in `scripts/`, `references/`, and `assets/` as needed.
+需要时使用该目录下的 `scripts/`、`references/` 和 `assets/` 文件。

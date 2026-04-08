@@ -3,6 +3,7 @@ import type { HeadAgentRuntime } from "../agentRuntime.js";
 
 export interface ManagedAgentEntry {
   runtime: HeadAgentRuntime;
+  queuedInputCount?: number;
   sourceAgentId?: string;
   mergeIntoAgentId?: string;
   mergeAssets?: string[];
@@ -58,7 +59,10 @@ export class AgentRegistry {
   }
 
   public listAgentViews(): AgentViewState[] {
-    return this.getEntries().map((entry) => entry.runtime.getViewState());
+    return this.getEntries().map((entry) => ({
+      ...entry.runtime.getViewState(),
+      queuedInputCount: entry.queuedInputCount ?? 0,
+    }));
   }
 
   public hasBusyAgents(): boolean {
