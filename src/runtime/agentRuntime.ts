@@ -477,6 +477,12 @@ export class HeadAgentRuntime {
       return;
     }
 
+    const pendingApproval = this.pendingApproval
+      ?? await this.restorePendingApprovalFromCheckpoint();
+    if (pendingApproval) {
+      return;
+    }
+
     const autoBranch = await this.options.sessionService.prepareHeadForUserInput(
       this.headId,
       this.options.snapshot,

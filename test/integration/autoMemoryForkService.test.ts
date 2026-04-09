@@ -22,6 +22,10 @@ import type {
   ResolvedPaths,
   RuntimeConfig,
 } from "../../src/types.js";
+import {
+  getTestShellExecutable,
+  getTestShellFamily,
+} from "../helpers/shellTestHarness.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -44,6 +48,34 @@ function buildResolvedPaths(homeDir: string, projectDir: string): ResolvedPaths 
   };
 }
 
+function buildWriteProjectMemoryCommand(markdown: string): string {
+  if (getTestShellFamily() === "powershell") {
+    const encoded = Buffer.from(markdown, "utf8").toString("base64");
+    return [
+      "$targetDir = Join-Path $env:QAGENT_PROJECT_MEMORY_DIR 'auto-summary'",
+      "[System.IO.Directory]::CreateDirectory($targetDir) | Out-Null",
+      "$targetFile = Join-Path $targetDir 'MEMORY.md'",
+      `$__qagentContent = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encoded}'))`,
+      "[System.IO.File]::WriteAllText($targetFile, $__qagentContent, [System.Text.Encoding]::UTF8)",
+    ].join("\n");
+  }
+
+  return [
+    'mkdir -p "$QAGENT_PROJECT_MEMORY_DIR/auto-summary"',
+    'cat > "$QAGENT_PROJECT_MEMORY_DIR/auto-summary/MEMORY.md" <<\'EOF\'',
+    markdown,
+    "EOF",
+  ].join("\n");
+}
+
+function toPortablePathPattern(suffix: string): RegExp {
+  const escaped = suffix
+    .split("/")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(String.raw`[\\/]`);
+  return new RegExp(escaped, "u");
+}
+
 class MemoryForkModelClient implements ModelClient {
   private turn = 0;
   public readonly requests: ModelTurnRequest[] = [];
@@ -55,6 +87,15 @@ class MemoryForkModelClient implements ModelClient {
     this.requests.push(request);
 
     if (this.turn === 1) {
+      const memoryMarkdown = [
+        "---",
+        "name: auto-summary",
+        "description: 自动总结上一轮长期偏好",
+        "---",
+        "",
+        "用户偏好持续使用中文，并且需要在 runLoop 结束后沉淀记忆。",
+      ].join("\n");
+
       return {
         assistantText: "",
         toolCalls: [
@@ -63,17 +104,7 @@ class MemoryForkModelClient implements ModelClient {
             name: "shell",
             createdAt: new Date().toISOString(),
             input: {
-              command: [
-                "mkdir -p \"$QAGENT_PROJECT_MEMORY_DIR/auto-summary\"",
-                "cat > \"$QAGENT_PROJECT_MEMORY_DIR/auto-summary/MEMORY.md\" <<'EOF'",
-                "---",
-                "name: auto-summary",
-                "description: 自动总结上一轮长期偏好",
-                "---",
-                "",
-                "用户偏好持续使用中文，并且需要在 runLoop 结束后沉淀记忆。",
-                "EOF",
-              ].join("\n"),
+              command: buildWriteProjectMemoryCommand(memoryMarkdown),
             },
           },
         ],
@@ -116,7 +147,7 @@ describe("AutoMemoryForkService", () => {
       },
       tool: {
         approvalMode: "always",
-        shellExecutable: "/bin/zsh",
+        shellExecutable: getTestShellExecutable(),
       },
       cli: {},
     };
@@ -141,9 +172,7 @@ describe("AutoMemoryForkService", () => {
       shellCwd: projectDir,
       approvalMode: "always",
     });
-    const service = new AutoMemoryForkService(
-      agentManager,
-    );
+    const service = new AutoMemoryForkService(agentManager);
     const modelMessages: LlmMessage[] = [
       {
         id: "user-1",
@@ -189,9 +218,7 @@ describe("AutoMemoryForkService", () => {
     expect(request?.systemPrompt).toContain(
       "禁止创建旧格式 `*.json` memory 文件",
     );
-    expect(request?.systemPrompt).toContain(
-      "name: reply-language",
-    );
+    expect(request?.systemPrompt).toContain("name: reply-language");
     expect(request?.systemPrompt).not.toContain("Available Skill Metadata");
     expect(request?.systemPrompt).not.toContain("Recent Session Digest");
     expect(request?.systemPrompt).not.toContain("## Memory:");
@@ -199,8 +226,12 @@ describe("AutoMemoryForkService", () => {
     expect(request?.systemPrompt).not.toContain(memoryState.projectMemoryDir);
     expect(lastMessage?.role).toBe("user");
     expect(lastMessage?.content).toContain("当前时间：");
-    expect(lastMessage?.content).toMatch(/project memory 工作区：.*\/project-memory/u);
-    expect(lastMessage?.content).toMatch(/global memory 工作区：.*\/global-memory/u);
+    expect(lastMessage?.content).toMatch(
+      new RegExp(`project memory 工作区：.*${toPortablePathPattern("project-memory").source}`, "u"),
+    );
+    expect(lastMessage?.content).toMatch(
+      new RegExp(`global memory 工作区：.*${toPortablePathPattern("global-memory").source}`, "u"),
+    );
     expect(lastMessage?.content).toContain("上一轮用户任务：给记忆系统加自动总结");
     expect(lastMessage?.content).toContain(
       "第一步先查看已有 memory 目录与 `MEMORY.md`",

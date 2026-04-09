@@ -25,15 +25,109 @@ interface PendingExecution {
   resolve: (result: ShellExecutionResult) => void;
   reject: (error: Error) => void;
   timeout?: NodeJS.Timeout;
-  signal?: AbortSignal;
   cleanupSignal?: () => void;
   termination?: "timeout" | "cancelled";
 }
 
+interface ParsedMarkerOutput {
+  stdout: string;
+  exitCode: number;
+  cwd: string;
+}
+
+interface ShellAdapter {
+  family: "posix" | "powershell";
+  getSpawnArgs(): string[];
+  wrapCommand(command: string, markerId: string): string;
+}
+
+class PosixShellAdapter implements ShellAdapter {
+  public readonly family = "posix" as const;
+
+  public getSpawnArgs(): string[] {
+    return ["-l"];
+  }
+
+  public wrapCommand(command: string, markerId: string): string {
+    return `${command}\nprintf "\\n__QAGENT_EXIT__${markerId}__\\t%s\\t%s\\n" "$?" "$PWD"\n`;
+  }
+}
+
+class PowerShellAdapter implements ShellAdapter {
+  public readonly family = "powershell" as const;
+
+  public getSpawnArgs(): string[] {
+    return ["-NoLogo", "-NoProfile", "-Command", "-"];
+  }
+
+  public wrapCommand(command: string, markerId: string): string {
+    // 通过 ASCII 外壳和 Base64 解码执行真实命令，避免 PowerShell 从 stdin 读取脚本时破坏 UTF-8 文本。
+    const encodedCommand = Buffer.from(command, "utf8").toString("base64");
+    return [
+      "$__qagentUtf8 = [System.Text.UTF8Encoding]::new($false)",
+      "$OutputEncoding = $__qagentUtf8",
+      "try { [Console]::InputEncoding = $__qagentUtf8 } catch {}",
+      "try { [Console]::OutputEncoding = $__qagentUtf8 } catch {}",
+      "$global:LASTEXITCODE = 0",
+      `$__qagentCommand = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encodedCommand}'))`,
+      "Invoke-Expression $__qagentCommand",
+      "$__qagentExitCode = if ($?) { if ($null -ne $global:LASTEXITCODE) { [int]$global:LASTEXITCODE } else { 0 } } else { if ($null -ne $global:LASTEXITCODE -and [int]$global:LASTEXITCODE -ne 0) { [int]$global:LASTEXITCODE } else { 1 } }",
+      `Write-Output "__QAGENT_EXIT__${markerId}__\`t$__qagentExitCode\`t$((Get-Location).Path)"`,
+      "",
+    ].join("\n");
+  }
+}
+
+function detectShellAdapter(executable: string): ShellAdapter {
+  const basename = executable.split(/[\\/]/u).pop()?.toLowerCase() ?? "";
+  if (
+    basename === "powershell"
+    || basename === "powershell.exe"
+    || basename === "pwsh"
+    || basename === "pwsh.exe"
+  ) {
+    return new PowerShellAdapter();
+  }
+
+  return new PosixShellAdapter();
+}
+
+function parseMarkerOutput(
+  stdout: string,
+  markerId: string,
+): ParsedMarkerOutput | undefined {
+  const marker = `__QAGENT_EXIT__${markerId}__\t`;
+  const markerIndex = stdout.indexOf(marker);
+  if (markerIndex === -1) {
+    return undefined;
+  }
+
+  const lineEnd = stdout.indexOf("\n", markerIndex);
+  if (lineEnd === -1) {
+    return undefined;
+  }
+
+  const markerLine = stdout.slice(markerIndex, lineEnd).trim();
+  const match = markerLine.match(
+    /^__QAGENT_EXIT__.+__\t(?<exitCode>-?\d+)\t(?<cwd>.+)$/u,
+  );
+  if (!match?.groups?.cwd) {
+    return undefined;
+  }
+
+  return {
+    stdout: stdout.slice(0, markerIndex).replace(/\r?\n$/u, ""),
+    exitCode: Number(match.groups.exitCode ?? "1"),
+    cwd: match.groups.cwd,
+  };
+}
+
 export class PersistentShellSession {
+  private readonly adapter: ShellAdapter;
   private shell?: ChildProcessWithoutNullStreams;
   private pending?: PendingExecution;
   private currentCwd: string;
+  private startingShell?: Promise<void>;
 
   public constructor(
     private readonly executable: string,
@@ -41,6 +135,7 @@ export class PersistentShellSession {
     private readonly env: NodeJS.ProcessEnv = process.env,
   ) {
     this.currentCwd = cwd;
+    this.adapter = detectShellAdapter(executable);
   }
 
   public getCurrentCwd(): string {
@@ -71,26 +166,17 @@ export class PersistentShellSession {
         startedAtMs: Date.now(),
         resolve,
         reject,
-        signal: options.signal,
       };
 
       if (options.timeoutMs > 0) {
         pending.timeout = setTimeout(() => {
-          if (!this.pending) {
-            return;
-          }
-          this.pending.termination = "timeout";
-          this.shell?.stdin.write("\u0003");
+          void this.terminatePending("timeout");
         }, options.timeoutMs);
       }
 
       if (options.signal) {
         const onAbort = () => {
-          if (!this.pending) {
-            return;
-          }
-          this.pending.termination = "cancelled";
-          this.shell?.stdin.write("\u0003");
+          void this.terminatePending("cancelled");
         };
         options.signal.addEventListener("abort", onAbort, { once: true });
         pending.cleanupSignal = () => {
@@ -99,14 +185,14 @@ export class PersistentShellSession {
       }
 
       this.pending = pending;
-      const wrapped = `${command}\nprintf "\\n__QAGENT_EXIT__${markerId}__\\t%s\\t%s\\n" "$?" "$PWD"\n`;
-      this.shell?.stdin.write(wrapped);
+      this.shell?.stdin.write(this.adapter.wrapCommand(command, markerId));
     });
   }
 
   public async dispose(): Promise<void> {
-    this.pending?.cleanupSignal?.();
-    this.pending = undefined;
+    if (this.pending) {
+      await this.terminatePending(this.pending.termination ?? "cancelled");
+    }
 
     if (!this.shell) {
       return;
@@ -114,40 +200,76 @@ export class PersistentShellSession {
 
     const shell = this.shell;
     this.shell = undefined;
-    shell.stdin.end("exit\n");
+    await new Promise<void>((resolve) => {
+      shell.once("close", () => resolve());
+      shell.stdin.end("exit\n");
+    });
   }
 
   private async ensureStarted(): Promise<void> {
     if (this.shell) {
       return;
     }
+    if (this.startingShell) {
+      await this.startingShell;
+      return;
+    }
 
-    const child = spawn(this.executable, ["-l"], {
-      cwd: this.currentCwd,
-      env: {
-        ...this.env,
-        TERM: "dumb",
-      },
-      stdio: "pipe",
+    this.startingShell = new Promise<void>((resolve, reject) => {
+      const child = spawn(this.executable, this.adapter.getSpawnArgs(), {
+        cwd: this.currentCwd,
+        env: {
+          ...this.env,
+          TERM: "dumb",
+        },
+        stdio: "pipe",
+        detached: process.platform !== "win32" && this.adapter.family === "posix",
+      });
+
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+
+      let settled = false;
+      const finishResolve = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.shell = child;
+        child.stdout.on("data", (chunk: string) => this.handleStdout(chunk));
+        child.stderr.on("data", (chunk: string) => this.handleStderr(chunk));
+        child.on("exit", (code, signal) => {
+          this.handleShellExit(code, signal);
+        });
+        child.on("error", (error) => {
+          this.handleShellError(error);
+        });
+        resolve();
+      };
+      const finishReject = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(error);
+      };
+
+      child.once("spawn", finishResolve);
+      child.once("error", (error) => {
+        finishReject(new Error(`shell 启动失败：${error.message}`));
+      });
+      child.once("exit", (code, signal) => {
+        finishReject(
+          new Error(`shell 启动失败，code=${code ?? "null"} signal=${signal ?? "null"}`),
+        );
+      });
     });
 
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => this.handleStdout(chunk));
-    child.stderr.on("data", (chunk: string) => this.handleStderr(chunk));
-    child.on("exit", (code, signal) => {
-      const pending = this.pending;
-      if (!pending) {
-        return;
-      }
-      const error = new Error(
-        `shell 会话意外退出，code=${code ?? "null"} signal=${signal ?? "null"}`,
-      );
-      this.cleanupPending();
-      pending.reject(error);
-    });
-
-    this.shell = child;
+    try {
+      await this.startingShell;
+    } finally {
+      this.startingShell = undefined;
+    }
   }
 
   private handleStdout(chunk: string): void {
@@ -156,41 +278,23 @@ export class PersistentShellSession {
     }
 
     this.pending.stdout += chunk;
-    const marker = `__QAGENT_EXIT__${this.pending.markerId}__\t`;
-    const markerIndex = this.pending.stdout.indexOf(marker);
-    if (markerIndex === -1) {
+    const parsed = parseMarkerOutput(this.pending.stdout, this.pending.markerId);
+    if (!parsed) {
       return;
     }
 
-    const lineEnd = this.pending.stdout.indexOf("\n", markerIndex);
-    if (lineEnd === -1) {
-      return;
-    }
-
-    const markerLine = this.pending.stdout.slice(markerIndex, lineEnd).trim();
-    const match = markerLine.match(
-      /^__QAGENT_EXIT__.+__\t(?<exitCode>-?\d+)\t(?<cwd>.+)$/u,
-    );
-    if (!match?.groups) {
-      return;
-    }
-
-    const stdout = this.pending.stdout.slice(0, markerIndex).replace(/\n$/, "");
-    const stderr = this.pending.stderr.replace(/\n$/, "");
-    const exitCode = Number(match.groups.exitCode ?? "1");
-    const cwd = match.groups.cwd ?? this.currentCwd;
     const result: ShellExecutionResult = {
-      stdout,
-      stderr,
-      exitCode,
-      cwd,
+      stdout: parsed.stdout,
+      stderr: this.pending.stderr.replace(/\r?\n$/u, ""),
+      exitCode: parsed.exitCode,
+      cwd: parsed.cwd,
       durationMs: Date.now() - this.pending.startedAtMs,
       startedAt: this.pending.startedAt,
       finishedAt: new Date().toISOString(),
       termination: this.pending.termination,
     };
 
-    this.currentCwd = cwd;
+    this.currentCwd = parsed.cwd;
     const resolve = this.pending.resolve;
     this.cleanupPending();
     resolve(result);
@@ -202,6 +306,97 @@ export class PersistentShellSession {
     }
 
     this.pending.stderr += chunk;
+  }
+
+  private handleShellExit(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    const pending = this.pending;
+    this.shell = undefined;
+    if (!pending) {
+      return;
+    }
+
+    const error = new Error(
+      `shell 会话意外退出，code=${code ?? "null"} signal=${signal ?? "null"}`,
+    );
+    this.cleanupPending();
+    pending.reject(error);
+  }
+
+  private handleShellError(error: Error): void {
+    const pending = this.pending;
+    this.shell = undefined;
+    if (!pending) {
+      return;
+    }
+
+    this.cleanupPending();
+    pending.reject(new Error(`shell 启动失败：${error.message}`));
+  }
+
+  private async terminatePending(
+    termination: "timeout" | "cancelled",
+  ): Promise<void> {
+    const pending = this.pending;
+    if (!pending) {
+      return;
+    }
+
+    pending.termination = termination;
+    const shell = this.shell;
+    this.shell = undefined;
+    this.cleanupPending();
+
+    if (shell) {
+      await this.killShell(shell);
+    }
+
+    pending.resolve({
+      stdout: pending.stdout.replace(/\r?\n$/u, ""),
+      stderr: pending.stderr.replace(/\r?\n$/u, ""),
+      exitCode: null,
+      cwd: this.currentCwd,
+      durationMs: Date.now() - pending.startedAtMs,
+      startedAt: pending.startedAt,
+      finishedAt: new Date().toISOString(),
+      termination,
+    });
+  }
+
+  private async killShell(shell: ChildProcessWithoutNullStreams): Promise<void> {
+    const pid = shell.pid;
+    if (!pid) {
+      shell.kill("SIGKILL");
+      return;
+    }
+
+    if (process.platform === "win32") {
+      await new Promise<void>((resolve) => {
+        const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        killer.once("error", () => resolve());
+        killer.once("close", () => resolve());
+      });
+      return;
+    }
+
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        shell.kill("SIGKILL");
+      }
+    }
+
+    await new Promise<void>((resolve) => {
+      shell.once("close", () => resolve());
+    });
   }
 
   private cleanupPending(): void {

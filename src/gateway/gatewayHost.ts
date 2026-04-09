@@ -600,6 +600,14 @@ export class GatewayHost {
       return;
     }
     if (request.domain === "work") {
+      if (request.action === "close") {
+        const runtime = this.ensureClientRuntime(clientId);
+        this.clientSessions.setClientContext(clientId, {
+          activeExecutorId: runtime.agentId,
+          activeWorklineId: runtime.headId,
+        });
+        return;
+      }
       const workline = (result.payload as { workline?: { id: string } } | undefined)?.workline;
       if (workline?.id) {
         this.openExecutor(clientId, workline.id);

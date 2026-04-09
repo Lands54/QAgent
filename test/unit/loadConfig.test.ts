@@ -72,7 +72,9 @@ describe("loadRuntimeConfig", () => {
     expect(config.resolvedPaths.projectAgentDir).toBe(
       path.join(tempProject, ".agent"),
     );
-    expect(config.resolvedPaths.globalAgentDir).toBe(path.join(tempHome, ".agent"));
+    expect(config.resolvedPaths.globalAgentDir).toBe(
+      path.join(tempHome, ".agent"),
+    );
   });
 
   it("支持通过 OpenRouter 环境变量自动切换 provider 与默认配置", async () => {
@@ -98,4 +100,24 @@ describe("loadRuntimeConfig", () => {
     expect(config.runtime.fetchMemoryMaxAgentSteps).toBe(3);
     expect(config.runtime.autoMemoryForkMaxAgentSteps).toBe(4);
   });
+
+  (process.platform === "win32" ? it : it.skip)(
+    "在 Windows 上默认使用 PowerShell 作为 shell",
+    async () => {
+      const tempHome = await makeTempDir("qagent-home-");
+      const tempProject = await makeTempDir("qagent-project-");
+      vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+      await mkdir(path.join(tempHome, ".agent"), { recursive: true });
+      await mkdir(path.join(tempProject, ".agent"), { recursive: true });
+
+      delete process.env.SHELL;
+      delete process.env.QAGENT_SHELL;
+
+      const config = await loadRuntimeConfig({
+        cwd: tempProject,
+      });
+
+      expect(config.tool.shellExecutable.toLowerCase()).toContain("powershell");
+    },
+  );
 });
