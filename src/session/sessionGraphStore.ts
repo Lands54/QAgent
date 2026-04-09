@@ -34,6 +34,8 @@ export interface SessionHeadLockRecord extends SessionLockMetadata {
 }
 
 export class SessionGraphStore {
+  private static readonly REPO_LOCK_STALE_AFTER_MS = 30_000;
+
   private readonly repoRoot: string;
   private readonly nodesRoot: string;
   private readonly headsRoot: string;
@@ -203,6 +205,9 @@ export class SessionGraphStore {
         };
       } catch (error) {
         if (this.isAlreadyExistsError(error)) {
+          if (await this.reapStaleRepoLock()) {
+            continue;
+          }
           if (Date.now() - startedAt >= timeoutMs) {
             throw new Error("Timed out acquiring session repo lock.");
           }
@@ -342,6 +347,38 @@ export class SessionGraphStore {
       return true;
     }
     return Date.now() - updatedAt > staleAfterMs;
+  }
+
+  private async reapStaleRepoLock(): Promise<boolean> {
+    const existing = await readJsonIfExists<SessionLockMetadata>(this.repoLockPath);
+    if (!existing) {
+      await unlink(this.repoLockPath).catch(() => undefined);
+      return true;
+    }
+    if (this.isLockOwnedByLiveProcess(existing)) {
+      return false;
+    }
+    if (!this.isLockStale(existing, SessionGraphStore.REPO_LOCK_STALE_AFTER_MS)) {
+      return false;
+    }
+    await unlink(this.repoLockPath).catch(() => undefined);
+    return true;
+  }
+
+  private isLockOwnedByLiveProcess(lock: SessionLockMetadata): boolean {
+    if (!Number.isInteger(lock.pid) || lock.pid <= 0) {
+      return false;
+    }
+    try {
+      process.kill(lock.pid, 0);
+      return true;
+    } catch (error) {
+      const errorCode =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { code?: string }).code
+          : undefined;
+      return errorCode === "EPERM";
+    }
   }
 
   private async delay(durationMs: number): Promise<void> {

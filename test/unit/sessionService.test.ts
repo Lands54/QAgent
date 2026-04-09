@@ -428,4 +428,63 @@ describe("SessionService", () => {
       }),
     ).rejects.toThrow(/working head/i);
   });
+  it("切换到被其他客户端占用的 working head 失败时不会改写 active head", async () => {
+    const root = await makeTempDir("qagent-session-switch-lock-");
+    const service = new SessionService(root);
+    const graphStore = new SessionGraphStore(root);
+    const initialized = await service.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    const worker = await service.forkHead("worker-locked", {
+      sourceHeadId: initialized.head.id,
+      activate: false,
+    });
+    const lock = await graphStore.acquireHeadLock(worker.head.id, {
+      clientId: "other-client",
+      staleAfterMs: 30_000,
+    });
+
+    await expect(service.switchHead(worker.head.id)).rejects.toThrow(/working head/i);
+
+    expect((await graphStore.loadState())?.activeWorkingHeadId).toBe(initialized.head.id);
+    expect((await service.getStatus()).workingHeadId).toBe(initialized.head.id);
+
+    await graphStore.releaseHeadLock(lock);
+    await service.dispose();
+  });
+
+  it("resume 到被其他客户端占用的 working head 失败时不会改写 active head", async () => {
+    const root = await makeTempDir("qagent-session-resume-lock-");
+    const seed = new SessionService(root);
+    const graphStore = new SessionGraphStore(root);
+    const initialized = await seed.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    const worker = await seed.forkHead("worker-locked", {
+      sourceHeadId: initialized.head.id,
+      activate: false,
+    });
+    const lock = await graphStore.acquireHeadLock(worker.head.id, {
+      clientId: "other-client",
+      staleAfterMs: 30_000,
+    });
+
+    await expect(
+      new SessionService(root).initialize({
+        cwd: "/tmp/project",
+        shellCwd: "/tmp/project",
+        approvalMode: "always",
+        resumeSessionId: worker.head.sessionId,
+      }),
+    ).rejects.toThrow(/working head/i);
+
+    expect((await graphStore.loadState())?.activeWorkingHeadId).toBe(initialized.head.id);
+
+    await graphStore.releaseHeadLock(lock);
+    await seed.dispose();
+  });
 });

@@ -13,6 +13,7 @@ import type {
   SessionTagRef,
   SessionWorkingHead,
 } from "../../src/types.js";
+import { ensureDir, writeJson } from "../../src/utils/index.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -122,5 +123,26 @@ describe("SessionGraphStore", () => {
     expect(await store.listNodes()).toEqual([node]);
     expect(await store.loadHead("head_main")).toEqual(heads[0]);
     expect(await store.listHeads()).toEqual(heads);
+  });
+  it("会回收崩溃后遗留的过期 repo 锁", async () => {
+    const root = await makeTempDir("qagent-session-graph-stale-lock-");
+    const store = new SessionGraphStore(root);
+    const lockPath = path.join(root, "__repo", "locks", "repo.lock");
+    await ensureDir(path.dirname(lockPath));
+    await writeJson(lockPath, {
+      clientId: "dead-client",
+      pid: 999999,
+      acquiredAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const lock = await store.acquireRepoLock({
+      clientId: "live-client",
+      timeoutMs: 100,
+      pollIntervalMs: 10,
+    });
+
+    expect(lock.metadata.clientId).toBe("live-client");
+    await store.releaseRepoLock(lock);
   });
 });

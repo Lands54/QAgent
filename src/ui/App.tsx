@@ -156,8 +156,8 @@ export function App({ controller }: AppProps) {
       setInput("");
       return;
     }
-    await controller.submitInput(trimmed);
     setInput("");
+    await controller.submitInput(trimmed);
   }
 
   const completionPreview = getCompletionPreview(

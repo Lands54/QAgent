@@ -159,7 +159,7 @@ export class SessionService {
   ): Promise<SessionInitializationResult> {
     this.lastLoadInfoMessage = undefined;
     return this.withRepoLock(async () => {
-    if (await this.graphStore.repoExists()) {
+      if (await this.graphStore.repoExists()) {
       await this.loadRepo();
 
       if (input.resumeSessionId && input.resumeSessionId !== "latest") {
@@ -167,11 +167,10 @@ export class SessionService {
         if (!matchedHead) {
           throw new Error(`未找到 working head 对应 sessionId：${input.resumeSessionId}`);
         }
-        this.requireRepoState().activeWorkingHeadId = matchedHead.id;
-        await this.saveRepoMetadata();
+        await this.activateHead(matchedHead.id);
+      } else {
+        await this.acquireActiveHeadLock(this.requireRepoState().activeWorkingHeadId);
       }
-
-      await this.acquireActiveHeadLock(this.requireRepoState().activeWorkingHeadId);
       const head = await this.getActiveHead();
       const snapshot = await this.loadWorkingSnapshot(head.id);
       return {
@@ -180,11 +179,11 @@ export class SessionService {
         head,
         infoMessage: this.lastLoadInfoMessage,
       };
-    }
+      }
 
-    const now = new Date().toISOString();
-    const headId = createId("head");
-    const head: SessionWorkingHead = {
+      const now = new Date().toISOString();
+      const headId = createId("head");
+      const head: SessionWorkingHead = {
       id: headId,
       name: DEFAULT_BRANCH_NAME,
       currentNodeId: "",
@@ -213,46 +212,46 @@ export class SessionService {
       createdAt: now,
       updatedAt: now,
     };
-    const snapshot = await this.sessionStore.initializeHeadSession({
+      const snapshot = await this.sessionStore.initializeHeadSession({
       workingHeadId: head.id,
       sessionId: head.sessionId,
       cwd: input.cwd,
       shellCwd: input.shellCwd,
       approvalMode: input.approvalMode,
     });
-    const seededAssetState = await this.runForkProviders(head, snapshot);
-    head.assetState = seededAssetState;
-    const rootNode = this.buildNode({
+      const seededAssetState = await this.runForkProviders(head, snapshot);
+      head.assetState = seededAssetState;
+      const rootNode = this.buildNode({
       kind: "root",
       parentNodeIds: [],
       snapshot,
       assetState: seededAssetState,
     });
-    head.currentNodeId = rootNode.id;
-    head.attachment = {
+      head.currentNodeId = rootNode.id;
+      head.attachment = {
       mode: "branch",
       name: DEFAULT_BRANCH_NAME,
       nodeId: rootNode.id,
     };
 
-    const mainBranch: SessionBranchRef = {
+      const mainBranch: SessionBranchRef = {
       name: DEFAULT_BRANCH_NAME,
       headNodeId: rootNode.id,
       createdAt: now,
       updatedAt: now,
     };
-    this.repoState = {
+      this.repoState = {
       version: 2,
       activeWorkingHeadId: head.id,
       defaultBranchName: DEFAULT_BRANCH_NAME,
       createdAt: now,
       updatedAt: now,
     };
-    this.branches = [mainBranch];
-    this.tags = [];
-    this.commits = [];
-    this.heads = [head];
-    await this.graphStore.initializeRepo({
+      this.branches = [mainBranch];
+      this.tags = [];
+      this.commits = [];
+      this.heads = [head];
+      await this.graphStore.initializeRepo({
       state: this.repoState,
       branches: this.branches,
       tags: this.tags,
@@ -260,13 +259,13 @@ export class SessionService {
       nodes: [rootNode],
       heads: [head],
     });
-    await this.acquireActiveHeadLock(head.id);
+      await this.acquireActiveHeadLock(head.id);
 
-    return {
-      snapshot,
-      ref: await this.getHeadStatus(head.id, snapshot),
-      head,
-    };
+      return {
+        snapshot,
+        ref: await this.getHeadStatus(head.id, snapshot),
+        head,
+      };
     });
   }
 
@@ -675,9 +674,7 @@ export class SessionService {
         throw new Error(`working head 已关闭：${nextHead.name}`);
       }
 
-      this.requireRepoState().activeWorkingHeadId = nextHead.id;
-      await this.saveRepoMetadata();
-      await this.acquireActiveHeadLock(nextHead.id);
+      await this.activateHead(nextHead.id);
       const snapshot = await this.loadWorkingSnapshot(nextHead.id);
       return {
         snapshot,
@@ -754,9 +751,7 @@ export class SessionService {
       this.heads.push(head);
       await this.graphStore.saveHead(head);
       if (options.activate) {
-        this.requireRepoState().activeWorkingHeadId = head.id;
-        await this.saveRepoMetadata();
-        await this.acquireActiveHeadLock(head.id);
+        await this.activateHead(head.id);
       }
 
       return {
@@ -1540,5 +1535,11 @@ export class SessionService {
       this.graphStore.saveBranches(this.branches),
       this.graphStore.saveTags(this.tags),
     ]);
+  }
+
+  private async activateHead(headId: string): Promise<void> {
+    await this.acquireActiveHeadLock(headId);
+    this.requireRepoState().activeWorkingHeadId = headId;
+    await this.saveRepoMetadata();
   }
 }
