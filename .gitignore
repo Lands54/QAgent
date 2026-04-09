@@ -8,3 +8,4 @@ coverage
 .agent/sessions
 .agent/memory/*.json
 user_testroom/.agent/
+.worktrees/
