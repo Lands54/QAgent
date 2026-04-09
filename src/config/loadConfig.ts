@@ -233,7 +233,9 @@ export async function loadRuntimeConfig(
     },
     tool: {
       approvalMode: "always",
-      shellExecutable: process.env.SHELL ?? "/bin/zsh",
+      shellExecutable: process.platform === "win32"
+        ? "powershell.exe"
+        : process.env.SHELL ?? "/bin/zsh",
     },
     cli: {
       initialPrompt: cliOptions.initialPrompt,
