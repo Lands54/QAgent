@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadRuntimeConfig } from "../config/index.js";
@@ -63,9 +64,34 @@ async function waitForGateway(baseUrl: string, timeoutMs = 10_000): Promise<void
   throw new Error("等待 gateway 启动超时。");
 }
 
+export function resolveGatewaySpawnSpec(
+  moduleUrl = import.meta.url,
+): {
+  command: string;
+  args: string[];
+} {
+  const currentModulePath = path.normalize(fileURLToPath(moduleUrl));
+  if (currentModulePath.includes(`${path.sep}src${path.sep}`)) {
+    return {
+      command: process.execPath,
+      args: [
+        fileURLToPath(new URL("../../node_modules/tsx/dist/cli.mjs", moduleUrl)),
+        fileURLToPath(new URL("../cli/index.ts", moduleUrl)),
+        "gateway",
+        "serve",
+      ],
+    };
+  }
+
+  return {
+    command: process.execPath,
+    args: [fileURLToPath(new URL("../../bin/qagent.js", moduleUrl)), "gateway", "serve"],
+  };
+}
+
 async function spawnGatewayProcess(cliOptions: CliOptions): Promise<void> {
-  const scriptPath = fileURLToPath(new URL("../../bin/qagent.js", import.meta.url));
-  const args = [scriptPath, "gateway", "serve"];
+  const spawnSpec = resolveGatewaySpawnSpec();
+  const args = [...spawnSpec.args];
   if (cliOptions.cwd) {
     args.push("--cwd", cliOptions.cwd);
   }
@@ -78,7 +104,7 @@ async function spawnGatewayProcess(cliOptions: CliOptions): Promise<void> {
   if (cliOptions.model) {
     args.push("--model", cliOptions.model);
   }
-  const child = spawn(process.execPath, args, {
+  const child = spawn(spawnSpec.command, args, {
     cwd: cliOptions.cwd ?? process.cwd(),
     detached: true,
     stdio: "ignore",

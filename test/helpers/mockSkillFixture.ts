@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { getTestShellExecutable } from "./shellTestHarness.js";
 import type { ResolvedPaths, RuntimeConfig } from "../../src/types.js";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -71,7 +72,7 @@ export function buildMockSkillRuntimeConfig(
     },
     tool: {
       approvalMode: "always",
-      shellExecutable: "/bin/zsh",
+      shellExecutable: getTestShellExecutable(),
       ...overrides.tool,
     },
     cli: {

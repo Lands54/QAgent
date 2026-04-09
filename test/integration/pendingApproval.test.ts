@@ -15,6 +15,10 @@ import type {
   RuntimeConfig,
   RuntimeEvent,
 } from "../../src/types.js";
+import {
+  getPrintTextCommand,
+  getTestShellExecutable,
+} from "../helpers/shellTestHarness.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -56,11 +60,13 @@ function buildConfig(projectDir: string): RuntimeConfig {
     },
     tool: {
       approvalMode: "always",
-      shellExecutable: "/bin/zsh",
+      shellExecutable: getTestShellExecutable(),
     },
     cli: {},
   };
 }
+
+const approvalCommand = getPrintTextCommand("checkpoint-approved");
 
 class ApprovalCheckpointModelClient implements ModelClient {
   public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
@@ -74,7 +80,7 @@ class ApprovalCheckpointModelClient implements ModelClient {
 
     if (alreadyExecuted) {
       return {
-        assistantText: "已根据审批结果继续完成",
+        assistantText: "已根据审批结果继续完成。",
         toolCalls: [],
         finishReason: "stop",
       };
@@ -88,12 +94,58 @@ class ApprovalCheckpointModelClient implements ModelClient {
           name: "shell",
           createdAt: new Date().toISOString(),
           input: {
-            command: "printf checkpoint-approved",
+            command: approvalCommand,
           },
         },
       ],
       finishReason: "tool_calls",
     };
+  }
+}
+
+class StrictApprovalSequenceModelClient implements ModelClient {
+  public callCount = 0;
+
+  public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
+    this.callCount += 1;
+    this.assertNoDanglingToolCalls(request.messages);
+    return {
+      assistantText: "",
+      toolCalls: [
+        {
+          id: "tool-approval-strict-1",
+          name: "shell",
+          createdAt: new Date().toISOString(),
+          input: {
+            command: approvalCommand,
+          },
+        },
+      ],
+      finishReason: "tool_calls",
+    };
+  }
+
+  private assertNoDanglingToolCalls(
+    messages: ReadonlyArray<ModelTurnRequest["messages"][number]>,
+  ): void {
+    const pendingToolCallIds = new Set<string>();
+    for (const message of messages) {
+      if (message.role === "assistant") {
+        for (const toolCall of message.toolCalls ?? []) {
+          pendingToolCallIds.add(toolCall.id);
+        }
+        continue;
+      }
+      if (message.role === "tool") {
+        pendingToolCallIds.delete(message.toolCallId);
+      }
+    }
+    if (pendingToolCallIds.size === 0) {
+      return;
+    }
+    throw new Error(
+      `An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. Missing: ${[...pendingToolCallIds].join(", ")}`,
+    );
   }
 }
 
@@ -153,7 +205,7 @@ describe("pending approval integration", () => {
     try {
       const result = await firstManager.runAgentPrompt("请执行一次需要审批的命令");
       expect(result.settled).toBe("approval_required");
-      expect(result.checkpoint?.toolCall.input.command).toBe("printf checkpoint-approved");
+      expect(result.checkpoint?.toolCall.input.command).toBe(approvalCommand);
       expect(
         phaseOneEvents.some((event) => event.type === "approval.required"),
       ).toBe(true);
@@ -206,7 +258,7 @@ describe("pending approval integration", () => {
       expect(snapshot.uiMessages.some((message) => {
         return (
           message.role === "assistant"
-          && message.content.includes("已根据审批结果继续完成")
+          && message.content.includes("已根据审批结果继续完成。")
         );
       })).toBe(true);
 
@@ -221,6 +273,26 @@ describe("pending approval integration", () => {
       expect(assistantCompletedIndex).toBeGreaterThan(toolFinishedIndex);
     } finally {
       await secondManager.dispose();
+    }
+  });
+
+  it("待审批未处理时再次 run 会直接返回现有 checkpoint", async () => {
+    const projectDir = await makeTempDir("qagent-pending-approval-repeat-");
+    const config = buildConfig(projectDir);
+    const modelClient = new StrictApprovalSequenceModelClient();
+    const manager = await createAgentManager(config, modelClient);
+
+    try {
+      const first = await manager.runAgentPrompt("第一次触发审批");
+      expect(first.settled).toBe("approval_required");
+      expect(modelClient.callCount).toBe(1);
+
+      const second = await manager.runAgentPrompt("第二次继续提问");
+      expect(second.settled).toBe("approval_required");
+      expect(second.checkpoint?.checkpointId).toBe(first.checkpoint?.checkpointId);
+      expect(modelClient.callCount).toBe(1);
+    } finally {
+      await manager.dispose();
     }
   });
 });

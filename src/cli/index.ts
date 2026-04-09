@@ -1,4 +1,6 @@
 import { render } from "ink";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 
 import {
@@ -45,6 +47,15 @@ function printHelp(): void {
   --stream          以 NDJSON 流式输出 runtime events
   -h, --help        显示帮助
 `);
+}
+
+function isMainModule(): boolean {
+  const entryPath = process.argv[1];
+  if (!entryPath) {
+    return false;
+  }
+
+  return path.resolve(fileURLToPath(import.meta.url)) === path.resolve(entryPath);
 }
 
 export async function runCli(argv: string[]): Promise<void> {
@@ -134,7 +145,7 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule()) {
   runCli(process.argv.slice(2)).catch((error) => {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;

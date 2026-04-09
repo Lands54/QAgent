@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { SkillRegistry } from "../../src/skills/skillRegistry.js";
@@ -24,8 +25,10 @@ describe("SkillRegistry", () => {
       scope: "global",
       name: "api-testing",
     });
-    expect(registry.find("repo-maintenance")?.directoryPath).toContain(
-      "/project/.agent/skills/repo-maintenance",
+    expect(
+      path.normalize(registry.find("repo-maintenance")?.directoryPath ?? ""),
+    ).toContain(
+      path.normalize(path.join("project", ".agent", "skills", "repo-maintenance")),
     );
     expect(registry.find("incident-triage")?.content).toContain(
       "GLOBAL BODY MARKER: incident-triage",
