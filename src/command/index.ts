@@ -2,8 +2,10 @@ export { CommandService, type CommandServiceDependencies } from "./commandServic
 export { formatCommandResultText, formatCommandResultUiMessages } from "./formatters.js";
 export {
   buildSlashHelpText,
-  formatAgent,
+  formatBookmark,
+  formatExecutor,
   formatUiMessagesAsText,
+  formatWorkline,
   parseCommandTokens,
   parseLimit,
   parseMessageFlag,

@@ -92,7 +92,9 @@ export type CommandDomain =
   | "debug"
   | "memory"
   | "skills"
-  | "agent"
+  | "work"
+  | "bookmark"
+  | "executor"
   | "session"
   | "approval"
   | "clear";
@@ -111,6 +113,8 @@ export interface PendingApprovalResumeState {
 
 export interface PendingApprovalCheckpoint {
   checkpointId: string;
+  executorId: string;
+  worklineId: string;
   agentId: string;
   headId: string;
   sessionId: string;
@@ -170,48 +174,46 @@ export type CommandRequest =
       key?: string;
     }
   | {
-      domain: "agent";
+      domain: "work";
       action:
         | "status"
         | "list"
-        | "spawn"
         | "switch"
         | "next"
         | "prev"
         | "close"
-        | "interrupt"
-        | "resume";
-      agentId?: string;
+        | "new"
+        | "detach"
+        | "merge";
+      worklineId?: string;
       name?: string;
-      kind?: AgentKind;
+      source?: string;
+    }
+  | {
+      domain: "bookmark";
+      action:
+        | "list"
+        | "save"
+        | "tag"
+        | "switch"
+        | "merge"
+        | "status";
+      name?: string;
+      bookmark?: string;
+      source?: string;
+    }
+  | {
+      domain: "executor";
+      action: "status" | "list" | "interrupt" | "resume";
+      executorId?: string;
     }
   | {
       domain: "session";
       action:
-        | "status"
         | "compact"
         | "commit"
         | "log"
-        | "graph-log"
-        | "branch-list"
-        | "branch-create"
-        | "switch-create-branch"
-        | "switch"
-        | "tag-list"
-        | "tag-create"
-        | "merge"
-        | "head-status"
-        | "head-list"
-        | "head-fork"
-        | "head-switch"
-        | "head-attach"
-        | "head-detach"
-        | "head-merge"
-        | "head-close";
-      ref?: string;
-      name?: string;
-      headId?: string;
-      sourceHeadId?: string;
+        | "graph-log";
       message?: string;
       limit?: number;
     }
@@ -258,7 +260,11 @@ export interface RuntimeEventBase<
   id: string;
   type: TType;
   createdAt: string;
+  commandId?: string;
+  clientId?: string;
   sessionId: string;
+  worklineId: string;
+  executorId: string;
   headId: string;
   agentId: string;
   payload: TPayload;
@@ -328,11 +334,11 @@ export type SessionChangedRuntimeEvent = RuntimeEventBase<
   }
 >;
 
-export type AgentChangedRuntimeEvent = RuntimeEventBase<
-  "agent.changed",
+export type WorklineChangedRuntimeEvent = RuntimeEventBase<
+  "workline.changed",
   {
     action: string;
-    agent?: AgentViewState;
+    workline?: WorklineView;
   }
 >;
 
@@ -355,7 +361,7 @@ export type RuntimeEvent =
   | ApprovalRequiredRuntimeEvent
   | ApprovalResolvedRuntimeEvent
   | SessionChangedRuntimeEvent
-  | AgentChangedRuntimeEvent
+  | WorklineChangedRuntimeEvent
   | CommandCompletedRuntimeEvent;
 
 export interface InstructionLayer {
@@ -758,6 +764,19 @@ export interface SessionHeadListView {
   heads: SessionHeadListItem[];
 }
 
+export interface BookmarkView {
+  name: string;
+  kind: "branch" | "tag";
+  targetNodeId: string;
+  current: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface BookmarkListView {
+  bookmarks: BookmarkView[];
+}
+
 export interface AgentRecord {
   id: string;
   headId: string;
@@ -779,6 +798,39 @@ export interface AgentViewState extends AgentRecord {
   dirty: boolean;
   pendingApproval?: ApprovalRequest;
   lastUserPrompt?: string;
+}
+
+export interface WorklineView {
+  id: string;
+  sessionId: string;
+  name: string;
+  attachmentMode: SessionRefInfo["mode"];
+  attachmentLabel: string;
+  shellCwd: string;
+  dirty: boolean;
+  writeLock?: string;
+  status: AgentLifecycleStatus;
+  detail: string;
+  executorKind?: AgentKind;
+  helperType?: HelperAgentType;
+  pendingApproval?: ApprovalRequest;
+  lastUserPrompt?: string;
+  active: boolean;
+}
+
+export interface WorklineListView {
+  worklines: WorklineView[];
+}
+
+export interface ExecutorView extends AgentViewState {
+  executorId: string;
+  worklineId: string;
+  worklineName: string;
+  active: boolean;
+}
+
+export interface ExecutorListView {
+  executors: ExecutorView[];
 }
 
 export interface SessionLogEntry {

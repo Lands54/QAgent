@@ -1,6 +1,8 @@
 export { AppController, createAppController } from "./appController.js";
+export type { AppControllerLike } from "./controllerTypes.js";
 export { AgentManager } from "./agentManager.js";
 export { AgentRuntimeFactory } from "./agentRuntimeFactory.js";
+export { AppStateAssembler } from "./application/appStateAssembler.js";
 export {
   AutoMemoryForkService,
   type AutoMemoryForkInput,
@@ -26,3 +28,4 @@ export {
   toSessionSnapshot,
 } from "./appState.js";
 export type { AgentStatus, AppEvent, AppState } from "./appState.js";
+export { SlashCommandBus } from "./slashCommandBus.js";

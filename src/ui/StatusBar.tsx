@@ -3,29 +3,29 @@ import { Box, Text } from "ink";
 import type { AgentStatus } from "../runtime/index.js";
 
 interface StatusBarProps {
-  agentKind?: string;
-  workingHeadId: string;
-  workingHeadName?: string;
+  executorKind?: string;
+  worklineId: string;
+  worklineName?: string;
   sessionId: string;
-  sessionRefLabel?: string;
+  bookmarkLabel?: string;
   shellCwd: string;
   approvalMode: string;
   status: AgentStatus;
   skillCount: number;
-  agentCount: number;
+  worklineCount: number;
 }
 
 export function StatusBar({
-  agentKind,
-  workingHeadId,
-  workingHeadName,
+  executorKind,
+  worklineId,
+  worklineName,
   sessionId,
-  sessionRefLabel,
+  bookmarkLabel,
   shellCwd,
   approvalMode,
   status,
   skillCount,
-  agentCount,
+  worklineCount,
 }: StatusBarProps) {
   const statusColor =
     status.mode === "error"
@@ -44,16 +44,16 @@ export function StatusBar({
       flexDirection="column"
     >
       <Text color={statusColor}>
-        Session Overview
+        Workline Overview
       </Text>
       <Text>
-        agent={workingHeadName ?? "N/A"} ({workingHeadId || "N/A"}) | kind={agentKind ?? "N/A"} | session={sessionId || "N/A"}
+        workline={worklineName ?? "N/A"} ({worklineId || "N/A"}) | executor={executorKind ?? "N/A"} | session={sessionId || "N/A"}
       </Text>
       <Text>
-        status={status.mode} | detail={status.detail} | ref={sessionRefLabel ?? "N/A"}
+        status={status.mode} | detail={status.detail} | bookmark={bookmarkLabel ?? "N/A"}
       </Text>
       <Text>
-        shell={shellCwd} | approval={approvalMode} | skills={skillCount} | agents={agentCount}
+        shell={shellCwd} | approval={approvalMode} | skills={skillCount} | worklines={worklineCount}
       </Text>
     </Box>
   );

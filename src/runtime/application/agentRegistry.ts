@@ -37,6 +37,10 @@ export class AgentRegistry {
     return this.runtimes.get(agentId);
   }
 
+  public getEntryByHeadId(headId: string): ManagedAgentEntry | undefined {
+    return this.getEntries().find((entry) => entry.runtime.headId === headId);
+  }
+
   public getEntries(): ManagedAgentEntry[] {
     return [...this.runtimes.values()];
   }
@@ -49,6 +53,14 @@ export class AgentRegistry {
     const runtime = this.runtimes.get(agentId)?.runtime;
     if (!runtime) {
       throw new Error(`未找到 agent：${agentId}`);
+    }
+    return runtime;
+  }
+
+  public requireRuntimeByHeadId(headId: string): HeadAgentRuntime {
+    const runtime = this.getEntryByHeadId(headId)?.runtime;
+    if (!runtime) {
+      throw new Error(`未找到 working head：${headId}`);
     }
     return runtime;
   }

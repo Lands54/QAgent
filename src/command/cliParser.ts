@@ -3,9 +3,10 @@ import { parseCommandTokens } from "./common.js";
 
 export interface ParsedCliInvocation {
   cliOptions: CliOptions;
-  mode: "tui" | "help" | "command";
+  mode: "tui" | "help" | "command" | "gateway";
   output: "text" | "json" | "stream";
   request?: CommandRequest;
+  gatewayAction?: "serve" | "status" | "stop";
   error?: string;
 }
 
@@ -96,7 +97,43 @@ export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
     };
   }
 
-  const parsed = parseCommandTokens(tokens);
+  if (tokens[0] === "gateway") {
+    const action = tokens[1];
+    if (action === "serve" || action === "status" || action === "stop") {
+      return {
+        cliOptions,
+        mode: "gateway",
+        output,
+        gatewayAction: action,
+      };
+    }
+    return {
+      cliOptions,
+      mode: "help",
+      output,
+      error: "用法：qagent gateway <serve|status|stop>",
+    };
+  }
+
+  const trailingTokens = tokens.filter((token) => token !== "--json" && token !== "--stream");
+  if (trailingTokens.length !== tokens.length) {
+    if (tokens.includes("--json") && tokens.includes("--stream")) {
+      return {
+        cliOptions,
+        mode: "help",
+        output,
+        error: "--json 与 --stream 不能同时使用。",
+      };
+    }
+    if (tokens.includes("--json")) {
+      output = "json";
+    }
+    if (tokens.includes("--stream")) {
+      output = "stream";
+    }
+  }
+
+  const parsed = parseCommandTokens(trailingTokens);
   if (!parsed.request) {
     const knownDomains = new Set([
       "run",
@@ -106,7 +143,9 @@ export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
       "debug",
       "memory",
       "skills",
-      "agent",
+      "work",
+      "bookmark",
+      "executor",
       "session",
       "approval",
       "clear",
@@ -115,7 +154,7 @@ export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
       return {
         cliOptions: {
           ...cliOptions,
-          initialPrompt: tokens.join(" "),
+          initialPrompt: trailingTokens.join(" "),
         },
         mode: "tui",
         output,

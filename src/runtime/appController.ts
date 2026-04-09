@@ -85,7 +85,7 @@ export class AppController {
       getApprovalMode: () => this.approvalPolicy.getMode(),
       getModelStatus: () => this.getModelStatus(),
       getStatusLine: () =>
-        `status=${this.state.status.mode} | detail=${this.state.status.detail} | agent=${this.state.activeWorkingHeadName ?? "N/A"} | session=${this.state.sessionId} | ref=${this.state.sessionRef?.label ?? "N/A"} | shell=${this.state.shellCwd}`,
+        `status=${this.state.status.mode} | detail=${this.state.status.detail} | workline=${this.state.activeWorklineName ?? "N/A"} | session=${this.state.sessionId} | bookmark=${this.state.activeBookmarkLabel ?? "N/A"} | shell=${this.state.shellCwd}`,
       getAvailableSkills: () => this.skillRegistry.getAll(),
       setApprovalMode: async (mode) => {
         await this.setApprovalMode(mode);
@@ -117,38 +117,29 @@ export class AppController {
       listMemory: async (limit) => this.agentManager.listMemory(limit),
       saveMemory: async (input) => this.agentManager.saveMemory(input),
       showMemory: async (id) => this.agentManager.showMemory(id),
-      getAgentStatus: async (agentId) => this.agentManager.getAgentStatus(agentId),
-      listAgents: async () => this.agentManager.listAgents(),
-      spawnAgent: async (name, kind) => {
-        return kind === "task"
-          ? this.agentManager.spawnTaskAgent({ name })
-          : this.agentManager.spawnInteractiveAgent({ name });
-      },
-      switchAgent: async (agentId) => this.agentManager.switchAgent(agentId),
-      switchAgentRelative: async (offset) => this.agentManager.switchAgentRelative(offset),
-      closeAgent: async (agentId) => this.agentManager.closeAgent(agentId),
-      interruptAgent: async () => this.agentManager.interruptAgent(),
-      resumeAgent: async () => this.agentManager.resumeAgent(),
-      getSessionGraphStatus: async () => this.agentManager.getSessionGraphStatus(),
-      listSessionRefs: async () => this.agentManager.listSessionRefs(),
-      listSessionHeads: async () => this.agentManager.listSessionHeads(),
+      getWorklineStatus: async (worklineId) => this.agentManager.getWorklineStatus(worklineId),
+      listWorklines: async () => this.agentManager.listWorklines(),
+      createWorkline: async (name) => this.agentManager.createWorkline(name),
+      switchWorkline: async (worklineId) => this.agentManager.switchWorkline(worklineId),
+      switchWorklineRelative: async (offset) => this.agentManager.switchWorklineRelative(offset),
+      closeWorkline: async (worklineId) => this.agentManager.closeWorkline(worklineId),
+      detachWorkline: async (worklineId) => this.agentManager.detachWorkline(worklineId),
+      mergeWorkline: async (source) => this.agentManager.mergeWorkline(source),
+      getBookmarkStatus: async () => this.agentManager.getBookmarkStatus(),
+      listBookmarks: async () => this.agentManager.listBookmarks(),
+      createBookmark: async (name) => this.agentManager.createBookmark(name),
+      createTagBookmark: async (name) => this.agentManager.createTagBookmark(name),
+      switchBookmark: async (bookmark) => this.agentManager.switchBookmark(bookmark),
+      mergeBookmark: async (source) => this.agentManager.mergeBookmark(source),
+      getExecutorStatus: async (executorId) => this.agentManager.getExecutorStatus(executorId),
+      listExecutors: async () => this.agentManager.listExecutors(),
+      interruptExecutor: async (executorId) => this.agentManager.interruptExecutor(executorId),
+      resumeExecutor: async (executorId) => this.agentManager.resumeExecutor(executorId),
       listSessionCommits: async (limit) => this.agentManager.listSessionCommits(limit),
       listSessionGraphLog: async (limit) => this.agentManager.listSessionGraphLog(limit),
       listSessionLog: async (limit) => this.agentManager.listSessionLog(limit),
       compactSession: async () => this.agentManager.compactSession(),
       commitSession: async (message) => this.agentManager.commitSession(message),
-      createSessionBranch: async (name) => this.agentManager.createSessionBranch(name),
-      switchSessionCreateBranch: async (name) =>
-        this.agentManager.switchSessionCreateBranch(name),
-      switchSessionRef: async (ref) => this.agentManager.switchSessionRef(ref),
-      createSessionTag: async (name) => this.agentManager.createSessionTag(name),
-      mergeSessionRef: async (ref) => this.agentManager.mergeSessionRef(ref),
-      forkSessionHead: async (name) => this.agentManager.forkSessionHead(name),
-      switchSessionHead: async (headId) => this.agentManager.switchSessionHead(headId),
-      attachSessionHead: async (headId, ref) => this.agentManager.attachSessionHead(headId, ref),
-      detachSessionHead: async (headId) => this.agentManager.detachSessionHead(headId),
-      mergeSessionHead: async (sourceHeadId) => this.agentManager.mergeSessionHead(sourceHeadId),
-      closeSessionHead: async (headId) => this.agentManager.closeSessionHead(headId),
       clearHelperAgents: async () => this.agentManager.clearHelperAgents(),
       clearLegacyAgents: async () => this.agentManager.clearLegacyAgents(),
       clearUi: async () => this.agentManager.clearActiveAgentUi(),
@@ -369,6 +360,9 @@ export class AppController {
       availableSkills: this.skillRegistry.getAll(),
       pendingApprovals,
       agents: this.agentManager.listAgents(),
+      worklines: this.agentManager.listWorklines().worklines,
+      executors: this.agentManager.listExecutors().executors,
+      bookmarks: [],
       infoMessage,
       autoCompactThresholdTokens: this.config.runtime.autoCompactThresholdTokens,
     });
@@ -384,12 +378,14 @@ export class AppController {
     result: CommandResult,
   ): void {
     if (result.status === "success") {
-      if (request.domain === "session") {
+      if (request.domain === "bookmark") {
         this.emitRuntimeEvent({
           id: `event-command-session-${Date.now()}`,
           type: "session.changed",
           createdAt: new Date().toISOString(),
           sessionId: this.state.sessionId,
+          worklineId: this.state.activeWorklineId,
+          executorId: this.state.activeExecutorId,
           headId: this.state.activeWorkingHeadId,
           agentId: this.state.activeAgentId,
           payload: {
@@ -398,17 +394,19 @@ export class AppController {
           },
         });
       }
-      if (request.domain === "agent") {
+      if (request.domain === "work") {
         this.emitRuntimeEvent({
           id: `event-command-agent-${Date.now()}`,
-          type: "agent.changed",
+          type: "workline.changed",
           createdAt: new Date().toISOString(),
           sessionId: this.state.sessionId,
+          worklineId: this.state.activeWorklineId,
+          executorId: this.state.activeExecutorId,
           headId: this.state.activeWorkingHeadId,
           agentId: this.state.activeAgentId,
           payload: {
             action: request.action,
-            agent: (result.payload as { agent?: AppState["agents"][number] } | undefined)?.agent,
+            workline: (result.payload as { workline?: AppState["worklines"][number] } | undefined)?.workline,
           },
         });
       }
@@ -418,6 +416,8 @@ export class AppController {
       type: "command.completed",
       createdAt: new Date().toISOString(),
       sessionId: this.state.sessionId,
+      worklineId: this.state.activeWorklineId,
+      executorId: this.state.activeExecutorId,
       headId: this.state.activeWorkingHeadId,
       agentId: this.state.activeAgentId,
       payload: {

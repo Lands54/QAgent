@@ -1,8 +1,10 @@
 import type {
-  AgentViewState,
+  BookmarkView,
   CommandMessage,
   CommandRequest,
+  ExecutorView,
   UIMessage,
+  WorklineView,
 } from "../types.js";
 
 export interface ParsedCommandTokensResult {
@@ -66,35 +68,29 @@ export function buildSlashHelpText(): string {
     "/memory show <name>",
     "/skills list",
     "/skills show <name|id>",
-    "/agent status [agentId|name]",
-    "/agent list",
-    "/agent spawn <name> [--task|--interactive]",
-    "/agent switch <agentId|name>",
-    "/agent next",
-    "/agent prev",
-    "/agent close <agentId|name>",
-    "/agent interrupt",
-    "/agent resume",
-    "/session status",
+    "/work status [worklineId|name]",
+    "/work list",
+    "/work new <name>",
+    "/work switch <worklineId|name>",
+    "/work next",
+    "/work prev",
+    "/work close <worklineId|name>",
+    "/work detach [worklineId|name]",
+    "/work merge <sourceWorkline>",
+    "/bookmark status",
+    "/bookmark list",
+    "/bookmark save <name>",
+    "/bookmark tag <name>",
+    "/bookmark switch <name>",
+    "/bookmark merge <sourceBookmark>",
+    "/executor status [executorId|name]",
+    "/executor list",
+    "/executor interrupt [executorId|name]",
+    "/executor resume [executorId|name]",
     "/session commit -m \"<message>\"",
     "/session compact",
     "/session log [--limit=N]",
     "/session graph log [--limit=N]",
-    "/session switch <ref>",
-    "/session switch -c <branch>",
-    "/session branch",
-    "/session branch <name>",
-    "/session tag",
-    "/session tag <name>",
-    "/session merge <sourceRef>",
-    "/session head status",
-    "/session head list",
-    "/session head fork <name>",
-    "/session head switch <headId>",
-    "/session head attach <headId> <ref>",
-    "/session head detach <headId>",
-    "/session head merge <sourceHeadId>",
-    "/session head close <headId>",
     "/approval status",
     "/approval approve [checkpointId]",
     "/approval reject [checkpointId]",
@@ -103,12 +99,25 @@ export function buildSlashHelpText(): string {
   ].join("\n");
 }
 
-export function formatAgent(agent: AgentViewState): string {
-  const helper = agent.helperType ? ` | helper=${agent.helperType}` : "";
-  const pending = agent.pendingApproval ? " | pending=approval" : "";
+export function formatWorkline(workline: WorklineView): string {
+  const helper = workline.helperType ? ` | helper=${workline.helperType}` : "";
+  const pending = workline.pendingApproval ? " | pending=approval" : "";
   return [
-    `${agent.id} | name=${agent.name} | kind=${agent.kind}${helper} | status=${agent.status}${pending}`,
-    `ref=${agent.sessionRefLabel ?? "N/A"} | shell=${agent.shellCwd} | dirty=${agent.dirty} | detail=${agent.detail}`,
+    `${workline.id} | name=${workline.name}${helper} | status=${workline.status}${pending}`,
+    `bookmark=${workline.attachmentLabel} | shell=${workline.shellCwd} | dirty=${workline.dirty} | detail=${workline.detail}`,
+  ].join("\n");
+}
+
+export function formatBookmark(bookmark: BookmarkView): string {
+  return `${bookmark.kind} | ${bookmark.name} -> ${bookmark.targetNodeId}${bookmark.current ? " | current" : ""}`;
+}
+
+export function formatExecutor(executor: ExecutorView): string {
+  const helper = executor.helperType ? ` | helper=${executor.helperType}` : "";
+  const pending = executor.pendingApproval ? " | pending=approval" : "";
+  return [
+    `${executor.executorId} | name=${executor.name} | kind=${executor.kind}${helper} | status=${executor.status}${pending}`,
+    `workline=${executor.worklineName} | bookmark=${executor.sessionRefLabel ?? "N/A"} | shell=${executor.shellCwd} | detail=${executor.detail}`,
   ].join("\n");
 }
 
@@ -313,37 +322,90 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
     };
   }
 
-  if (domain === "agent") {
-    if (subcommand === "spawn") {
+  if (domain === "work") {
+    if (subcommand === "new") {
       return {
         request: {
-          domain: "agent",
-          action: "spawn",
-          name: rest.find((arg) => !arg.startsWith("--")),
-          kind: rest.includes("--task") ? "task" : "interactive",
+          domain: "work",
+          action: "new",
+          name: rest[0],
         },
       };
     }
-    if (subcommand === "switch" || subcommand === "close" || subcommand === "status") {
+    if (subcommand === "switch" || subcommand === "close" || subcommand === "status" || subcommand === "detach") {
       return {
         request: {
-          domain: "agent",
+          domain: "work",
           action: subcommand,
-          agentId: rest[0],
+          worklineId: rest[0],
         },
       };
     }
-    if (subcommand === "next" || subcommand === "prev" || subcommand === "interrupt" || subcommand === "resume") {
+    if (subcommand === "merge") {
       return {
         request: {
-          domain: "agent",
+          domain: "work",
+          action: "merge",
+          source: rest[0],
+        },
+      };
+    }
+    if (subcommand === "next" || subcommand === "prev") {
+      return {
+        request: {
+          domain: "work",
           action: subcommand,
         },
       };
     }
     return {
       request: {
-        domain: "agent",
+        domain: "work",
+        action: "list",
+      },
+    };
+  }
+
+  if (domain === "bookmark") {
+    if (subcommand === "save" || subcommand === "tag") {
+      return {
+        request: {
+          domain: "bookmark",
+          action: subcommand,
+          name: rest[0],
+        },
+      };
+    }
+    if (subcommand === "switch" || subcommand === "merge") {
+      return {
+        request: {
+          domain: "bookmark",
+          action: subcommand,
+          [subcommand === "switch" ? "bookmark" : "source"]: rest[0],
+        } as Extract<CommandRequest, { domain: "bookmark" }>,
+      };
+    }
+    return {
+      request: {
+        domain: "bookmark",
+        action: subcommand === "status" ? "status" : "list",
+      },
+    };
+  }
+
+  if (domain === "executor") {
+    if (subcommand === "status" || subcommand === "interrupt" || subcommand === "resume") {
+      return {
+        request: {
+          domain: "executor",
+          action: subcommand,
+          executorId: rest[0],
+        },
+      };
+    }
+    return {
+      request: {
+        domain: "executor",
         action: "list",
       },
     };
@@ -385,110 +447,65 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
         },
       };
     }
+    if (subcommand === "status") {
+      return {
+        error: "/session status 已移除。请改用 /work status。",
+      };
+    }
     if (subcommand === "branch") {
       return {
-        request: {
-          domain: "session",
-          action: rest.length > 0 || tokens.length > 2 ? "branch-create" : "branch-list",
-          name: rest[0],
-        },
+        error: rest.length > 0 || tokens.length > 2
+          ? "/session branch <name> 已移除。请改用 /bookmark save <name>。"
+          : "/session branch 已移除。请改用 /bookmark list。",
       };
     }
     if (subcommand === "switch") {
-      if (rest[0] === "-c") {
-        return {
-          request: {
-            domain: "session",
-            action: "switch-create-branch",
-            name: rest[1],
-          },
-        };
-      }
       return {
-        request: {
-          domain: "session",
-          action: "switch",
-          ref: rest[0],
-        },
+        error: rest[0] === "-c"
+          ? "/session switch -c <branch> 已移除。请改用 /work new <name>。"
+          : "/session switch <ref> 已移除。请改用 /bookmark switch <name>。",
       };
     }
     if (subcommand === "tag") {
       return {
-        request: {
-          domain: "session",
-          action: rest.length > 0 || tokens.length > 2 ? "tag-create" : "tag-list",
-          name: rest[0],
-        },
+        error: rest.length > 0 || tokens.length > 2
+          ? "/session tag <name> 已移除。请改用 /bookmark tag <name>。"
+          : "/session tag 已移除。请改用 /bookmark list。",
       };
     }
     if (subcommand === "merge") {
       return {
-        request: {
-          domain: "session",
-          action: "merge",
-          ref: rest[0],
-        },
+        error: "/session merge <sourceRef> 已移除。请改用 /bookmark merge <sourceBookmark>。",
       };
     }
     if (subcommand === "head") {
-      const headCommand = rest[0];
-      const headArgs = rest.slice(1);
-      if (headCommand === "fork") {
-        return { request: { domain: "session", action: "head-fork", name: headArgs[0] } };
-      }
-      if (headCommand === "switch") {
-        return { request: { domain: "session", action: "head-switch", headId: headArgs[0] } };
-      }
-      if (headCommand === "attach") {
-        return {
-          request: {
-            domain: "session",
-            action: "head-attach",
-            headId: headArgs[0],
-            ref: headArgs[1],
-          },
-        };
-      }
-      if (headCommand === "detach") {
-        return { request: { domain: "session", action: "head-detach", headId: headArgs[0] } };
-      }
-      if (headCommand === "merge") {
-        return {
-          request: {
-            domain: "session",
-            action: "head-merge",
-            sourceHeadId: headArgs[0],
-          },
-        };
-      }
-      if (headCommand === "close") {
-        return { request: { domain: "session", action: "head-close", headId: headArgs[0] } };
-      }
-      if (headCommand === "list") {
-        return { request: { domain: "session", action: "head-list" } };
-      }
-      return { request: { domain: "session", action: "head-status" } };
+      return {
+        error: "/session head 系列命令已移除。请改用 /work ...。",
+      };
     }
     if (subcommand === "list") {
       return {
-        error: "/session list 已废弃。请改用 /session branch 或 /session tag。",
+        error: "/session list 已移除。请改用 /bookmark list。",
       };
     }
     if (subcommand === "fork") {
       return {
-        error: "/session fork 已废弃。请改用 /session switch -c <branch>。",
+        error: "/session fork 已移除。请改用 /work new <name>。",
       };
     }
     if (subcommand === "checkout") {
       return {
-        error: "/session checkout 已废弃。请改用 /session switch <ref>。",
+        error: "/session checkout 已移除。请改用 /bookmark switch <name>。",
       };
     }
     return {
-      request: {
-        domain: "session",
-        action: "status",
-      },
+      error: "未知的 session 命令。",
+    };
+  }
+
+  if (domain === "agent") {
+    return {
+      error: "/agent 系列命令已移除。请改用 /work 或 /executor。",
     };
   }
 

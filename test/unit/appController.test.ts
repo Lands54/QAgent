@@ -150,4 +150,21 @@ describe("AppController", () => {
       await controller.dispose();
     }
   });
+
+  it("非法书签名称会显示错误消息，而不是让 submitInput reject", async () => {
+    const projectDir = await makeTempDir("qagent-app-controller-invalid-branch-");
+    const controller = await AppController.create({
+      cwd: projectDir,
+    });
+
+    try {
+      await expect(controller.submitInput("/bookmark save Foo")).resolves.toBeUndefined();
+
+      const lastMessage = controller.getState().uiMessages.at(-1);
+      expect(lastMessage?.role).toBe("error");
+      expect(lastMessage?.content).toContain("branch 名称必须匹配");
+    } finally {
+      await controller.dispose();
+    }
+  });
 });

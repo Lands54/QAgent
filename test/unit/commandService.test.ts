@@ -3,8 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import { CommandService, type CommandServiceDependencies } from "../../src/command/index.js";
 import type {
   AgentViewState,
+  BookmarkListView,
+  ExecutorView,
   PendingApprovalCheckpoint,
   UIMessage,
+  WorklineView,
 } from "../../src/types.js";
 
 function buildAgent(overrides?: Partial<AgentViewState>): AgentViewState {
@@ -31,6 +34,8 @@ function buildCheckpoint(): PendingApprovalCheckpoint {
   const now = "2026-04-07T00:00:00.000Z";
   return {
     checkpointId: "approval_1",
+    executorId: "agent_main",
+    worklineId: "head_main",
     agentId: "agent_main",
     headId: "head_main",
     sessionId: "session_main",
@@ -72,6 +77,35 @@ function buildCheckpoint(): PendingApprovalCheckpoint {
       ],
       nextToolCallIndex: 0,
     },
+  };
+}
+
+function buildWorkline(overrides?: Partial<WorklineView>): WorklineView {
+  return {
+    id: "head_main",
+    sessionId: "session_main",
+    name: "main",
+    attachmentMode: "branch",
+    attachmentLabel: "branch=main",
+    shellCwd: "/tmp/project",
+    dirty: false,
+    writeLock: "main",
+    status: "idle",
+    detail: "等待输入",
+    executorKind: "interactive",
+    active: true,
+    ...overrides,
+  };
+}
+
+function buildExecutor(overrides?: Partial<ExecutorView>): ExecutorView {
+  const agent = buildAgent(overrides);
+  return {
+    ...agent,
+    executorId: agent.id,
+    worklineId: agent.headId,
+    worklineName: agent.name,
+    active: true,
   };
 }
 
@@ -126,32 +160,93 @@ function createDeps(
       path: "/tmp/project/.agent/memory/memory.md",
     }),
     showMemory: async () => undefined,
-    getAgentStatus: async () => buildAgent(),
-    listAgents: async () => [buildAgent()],
-    spawnAgent: async () => buildAgent(),
-    switchAgent: async () => buildAgent(),
-    switchAgentRelative: async () => buildAgent(),
-    closeAgent: async () => buildAgent({ status: "closed" }),
-    interruptAgent: async () => {},
-    resumeAgent: async () => {},
-    getSessionGraphStatus: async () => ({
-      label: "main",
-      refKind: "branch",
-      refName: "main",
+    getWorklineStatus: async () => buildWorkline(),
+    listWorklines: async () => ({ worklines: [buildWorkline()] }),
+    createWorkline: async () => buildWorkline({ id: "head_feature_a", name: "feature-a", attachmentLabel: "branch=feature-a", writeLock: "feature-a" }),
+    switchWorkline: async () => buildWorkline({ id: "head_worker", name: "worker" }),
+    switchWorklineRelative: async () => buildWorkline({ id: "head_worker", name: "worker" }),
+    closeWorkline: async () => buildWorkline({ id: "head_worker", name: "worker", status: "closed", active: false }),
+    detachWorkline: async () => buildWorkline({ attachmentMode: "detached-node", attachmentLabel: "detached=node:node_1", writeLock: undefined }),
+    mergeWorkline: async () => buildWorkline({ attachmentLabel: "branch=main" }),
+    getBookmarkStatus: async () => ({
+      current: "branch=main",
+      bookmarks: [
+        {
+          name: "main",
+          kind: "branch",
+          targetNodeId: "node_1",
+          current: true,
+          createdAt: "2026-04-07T00:00:00.000Z",
+          updatedAt: "2026-04-07T00:00:00.000Z",
+        },
+      ] satisfies BookmarkListView["bookmarks"],
+    }),
+    listBookmarks: async () => ({
+      bookmarks: [
+        {
+          name: "main",
+          kind: "branch",
+          targetNodeId: "node_1",
+          current: true,
+          createdAt: "2026-04-07T00:00:00.000Z",
+          updatedAt: "2026-04-07T00:00:00.000Z",
+        },
+      ],
+    }),
+    createBookmark: async () => ({
+      mode: "branch",
+      name: "main",
+      label: "branch=main",
+      headNodeId: "node_1",
       workingHeadId: "head_main",
+      workingHeadName: "main",
       sessionId: "session_main",
-      nodeId: "node_1",
-      attached: true,
+      writerLeaseBranch: "main",
+      active: true,
       dirty: false,
     }),
-    listSessionRefs: async () => ({
-      branches: [],
-      tags: [],
-      heads: [],
+    createTagBookmark: async () => ({
+      mode: "detached-tag",
+      name: "baseline",
+      label: "detached=tag:baseline",
+      headNodeId: "node_1",
+      workingHeadId: "head_main",
+      workingHeadName: "main",
+      sessionId: "session_main",
+      active: true,
+      dirty: false,
     }),
-    listSessionHeads: async () => ({
-      heads: [],
+    switchBookmark: async () => ({
+      ref: {
+        mode: "branch",
+        name: "main",
+        label: "branch=main",
+        headNodeId: "node_1",
+        workingHeadId: "head_main",
+        workingHeadName: "main",
+        sessionId: "session_main",
+        writerLeaseBranch: "main",
+        active: true,
+        dirty: false,
+      },
+      message: "已切换到 branch=main。",
     }),
+    mergeBookmark: async () => ({
+      mode: "branch",
+      name: "main",
+      label: "branch=main",
+      headNodeId: "node_1",
+      workingHeadId: "head_main",
+      workingHeadName: "main",
+      sessionId: "session_main",
+      writerLeaseBranch: "main",
+      active: true,
+      dirty: false,
+    }),
+    getExecutorStatus: async () => buildExecutor(),
+    listExecutors: async () => ({ executors: [buildExecutor()] }),
+    interruptExecutor: async () => {},
+    resumeExecutor: async () => {},
     listSessionCommits: async () => ({
       commits: [],
     }),
@@ -400,5 +495,23 @@ describe("CommandService", () => {
     expect(result.status).toBe("success");
     expect(result.code).toBe("approval.approved");
     expect(((result.payload as { uiMessages: UIMessage[] }).uiMessages)[0]?.content).toBe("$ pwd");
+  });
+
+  it("会把异步命令执行错误包装成 runtime_error 结果", async () => {
+    const service = new CommandService(createDeps({
+      createBookmark: async () => {
+        throw new Error("branch 名称必须匹配 /^[a-z0-9]+(?:-[a-z0-9]+)*$/u。");
+      },
+    }));
+
+    const result = await service.execute({
+      domain: "bookmark",
+      action: "save",
+      name: "Foo",
+    });
+
+    expect(result.status).toBe("runtime_error");
+    expect(result.code).toBe("command.runtime_error");
+    expect(result.messages[0]?.text).toContain("branch 名称必须匹配");
   });
 });

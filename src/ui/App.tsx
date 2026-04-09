@@ -1,8 +1,12 @@
 import { Box, Text, useApp, useInput } from "ink";
 import { useEffect, useState } from "react";
 
-import { AgentList } from "./AgentList.js";
 import { ApprovalModal } from "./ApprovalModal.js";
+import { WorklineList } from "./WorklineList.js";
+import {
+  isNextAgentShortcut,
+  isPreviousAgentShortcut,
+} from "./agentNavigationShortcuts.js";
 import { InputBox } from "./InputBox.js";
 import {
   completeInput,
@@ -14,10 +18,10 @@ import {
 import { MessageList } from "./MessageList.js";
 import { buildFooterHint } from "./presentation/footerHint.js";
 import { StatusBar } from "./StatusBar.js";
-import type { AppController, AppState } from "../runtime/index.js";
+import type { AppControllerLike, AppState } from "../runtime/index.js";
 
 interface AppProps {
-  controller: AppController;
+  controller: AppControllerLike;
 }
 
 export function App({ controller }: AppProps) {
@@ -46,7 +50,7 @@ export function App({ controller }: AppProps) {
     setCompletionSuggestionIndex(0);
     setCompletionCycleQuery(undefined);
     setInput("");
-  }, [state.activeAgentId, state.activeWorkingHeadId, state.sessionId, state.sessionRef?.label]);
+  }, [state.activeWorklineId, state.activeExecutorId, state.sessionId, state.activeBookmarkLabel]);
 
   useEffect(() => {
     if (state.shouldExit) {
@@ -69,15 +73,15 @@ export function App({ controller }: AppProps) {
       return;
     }
 
-    if (key.ctrl && value.toLowerCase() === "p") {
-      if (state.agents.length > 1) {
+    if (isPreviousAgentShortcut(value, key)) {
+      if (state.worklines.length > 1) {
         void controller.switchAgentRelative(-1);
       }
       return;
     }
 
-    if (key.ctrl && value.toLowerCase() === "n") {
-      if (state.agents.length > 1) {
+    if (isNextAgentShortcut(value, key)) {
+      if (state.worklines.length > 1) {
         void controller.switchAgentRelative(1);
       }
       return;
@@ -167,24 +171,25 @@ export function App({ controller }: AppProps) {
   const footerHint = buildFooterHint({
     currentTokenEstimate: state.currentTokenEstimate,
     autoCompactThresholdTokens: state.autoCompactThresholdTokens,
+    worklineCount: state.worklines.length,
   });
 
   return (
     <Box flexDirection="column" gap={1}>
       <Text color="green">QAgent CLI v1</Text>
       <StatusBar
-        agentKind={state.activeAgentKind}
-        workingHeadId={state.activeWorkingHeadId}
-        workingHeadName={state.activeWorkingHeadName}
+        executorKind={state.activeExecutorKind}
+        worklineId={state.activeWorklineId}
+        worklineName={state.activeWorklineName}
         sessionId={state.sessionId}
-        sessionRefLabel={state.sessionRef?.label}
+        bookmarkLabel={state.activeBookmarkLabel}
         shellCwd={state.shellCwd}
         approvalMode={state.approvalMode}
         status={state.status}
         skillCount={state.availableSkills.length}
-        agentCount={state.agents.length}
+        worklineCount={state.worklines.length}
       />
-      <AgentList agents={state.agents} activeAgentId={state.activeAgentId} />
+      <WorklineList worklines={state.worklines} activeWorklineId={state.activeWorklineId} />
       {state.helperActivities.length > 0 ? (
         <Text color="cyan">helper: {state.helperActivities.join(" | ")}</Text>
       ) : null}

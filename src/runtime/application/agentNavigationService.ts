@@ -15,7 +15,7 @@ interface AgentNavigationInput {
 export class AgentNavigationService {
   public constructor(private readonly input: AgentNavigationInput) {}
 
-  public resolveAgentId(identifier: string): string {
+  public resolveExecutorId(identifier: string): string {
     if (this.input.registry.getEntry(identifier)) {
       return identifier;
     }
@@ -32,18 +32,51 @@ export class AgentNavigationService {
     throw new Error(`未找到 agent：${identifier}`);
   }
 
-  public async switchAgent(agentId: string): Promise<AgentViewState> {
-    const resolvedAgentId = this.resolveAgentId(agentId);
-    if (resolvedAgentId === this.input.registry.getActiveAgentId()) {
-      return this.input.registry.requireRuntime(resolvedAgentId).getViewState();
+  public resolveWorklineId(identifier: string): string {
+    const directRuntime = this.input.registry.getEntry(identifier)?.runtime;
+    if (directRuntime) {
+      return directRuntime.headId;
     }
 
-    const current = this.input.registry.getActiveRuntime();
+    const matched = this.input.registry
+      .listAgentViews()
+      .filter((agent) => {
+        return agent.status !== "closed"
+          && !agent.helperType
+          && (agent.headId === identifier || agent.name === identifier);
+      });
+    const uniqueHeadIds = [...new Set(matched.map((agent) => agent.headId))];
+    if (uniqueHeadIds.length === 1) {
+      return uniqueHeadIds[0]!;
+    }
+    if (uniqueHeadIds.length > 1) {
+      throw new Error(`存在多个同名 working head：${identifier}，请改用 workline id。`);
+    }
+    throw new Error(`未找到 working head：${identifier}`);
+  }
+
+  public async switchExecutor(executorId: string): Promise<AgentViewState> {
+    const resolvedExecutorId = this.resolveExecutorId(executorId);
+    const runtime = this.input.registry.requireRuntime(resolvedExecutorId);
+    return this.switchWorkline(runtime.headId, resolvedExecutorId);
+  }
+
+  public async switchWorkline(
+    worklineId: string,
+    currentExecutorId = this.input.registry.getActiveAgentId(),
+  ): Promise<AgentViewState> {
+    const resolvedHeadId = this.resolveWorklineId(worklineId);
+    const current = this.input.registry.requireRuntime(currentExecutorId);
+    if (resolvedHeadId === current.headId) {
+      this.input.registry.setActiveAgentId(current.agentId);
+      return current.getViewState();
+    }
+
     const result = await this.input.sessionService.switchHead(
-      resolvedAgentId,
+      resolvedHeadId,
       current.getSnapshot(),
     );
-    let runtime = this.input.registry.getEntry(resolvedAgentId)?.runtime;
+    let runtime = this.input.registry.getEntryByHeadId(resolvedHeadId)?.runtime;
     if (!runtime) {
       runtime = await this.input.runtimeFactory.createFromSessionState(
         result.head,
@@ -51,30 +84,39 @@ export class AgentNavigationService {
         this.input.createRuntimeCallbacks(),
         result.ref,
       );
-      this.input.registry.set(result.head.id, {
+      this.input.registry.set(runtime.agentId, {
         runtime,
       });
     } else {
       await runtime.replaceSnapshot(result.snapshot, result.head, result.ref);
     }
-    this.input.registry.setActiveAgentId(resolvedAgentId);
+    this.input.registry.setActiveAgentId(runtime.agentId);
     this.input.emitChange();
     return runtime.getViewState();
   }
 
-  public async switchAgentRelative(offset: number): Promise<AgentViewState> {
-    const agents = this.getNavigableAgents();
-    if (agents.length === 0) {
-      throw new Error("当前没有可切换的 agent。");
+  public async switchWorklineRelative(offset: number): Promise<AgentViewState> {
+    const worklines = this.getNavigableWorklines();
+    if (worklines.length === 0) {
+      throw new Error("当前没有可切换的工作线。");
     }
-    const currentIndex = agents.findIndex((agent) => {
-      return agent.id === this.input.registry.getActiveAgentId();
+    const currentHeadId = this.input.registry.getActiveRuntime().headId;
+    const currentIndex = worklines.findIndex((workline) => {
+      return workline.id === currentHeadId;
     });
     if (currentIndex < 0) {
-      return this.switchAgent(agents[0]!.id);
+      return this.switchWorkline(worklines[0]!.id);
     }
-    const nextIndex = (currentIndex + offset + agents.length) % agents.length;
-    return this.switchAgent(agents[nextIndex]!.id);
+    const nextIndex = (currentIndex + offset + worklines.length) % worklines.length;
+    return this.switchWorkline(worklines[nextIndex]!.id);
+  }
+
+  public async switchAgent(agentId: string): Promise<AgentViewState> {
+    return this.switchExecutor(agentId);
+  }
+
+  public async switchAgentRelative(offset: number): Promise<AgentViewState> {
+    return this.switchWorklineRelative(offset);
   }
 
   public getNavigableAgents(): AgentViewState[] {
@@ -89,6 +131,17 @@ export class AgentNavigationService {
         }
         return left.name.localeCompare(right.name);
       });
+  }
+
+  public getNavigableWorklines(): Array<{
+    id: string;
+    name: string;
+  }> {
+    return [...new Map(
+      this.getNavigableAgents()
+        .filter((agent) => !agent.helperType)
+        .map((agent) => [agent.headId, { id: agent.headId, name: agent.name }]),
+    ).values()].sort((left, right) => left.name.localeCompare(right.name));
   }
 
   public pickFallbackAgentId(

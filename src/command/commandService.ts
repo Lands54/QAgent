@@ -1,22 +1,27 @@
 import type {
-  AgentKind,
-  AgentViewState,
   ApprovalMode,
+  BookmarkListView,
   CommandMessage,
   CommandRequest,
   CommandResult,
+  ExecutorListView,
+  ExecutorView,
   MemoryRecord,
   ModelProvider,
   PendingApprovalCheckpoint,
   SessionCommitListView,
-  SessionHeadListView,
-  SessionListView,
   SessionLogEntry,
   SessionRefInfo,
   SkillManifest,
   UIMessage,
+  WorklineListView,
+  WorklineView,
 } from "../types.js";
-import { formatAgent } from "./common.js";
+import {
+  formatBookmark,
+  formatExecutor,
+  formatWorkline,
+} from "./common.js";
 
 interface SessionCheckoutResultLike {
   ref: SessionRefInfo;
@@ -25,7 +30,7 @@ interface SessionCheckoutResultLike {
 
 interface SettledCommandRunResult {
   settled: "completed" | "approval_required" | "interrupted" | "error";
-  agent: AgentViewState;
+  executor: ExecutorView;
   checkpoint?: PendingApprovalCheckpoint;
   uiMessages: ReadonlyArray<UIMessage>;
 }
@@ -72,17 +77,27 @@ export interface CommandServiceDependencies {
     scope?: "project" | "global";
   }) => Promise<MemoryRecord>;
   showMemory: (name: string) => Promise<MemoryRecord | undefined>;
-  getAgentStatus: (agentId?: string) => Promise<AgentViewState>;
-  listAgents: () => Promise<AgentViewState[]>;
-  spawnAgent: (name: string, kind: AgentKind) => Promise<AgentViewState>;
-  switchAgent: (agentId: string) => Promise<AgentViewState>;
-  switchAgentRelative: (offset: number) => Promise<AgentViewState>;
-  closeAgent: (agentId: string) => Promise<AgentViewState>;
-  interruptAgent: () => Promise<void>;
-  resumeAgent: () => Promise<void>;
-  getSessionGraphStatus: () => Promise<SessionRefInfo>;
-  listSessionRefs: () => Promise<SessionListView>;
-  listSessionHeads: () => Promise<SessionHeadListView>;
+  getWorklineStatus: (worklineId?: string) => Promise<WorklineView>;
+  listWorklines: () => Promise<WorklineListView>;
+  createWorkline: (name: string) => Promise<WorklineView>;
+  switchWorkline: (worklineId: string) => Promise<WorklineView>;
+  switchWorklineRelative: (offset: number) => Promise<WorklineView>;
+  closeWorkline: (worklineId: string) => Promise<WorklineView>;
+  detachWorkline: (worklineId?: string) => Promise<WorklineView>;
+  mergeWorkline: (source: string) => Promise<WorklineView>;
+  getBookmarkStatus: () => Promise<{
+    current?: string;
+    bookmarks: BookmarkListView["bookmarks"];
+  }>;
+  listBookmarks: () => Promise<BookmarkListView>;
+  createBookmark: (name: string) => Promise<SessionRefInfo>;
+  createTagBookmark: (name: string) => Promise<SessionRefInfo>;
+  switchBookmark: (bookmark: string) => Promise<SessionCheckoutResultLike>;
+  mergeBookmark: (source: string) => Promise<SessionRefInfo>;
+  getExecutorStatus: (executorId?: string) => Promise<ExecutorView>;
+  listExecutors: () => Promise<ExecutorListView>;
+  interruptExecutor: (executorId?: string) => Promise<void>;
+  resumeExecutor: (executorId?: string) => Promise<void>;
   listSessionCommits: (limit?: number) => Promise<SessionCommitListView>;
   listSessionGraphLog: (limit?: number) => Promise<SessionLogEntry[]>;
   listSessionLog: (limit?: number) => Promise<SessionLogEntry[]>;
@@ -102,17 +117,6 @@ export interface CommandServiceDependencies {
     sessionId: string;
     createdAt: string;
   }>;
-  createSessionBranch: (name: string) => Promise<SessionRefInfo>;
-  switchSessionCreateBranch: (name: string) => Promise<SessionRefInfo>;
-  switchSessionRef: (ref: string) => Promise<SessionCheckoutResultLike>;
-  createSessionTag: (name: string) => Promise<SessionRefInfo>;
-  mergeSessionRef: (ref: string) => Promise<SessionRefInfo>;
-  forkSessionHead: (name: string) => Promise<SessionRefInfo>;
-  switchSessionHead: (headId: string) => Promise<SessionRefInfo>;
-  attachSessionHead: (headId: string, ref: string) => Promise<SessionRefInfo>;
-  detachSessionHead: (headId: string) => Promise<SessionRefInfo>;
-  mergeSessionHead: (sourceHeadId: string) => Promise<SessionRefInfo>;
-  closeSessionHead: (headId: string) => Promise<SessionRefInfo>;
   clearHelperAgents: () => Promise<{
     cleared: number;
     skippedRunning: number;
@@ -223,28 +227,32 @@ export class CommandService {
     try {
       switch (request.domain) {
         case "run":
-          return this.handleRun(request);
+          return await this.handleRun(request);
         case "model":
-          return this.handleModel(request);
+          return await this.handleModel(request);
         case "tool":
-          return this.handleTool(request);
+          return await this.handleTool(request);
         case "hook":
-          return this.handleHook(request);
+          return await this.handleHook(request);
         case "debug":
-          return this.handleDebug(request);
+          return await this.handleDebug(request);
         case "memory":
-          return this.handleMemory(request);
+          return await this.handleMemory(request);
         case "skills":
-          return this.handleSkills(request);
-        case "agent":
-          return this.handleAgent(request);
+          return await this.handleSkills(request);
+        case "work":
+          return await this.handleWork(request);
+        case "bookmark":
+          return await this.handleBookmark(request);
+        case "executor":
+          return await this.handleExecutor(request);
         case "session":
-          return this.handleSession(request);
+          return await this.handleSession(request);
         case "approval":
-          return this.handleApproval(request);
+          return await this.handleApproval(request);
         case "clear":
           await this.deps.clearUi();
-          return success("clear.success", [info("已清空当前 agent 的 UI 消息。")]);
+          return success("clear.success", [info("已清空当前工作线的 UI 消息。")]);
         default:
           return runtimeErrorResult("command.unsupported", "未知命令。");
       }
@@ -271,19 +279,19 @@ export class CommandService {
       return approvalRequired(result.checkpoint, result.uiMessages);
     }
     if (result.settled === "error") {
-      return runtimeErrorResult("run.agent_error", result.agent.detail, {
-        agent: result.agent,
+      return runtimeErrorResult("run.executor_error", result.executor.detail, {
+        executor: result.executor,
         uiMessages: result.uiMessages,
       });
     }
     if (result.settled === "interrupted") {
-      return runtimeErrorResult("run.interrupted", result.agent.detail, {
-        agent: result.agent,
+      return runtimeErrorResult("run.interrupted", result.executor.detail, {
+        executor: result.executor,
         uiMessages: result.uiMessages,
       });
     }
     return success("run.completed", [], {
-      agent: result.agent,
+      executor: result.executor,
       uiMessages: result.uiMessages,
     });
   }
@@ -593,114 +601,166 @@ export class CommandService {
     );
   }
 
-  private async handleAgent(
-    request: Extract<CommandRequest, { domain: "agent" }>,
+  private async handleWork(
+    request: Extract<CommandRequest, { domain: "work" }>,
   ): Promise<CommandResult> {
     if (request.action === "status") {
-      const agent = await this.deps.getAgentStatus(request.agentId);
-      return success("agent.status", [info(formatAgent(agent))], {
-        agent,
-      });
+      const workline = await this.deps.getWorklineStatus(request.worklineId);
+      return success("work.status", [info(formatWorkline(workline))], { workline });
     }
     if (request.action === "list") {
-      const agents = await this.deps.listAgents();
+      const worklines = await this.deps.listWorklines();
       return success(
-        "agent.list",
+        "work.list",
         [
           info(
-            agents.length === 0
-              ? "当前没有 agent。"
-              : agents.map((agent) => formatAgent(agent)).join("\n\n"),
+            worklines.worklines.length === 0
+              ? "当前没有工作线。"
+              : worklines.worklines.map((workline) => formatWorkline(workline)).join("\n\n"),
           ),
         ],
-        {
-          agents,
-        },
+        worklines,
       );
     }
-    if (request.action === "spawn") {
+    if (request.action === "new") {
       if (!request.name) {
-        return validationError("agent.spawn_usage", "用法：agent spawn <name> [--task|--interactive]");
+        return validationError("work.new_usage", "用法：work new <name>");
       }
-      const agent = await this.deps.spawnAgent(request.name, request.kind ?? "interactive");
-      return success(
-        "agent.spawned",
-        [info(`已创建 agent ${agent.id} (${agent.name}, ${agent.kind})`)],
-        {
-          agent,
-        },
-      );
+      const workline = await this.deps.createWorkline(request.name);
+      return success("work.created", [info(formatWorkline(workline))], { workline });
     }
     if (request.action === "switch") {
-      if (!request.agentId) {
-        return validationError("agent.switch_usage", "用法：agent switch <agentId|name>");
+      if (!request.worklineId) {
+        return validationError("work.switch_usage", "用法：work switch <worklineId|name>");
       }
-      const agent = await this.deps.switchAgent(request.agentId);
-      return success(
-        "agent.switched",
-        [info(`已切换到 agent ${agent.id} (${agent.name})`)],
-        {
-          agent,
-        },
-      );
+      const workline = await this.deps.switchWorkline(request.worklineId);
+      return success("work.switched", [info(formatWorkline(workline))], { workline });
     }
     if (request.action === "next" || request.action === "prev") {
-      const agent = await this.deps.switchAgentRelative(request.action === "next" ? 1 : -1);
-      return success(
-        request.action === "next" ? "agent.next" : "agent.prev",
-        [
-          info(
-            request.action === "next"
-              ? `已切换到下一个 agent ${agent.id} (${agent.name})`
-              : `已切换到上一个 agent ${agent.id} (${agent.name})`,
-          ),
-        ],
-        {
-          agent,
-        },
-      );
+      const workline = await this.deps.switchWorklineRelative(request.action === "next" ? 1 : -1);
+      return success("work.switched", [info(formatWorkline(workline))], { workline });
     }
     if (request.action === "close") {
-      if (!request.agentId) {
-        return validationError("agent.close_usage", "用法：agent close <agentId|name>");
+      if (!request.worklineId) {
+        return validationError("work.close_usage", "用法：work close <worklineId|name>");
       }
-      const agent = await this.deps.closeAgent(request.agentId);
-      return success("agent.closed", [info(`已关闭 agent ${request.agentId}`)], {
-        agent,
-      });
+      const workline = await this.deps.closeWorkline(request.worklineId);
+      return success("work.closed", [info(formatWorkline(workline))], { workline });
+    }
+    if (request.action === "detach") {
+      const workline = await this.deps.detachWorkline(request.worklineId);
+      return success("work.detached", [info(formatWorkline(workline))], { workline });
+    }
+    if (request.action === "merge") {
+      if (!request.source) {
+        return validationError("work.merge_usage", "用法：work merge <sourceWorkline>");
+      }
+      const workline = await this.deps.mergeWorkline(request.source);
+      return success("work.merged", [info(formatWorkline(workline))], { workline });
+    }
+    return runtimeErrorResult("work.unknown_action", "未知的 work 子命令。");
+  }
+
+  private async handleBookmark(
+    request: Extract<CommandRequest, { domain: "bookmark" }>,
+  ): Promise<CommandResult> {
+    if (request.action === "status") {
+      const status = await this.deps.getBookmarkStatus();
+      return success(
+        "bookmark.status",
+        [
+          info(
+            status.bookmarks.length === 0
+              ? "当前没有书签。"
+              : [
+                  status.current ? `current: ${status.current}` : "current: detached",
+                  ...status.bookmarks.map((bookmark) => formatBookmark(bookmark)),
+                ].join("\n"),
+          ),
+        ],
+        status,
+      );
+    }
+    if (request.action === "list") {
+      const bookmarks = await this.deps.listBookmarks();
+      return success(
+        "bookmark.list",
+        [
+          info(
+            bookmarks.bookmarks.length === 0
+              ? "当前没有书签。"
+              : bookmarks.bookmarks.map((bookmark) => formatBookmark(bookmark)).join("\n"),
+          ),
+        ],
+        bookmarks,
+      );
+    }
+    if (request.action === "save") {
+      if (!request.name) {
+        return validationError("bookmark.save_usage", "用法：bookmark save <name>");
+      }
+      const ref = await this.deps.createBookmark(request.name);
+      return success("bookmark.saved", [info(`已保存书签 ${request.name}，当前书签=${ref.label}`)], { ref });
+    }
+    if (request.action === "tag") {
+      if (!request.name) {
+        return validationError("bookmark.tag_usage", "用法：bookmark tag <name>");
+      }
+      const ref = await this.deps.createTagBookmark(request.name);
+      return success("bookmark.tagged", [info(`已创建只读书签 ${request.name}，当前书签=${ref.label}`)], { ref });
+    }
+    if (request.action === "switch") {
+      if (!request.bookmark) {
+        return validationError("bookmark.switch_usage", "用法：bookmark switch <name>");
+      }
+      const result = await this.deps.switchBookmark(request.bookmark);
+      return success("bookmark.switched", [info(result.message)], result);
+    }
+    if (request.action === "merge") {
+      if (!request.source) {
+        return validationError("bookmark.merge_usage", "用法：bookmark merge <sourceBookmark>");
+      }
+      const ref = await this.deps.mergeBookmark(request.source);
+      return success("bookmark.merged", [info(`已 merge 书签 ${request.source}，当前书签=${ref.label}`)], { ref });
+    }
+    return runtimeErrorResult("bookmark.unknown_action", "未知的 bookmark 子命令。");
+  }
+
+  private async handleExecutor(
+    request: Extract<CommandRequest, { domain: "executor" }>,
+  ): Promise<CommandResult> {
+    if (request.action === "status") {
+      const executor = await this.deps.getExecutorStatus(request.executorId);
+      return success("executor.status", [info(formatExecutor(executor))], { executor });
+    }
+    if (request.action === "list") {
+      const executors = await this.deps.listExecutors();
+      return success(
+        "executor.list",
+        [
+          info(
+            executors.executors.length === 0
+              ? "当前没有执行器。"
+              : executors.executors.map((executor) => formatExecutor(executor)).join("\n\n"),
+          ),
+        ],
+        executors,
+      );
     }
     if (request.action === "interrupt") {
-      await this.deps.interruptAgent();
-      return success("agent.interrupted", [info("已发送中断信号。")]);
+      await this.deps.interruptExecutor(request.executorId);
+      return success("executor.interrupted", [info("已发送中断给目标执行器。")]);
     }
-    await this.deps.resumeAgent();
-    return success("agent.resumed", [info("已恢复当前 agent。")]);
+    if (request.action === "resume") {
+      await this.deps.resumeExecutor(request.executorId);
+      return success("executor.resumed", [info("已尝试继续目标执行器。")]);
+    }
+    return runtimeErrorResult("executor.unknown_action", "未知的 executor 子命令。");
   }
 
   private async handleSession(
     request: Extract<CommandRequest, { domain: "session" }>,
   ): Promise<CommandResult> {
-    if (request.action === "status") {
-      const ref = await this.deps.getSessionGraphStatus();
-      return success(
-        "session.status",
-        [
-          info(
-            [
-              `session: ${this.deps.getSessionId()}`,
-              `agent: ${this.deps.getActiveAgentId?.() ?? this.deps.getActiveHeadId()}`,
-              `head: ${this.deps.getActiveHeadId()}`,
-              `ref: ${ref.label}`,
-              `dirty: ${ref.dirty}`,
-              `writerLease: ${ref.writerLeaseBranch ?? "none"}`,
-            ].join("\n"),
-          ),
-        ],
-        {
-          ref,
-        },
-      );
-    }
     if (request.action === "compact") {
       const result = await this.deps.compactSession();
       return success(
@@ -711,7 +771,7 @@ export class CommandService {
               ? [
                   `已完成 compact：before=${result.beforeTokens} after=${result.afterTokens}`,
                   `压缩分组=${result.removedGroups} | 保留分组=${result.keptGroups}`,
-                  `summaryAgent=${result.agentId ?? "N/A"}`,
+                  `summaryExecutor=${result.agentId ?? "N/A"}`,
                 ].join("\n")
               : "当前上下文不足以 compact，已跳过。",
           ),
@@ -773,155 +833,6 @@ export class CommandService {
         },
       );
     }
-    if (request.action === "branch-list") {
-      const refs = await this.deps.listSessionRefs();
-      return success(
-        "session.branch_list",
-        [
-          info(
-            refs.branches.length > 0
-              ? refs.branches
-                  .map((branch) => `${branch.current ? "*" : " "} ${branch.name} -> ${branch.targetNodeId}`)
-                  .join("\n")
-              : "暂无 branch。",
-          ),
-        ],
-        refs,
-      );
-    }
-    if (request.action === "branch-create") {
-      if (!request.name) {
-        return validationError("session.branch_usage", "用法：session branch <name>");
-      }
-      const ref = await this.deps.createSessionBranch(request.name);
-      return success("session.branch_created", [info(`已创建分支 ${request.name}，当前 ref=${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "switch-create-branch") {
-      if (!request.name) {
-        return validationError("session.switch_create_branch_usage", "用法：session switch -c <branch>");
-      }
-      const ref = await this.deps.switchSessionCreateBranch(request.name);
-      return success("session.switch_create_branch", [info(`已创建并切换到分支 ${request.name}，当前 ref=${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "switch") {
-      if (!request.ref) {
-        return validationError("session.switch_usage", "用法：session switch <ref>");
-      }
-      const result = await this.deps.switchSessionRef(request.ref);
-      return success("session.switched", [info(result.message)], result);
-    }
-    if (request.action === "tag-list") {
-      const refs = await this.deps.listSessionRefs();
-      return success(
-        "session.tag_list",
-        [
-          info(
-            refs.tags.length > 0
-              ? refs.tags
-                  .map((tag) => `${tag.current ? "*" : " "} ${tag.name} -> ${tag.targetNodeId}`)
-                  .join("\n")
-              : "暂无 tag。",
-          ),
-        ],
-        refs,
-      );
-    }
-    if (request.action === "tag-create") {
-      if (!request.name) {
-        return validationError("session.tag_usage", "用法：session tag <name>");
-      }
-      const ref = await this.deps.createSessionTag(request.name);
-      return success("session.tag_created", [info(`已创建 tag ${request.name}，当前 ref=${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "merge") {
-      if (!request.ref) {
-        return validationError("session.merge_usage", "用法：session merge <sourceRef>");
-      }
-      const ref = await this.deps.mergeSessionRef(request.ref);
-      return success("session.merged", [info(`已 merge ${request.ref}，当前 ref=${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "head-status") {
-      const ref = await this.deps.getSessionGraphStatus();
-      return success("session.head_status", [info(`active head=${ref.workingHeadId} | ${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "head-list") {
-      const heads = await this.deps.listSessionHeads();
-      return success(
-        "session.head_list",
-        [
-          info(
-            heads.heads
-              .map((head) => `${head.active ? "*" : " "} ${head.id} | ${head.name} | ${head.attachmentLabel} | status=${head.status}`)
-              .join("\n"),
-          ),
-        ],
-        heads,
-      );
-    }
-    if (request.action === "head-fork") {
-      if (!request.name) {
-        return validationError("session.head_fork_usage", "用法：session head fork <name>");
-      }
-      const ref = await this.deps.forkSessionHead(request.name);
-      return success("session.head_forked", [info(`已创建 working head ${request.name}，ref=${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "head-switch") {
-      if (!request.headId) {
-        return validationError("session.head_switch_usage", "用法：session head switch <headId>");
-      }
-      const ref = await this.deps.switchSessionHead(request.headId);
-      return success("session.head_switched", [info(`已切换 working head ${request.headId}，ref=${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "head-attach") {
-      if (!request.headId || !request.ref) {
-        return validationError("session.head_attach_usage", "用法：session head attach <headId> <ref>");
-      }
-      const ref = await this.deps.attachSessionHead(request.headId, request.ref);
-      return success("session.head_attached", [info(`已 attach ${request.headId} 到 ${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "head-detach") {
-      if (!request.headId) {
-        return validationError("session.head_detach_usage", "用法：session head detach <headId>");
-      }
-      const ref = await this.deps.detachSessionHead(request.headId);
-      return success("session.head_detached", [info(`已 detach ${request.headId}，当前=${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "head-merge") {
-      if (!request.sourceHeadId) {
-        return validationError("session.head_merge_usage", "用法：session head merge <sourceHeadId>");
-      }
-      const ref = await this.deps.mergeSessionHead(request.sourceHeadId);
-      return success("session.head_merged", [info(`已 merge ${request.sourceHeadId}，当前=${ref.label}`)], {
-        ref,
-      });
-    }
-    if (request.action === "head-close") {
-      if (!request.headId) {
-        return validationError("session.head_close_usage", "用法：session head close <headId>");
-      }
-      const ref = await this.deps.closeSessionHead(request.headId);
-      return success("session.head_closed", [info(`已关闭 working head ${request.headId}`)], {
-        ref,
-      });
-    }
     return runtimeErrorResult("session.unknown_action", "未知的 session 子命令。");
   }
 
@@ -941,8 +852,8 @@ export class CommandService {
             ? info(
                 [
                   `checkpoint: ${checkpoint.checkpointId}`,
-                  `agent: ${checkpoint.agentId}`,
-                  `head: ${checkpoint.headId}`,
+                  `executor: ${checkpoint.executorId}`,
+                  `workline: ${checkpoint.worklineId}`,
                   `session: ${checkpoint.sessionId}`,
                   `tool: ${checkpoint.toolCall.input.command}`,
                   `request: ${checkpoint.approvalRequest.id}`,
@@ -968,14 +879,14 @@ export class CommandService {
       return approvalRequired(result.checkpoint, result.uiMessages);
     }
     if (result.settled === "error") {
-      return runtimeErrorResult("approval.resume_error", result.agent.detail, {
-        agent: result.agent,
+      return runtimeErrorResult("approval.resume_error", result.executor.detail, {
+        executor: result.executor,
         uiMessages: result.uiMessages,
       });
     }
     if (result.settled === "interrupted") {
-      return runtimeErrorResult("approval.resume_interrupted", result.agent.detail, {
-        agent: result.agent,
+      return runtimeErrorResult("approval.resume_interrupted", result.executor.detail, {
+        executor: result.executor,
         uiMessages: result.uiMessages,
       });
     }
@@ -985,7 +896,7 @@ export class CommandService {
         info(request.action === "approve" ? "已批准并继续执行。" : "已拒绝并继续执行。"),
       ],
       {
-        agent: result.agent,
+        executor: result.executor,
         uiMessages: result.uiMessages,
       },
     );

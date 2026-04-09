@@ -13,11 +13,17 @@ class FakeController {
   public readonly approvePendingRequest = vi.fn(async () => {});
   public readonly interruptAgent = vi.fn(async () => {});
   public readonly requestExit = vi.fn(async () => {});
+  public readonly switchAgentRelative = vi.fn(async () => {});
 
   public constructor() {
     this.state = createEmptyState("/tmp/project");
     this.state = {
       ...this.state,
+      activeWorklineId: "head_main",
+      activeWorklineName: "main",
+      activeExecutorId: "head_main",
+      activeExecutorKind: "interactive",
+      activeBookmarkLabel: "branch=main",
       sessionId: "session_demo",
       shellCwd: "/tmp/project",
       currentTokenEstimate: 2400,
@@ -33,6 +39,22 @@ class FakeController {
           role: "info",
           content: "欢迎来到 QAgent",
           createdAt: new Date().toISOString(),
+        },
+      ],
+      worklines: [
+        {
+          id: "head_main",
+          sessionId: "session_demo",
+          name: "main",
+          attachmentMode: "branch",
+          attachmentLabel: "branch=main",
+          shellCwd: "/tmp/project",
+          dirty: false,
+          writeLock: "main",
+          status: "idle",
+          detail: "等待输入",
+          executorKind: "interactive",
+          active: true,
         },
       ],
     };
@@ -58,16 +80,53 @@ describe("App", () => {
       name: "main",
       label: "branch=main",
       headNodeId: "node_main",
-      workingSessionId: "session_demo",
+      workingHeadId: "head_main",
+      workingHeadName: "main",
+      sessionId: "session_demo",
+      writerLeaseBranch: "main",
+      active: true,
       dirty: false,
     };
+    controller.getState().agents = [
+      {
+        id: "head_main",
+        headId: "head_main",
+        sessionId: "session_demo",
+        name: "main",
+        kind: "interactive",
+        status: "idle",
+        autoMemoryFork: true,
+        retainOnCompletion: true,
+        detail: "等待输入",
+        shellCwd: "/tmp/project",
+        dirty: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: "head_worker",
+        headId: "head_worker",
+        sessionId: "session_worker",
+        name: "worker",
+        kind: "interactive",
+        status: "idle",
+        autoMemoryFork: true,
+        retainOnCompletion: true,
+        detail: "等待输入",
+        shellCwd: "/tmp/project",
+        dirty: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ];
     const view = render(<App controller={controller as never} />);
 
     expect(view.lastFrame()).toContain("QAgent CLI v1");
     expect(view.lastFrame()).toContain("欢迎来到 QAgent");
     expect(view.lastFrame()).toContain("session_demo");
-    expect(view.lastFrame()).toContain("branch=main");
+    expect(view.lastFrame()).toContain("bookmark=branch=main");
     expect(view.lastFrame()).toContain("history: ↑/↓");
+    expect(view.lastFrame()).toContain("工作线: 仅当前 1 条");
     expect(view.lastFrame()).toContain("complete: Tab");
     expect(view.lastFrame()).toContain("tokens: 2400/120000 (2.0%)");
     expect(view.lastFrame()).toContain("待机模式");
@@ -187,4 +246,5 @@ describe("App", () => {
 
     expect(view.lastFrame()).toContain("helper: fetching memory... | saving memory...");
   });
+
 });

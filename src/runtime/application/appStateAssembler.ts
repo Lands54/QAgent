@@ -1,4 +1,11 @@
-import type { ApprovalMode, AgentViewState, SkillManifest } from "../../types.js";
+import type {
+  AgentViewState,
+  ApprovalMode,
+  BookmarkView,
+  ExecutorView,
+  SkillManifest,
+  WorklineView,
+} from "../../types.js";
 import type { HeadAgentRuntime } from "../agentRuntime.js";
 import { createEmptyState, type AgentStatus, type AppState } from "../appState.js";
 import { ContextBudgetService } from "../domain/contextBudgetService.js";
@@ -12,6 +19,9 @@ interface BuildAppStateInput {
   availableSkills: SkillManifest[];
   pendingApprovals: Record<string, NonNullable<AgentViewState["pendingApproval"]>>;
   agents: AgentViewState[];
+  worklines: WorklineView[];
+  executors: ExecutorView[];
+  bookmarks: BookmarkView[];
   infoMessage?: string;
   autoCompactThresholdTokens: number;
 }
@@ -57,6 +67,14 @@ export class AppStateAssembler {
 
     return {
       ...baseState,
+      activeWorklineId: input.activeRuntime.headId,
+      activeWorklineName: input.activeView.name,
+      activeExecutorId: input.activeView.id,
+      activeExecutorKind: input.activeView.kind,
+      activeBookmarkLabel: input.activeRuntime.getRef()?.label,
+      worklines: input.worklines,
+      executors: input.executors,
+      bookmarks: input.bookmarks,
       activeAgentId: input.activeView.id,
       activeAgentKind: input.activeView.kind,
       activeWorkingHeadId: input.activeRuntime.headId,

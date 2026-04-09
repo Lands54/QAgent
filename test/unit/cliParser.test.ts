@@ -7,8 +7,8 @@ import {
 
 describe("CLI / Slash parser", () => {
   it("相同语义的 slash 与 structured CLI 会解析成等价命令", () => {
-    const slash = parseSlashCommand("/session status");
-    const cli = parseCliInvocation(["session", "status"]);
+    const slash = parseSlashCommand("/work status");
+    const cli = parseCliInvocation(["work", "status"]);
 
     expect(slash.handled).toBe(true);
     expect(slash.kind).toBe("command");

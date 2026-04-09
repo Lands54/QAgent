@@ -60,8 +60,19 @@ export class AgentLifecycleService {
   ): Promise<AgentViewState> {
     const sourceAgentId =
       options.sourceAgentId ?? this.input.registry.getActiveAgentId();
+    const sourceRuntime =
+      this.input.registry.getEntry(sourceAgentId)?.runtime
+      ?? this.input.registry.getEntryByHeadId(sourceAgentId)?.runtime;
+    if (!sourceRuntime) {
+      throw new Error(`未找到 agent：${sourceAgentId}`);
+    }
+    const mergeIntoAgentId = options.mergeIntoAgentId
+      ? this.input.registry.getEntry(options.mergeIntoAgentId)?.runtime.agentId
+        ?? this.input.registry.getEntryByHeadId(options.mergeIntoAgentId)?.runtime.agentId
+        ?? options.mergeIntoAgentId
+      : undefined;
     const result = await this.input.sessionService.forkHead(options.name, {
-      sourceHeadId: sourceAgentId,
+      sourceHeadId: sourceRuntime.headId,
       activate: options.activate ?? false,
       runtimeState: {
         agentKind: kind,
@@ -100,12 +111,12 @@ export class AgentLifecycleService {
       });
     }
 
-    this.input.registry.set(result.head.id, {
+    this.input.registry.set(runtime.agentId, {
       runtime,
       sourceAgentId,
-      mergeIntoAgentId: options.mergeIntoAgentId,
+      mergeIntoAgentId,
       mergeAssets: options.mergeAssets,
-      mergePending: Boolean(options.mergeIntoAgentId),
+      mergePending: Boolean(mergeIntoAgentId),
     });
     await this.input.sessionService.updateHeadRuntimeState(result.head.id, {
       agentKind: kind,
@@ -116,14 +127,14 @@ export class AgentLifecycleService {
       uiContextEnabled: options.uiContextEnabled,
     });
     if (options.activate) {
-      this.input.registry.setActiveAgentId(result.head.id);
+      this.input.registry.setActiveAgentId(runtime.agentId);
     }
     this.input.emitChange();
     return runtime.getViewState();
   }
 
   public async closeAgent(agentId: string): Promise<AgentViewState> {
-    const resolvedAgentId = this.input.navigation.resolveAgentId(agentId);
+    const resolvedAgentId = this.input.navigation.resolveExecutorId(agentId);
     const runtime = this.input.registry.requireRuntime(resolvedAgentId);
     if (resolvedAgentId === this.input.registry.getActiveAgentId()) {
       throw new Error("当前 active agent 不能直接关闭。");
@@ -131,7 +142,7 @@ export class AgentLifecycleService {
     if (runtime.isRunning()) {
       throw new Error("运行中的 agent 不能直接关闭，请先中断。");
     }
-    await this.input.sessionService.closeHead(resolvedAgentId);
+    await this.input.sessionService.closeHead(runtime.headId);
     await runtime.markClosed();
     await runtime.dispose();
     this.input.registry.delete(resolvedAgentId);
@@ -140,7 +151,7 @@ export class AgentLifecycleService {
   }
 
   public async cleanupCompletedAgent(agentId: string): Promise<void> {
-    const resolvedAgentId = this.input.navigation.resolveAgentId(agentId);
+    const resolvedAgentId = this.input.navigation.resolveExecutorId(agentId);
     const entry = this.input.registry.getEntry(resolvedAgentId);
     if (!entry) {
       return;
@@ -161,7 +172,7 @@ export class AgentLifecycleService {
       await this.input.navigation.switchAgent(fallbackAgentId);
     }
 
-    await this.input.sessionService.closeHead(resolvedAgentId);
+    await this.input.sessionService.closeHead(runtime.headId);
     await runtime.markClosed();
     await runtime.dispose();
     this.input.registry.delete(resolvedAgentId);

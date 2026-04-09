@@ -325,7 +325,210 @@ function buildBus(
       throw new Error("not used");
     }),
     showMemory: vi.fn(async () => undefined),
-    getAgentStatus: vi.fn(async () => ({
+    getWorklineStatus: vi.fn(async () => ({
+      id: "head_main",
+      sessionId: "session_demo",
+      name: "main",
+      attachmentMode: "branch",
+      attachmentLabel: "branch=main",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      writeLock: "main",
+      status: "idle",
+      detail: "idle",
+      executorKind: "interactive",
+      active: true,
+    })),
+    listWorklines: vi.fn(async () => ({
+      worklines: [
+        {
+          id: "head_main",
+          sessionId: "session_demo",
+          name: "main",
+          attachmentMode: "branch",
+          attachmentLabel: "branch=main",
+          shellCwd: "/tmp/project",
+          dirty: false,
+          writeLock: "main",
+          status: "idle",
+          detail: "idle",
+          executorKind: "interactive",
+          active: true,
+        },
+      ],
+    })),
+    createWorkline: vi.fn(async () => ({
+      id: "head_feature_a",
+      sessionId: "session_feature_a",
+      name: "feature-a",
+      attachmentMode: "branch",
+      attachmentLabel: "branch=feature-a",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      writeLock: "feature-a",
+      status: "idle",
+      detail: "idle",
+      executorKind: "interactive",
+      active: true,
+    })),
+    switchWorkline: vi.fn(async () => ({
+      id: "head_feature_a",
+      sessionId: "session_feature_a",
+      name: "feature-a",
+      attachmentMode: "branch",
+      attachmentLabel: "branch=feature-a",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      writeLock: "feature-a",
+      status: "idle",
+      detail: "idle",
+      executorKind: "interactive",
+      active: true,
+    })),
+    switchWorklineRelative: vi.fn(async () => ({
+      id: "head_feature_a",
+      sessionId: "session_feature_a",
+      name: "feature-a",
+      attachmentMode: "branch",
+      attachmentLabel: "branch=feature-a",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      writeLock: "feature-a",
+      status: "idle",
+      detail: "idle",
+      executorKind: "interactive",
+      active: true,
+    })),
+    closeWorkline: vi.fn(async () => ({
+      id: "head_worker",
+      sessionId: "session_worker",
+      name: "worker",
+      attachmentMode: "detached-node",
+      attachmentLabel: "closed",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      status: "closed",
+      detail: "closed",
+      executorKind: "interactive",
+      active: false,
+    })),
+    detachWorkline: vi.fn(async () => ({
+      id: "head_main",
+      sessionId: "session_demo",
+      name: "main",
+      attachmentMode: "detached-node",
+      attachmentLabel: "detached=node:node_main",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      status: "idle",
+      detail: "idle",
+      executorKind: "interactive",
+      active: true,
+    })),
+    mergeWorkline: vi.fn(async () => ({
+      id: "head_main",
+      sessionId: "session_demo",
+      name: "main",
+      attachmentMode: "branch",
+      attachmentLabel: "branch=main",
+      shellCwd: "/tmp/project",
+      dirty: false,
+      writeLock: "main",
+      status: "idle",
+      detail: "idle",
+      executorKind: "interactive",
+      active: true,
+    })),
+    getBookmarkStatus: vi.fn(async () => ({
+      current: "branch=main",
+      bookmarks: [
+        {
+          name: "main",
+          kind: "branch",
+          targetNodeId: "node_main",
+          current: true,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          name: "baseline",
+          kind: "tag",
+          targetNodeId: "node_main",
+          current: false,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    })),
+    listBookmarks: vi.fn(async () => ({
+      bookmarks: [
+        {
+          name: "main",
+          kind: "branch",
+          targetNodeId: "node_main",
+          current: true,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          name: "baseline",
+          kind: "tag",
+          targetNodeId: "node_main",
+          current: false,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    })),
+    createBookmark: vi.fn(async () => ({
+      mode: "branch" as const,
+      name: "feature-a",
+      label: "branch=main",
+      headNodeId: "node_main",
+      workingHeadId: "head_main",
+      workingHeadName: "main",
+      sessionId: "session_demo",
+      writerLeaseBranch: "main",
+      active: true,
+      dirty: false,
+    })),
+    createTagBookmark: vi.fn(async () => ({
+      mode: "branch" as const,
+      name: "main",
+      label: "branch=main",
+      headNodeId: "node_main",
+      workingHeadId: "head_main",
+      workingHeadName: "main",
+      sessionId: "session_demo",
+      writerLeaseBranch: "main",
+      active: true,
+      dirty: false,
+    })),
+    switchBookmark: vi.fn(async () => ({
+      ref: {
+        mode: "detached-tag" as const,
+        name: "baseline",
+        label: "detached=tag:baseline",
+        headNodeId: "node_main",
+        workingHeadId: "head_main",
+        workingHeadName: "main",
+        sessionId: "session_demo",
+        active: true,
+        dirty: false,
+      },
+      message: "已切换到 detached=tag:baseline。\nworking head: main\n工作区未自动回退。",
+    })),
+    mergeBookmark: vi.fn(async () => ({
+      mode: "branch" as const,
+      name: "main",
+      label: "branch=main",
+      headNodeId: "node_merge",
+      workingHeadId: "head_main",
+      workingHeadName: "main",
+      sessionId: "session_demo",
+      writerLeaseBranch: "main",
+      active: true,
+      dirty: false,
+    })),
+    getExecutorStatus: vi.fn(async () => ({
       id: "head_main",
       headId: "head_main",
       sessionId: "session_demo",
@@ -337,72 +540,18 @@ function buildBus(
       detail: "idle",
       shellCwd: "/tmp/project",
       dirty: false,
+      executorId: "head_main",
+      worklineId: "head_main",
+      worklineName: "main",
+      active: true,
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     })),
-    listAgents: vi.fn(async () => []),
-    spawnAgent: vi.fn(async () => ({
-      id: "head_worker",
-      headId: "head_worker",
-      sessionId: "session_worker",
-      name: "worker",
-      kind: "task",
-      status: "idle",
-      autoMemoryFork: false,
-      retainOnCompletion: true,
-      detail: "idle",
-      shellCwd: "/tmp/project",
-      dirty: false,
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
+    listExecutors: vi.fn(async () => ({
+      executors: [],
     })),
-    switchAgent: vi.fn(async () => ({
-      id: "head_worker",
-      headId: "head_worker",
-      sessionId: "session_worker",
-      name: "worker",
-      kind: "task",
-      status: "idle",
-      autoMemoryFork: false,
-      retainOnCompletion: true,
-      detail: "idle",
-      shellCwd: "/tmp/project",
-      dirty: false,
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-    })),
-    switchAgentRelative: vi.fn(async () => ({
-      id: "head_worker",
-      headId: "head_worker",
-      sessionId: "session_worker",
-      name: "worker",
-      kind: "task",
-      status: "idle",
-      autoMemoryFork: false,
-      retainOnCompletion: true,
-      detail: "idle",
-      shellCwd: "/tmp/project",
-      dirty: false,
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-    })),
-    closeAgent: vi.fn(async () => ({
-      id: "head_worker",
-      headId: "head_worker",
-      sessionId: "session_worker",
-      name: "worker",
-      kind: "task",
-      status: "closed",
-      autoMemoryFork: false,
-      retainOnCompletion: true,
-      detail: "closed",
-      shellCwd: "/tmp/project",
-      dirty: false,
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-    })),
-    interruptAgent: vi.fn(async () => {}),
-    resumeAgent: vi.fn(async () => {}),
+    interruptExecutor: vi.fn(async () => {}),
+    resumeExecutor: vi.fn(async () => {}),
     compactSession: vi.fn(async () => ({
       compacted: true,
       agentId: "head_compact",
@@ -636,25 +785,26 @@ describe("SlashCommandBus", () => {
     expect(showResult.messages[0]?.content).toContain("不需要手动激活");
   });
 
-  it("支持新的 git 风格 session 命令", async () => {
+  it("支持新的 work / bookmark 命令", async () => {
     const { bus } = buildBus();
 
-    const statusResult = await bus.execute("/session status");
-    const branchListResult = await bus.execute("/session branch");
-    const tagListResult = await bus.execute("/session tag");
+    const statusResult = await bus.execute("/work status");
+    const workListResult = await bus.execute("/work list");
+    const bookmarkListResult = await bus.execute("/bookmark list");
     const commitResult = await bus.execute('/session commit -m "保存当前方案"');
     const logResult = await bus.execute("/session log --limit=5");
     const graphLogResult = await bus.execute("/session graph log --limit=5");
-    const switchCreateResult = await bus.execute("/session switch -c feature-a");
-    const switchResult = await bus.execute("/session switch baseline");
+    const workCreateResult = await bus.execute("/work new feature-a");
+    const switchResult = await bus.execute("/bookmark switch baseline");
 
-    expect(statusResult.messages[0]?.content).toContain("ref: branch=main");
-    expect(branchListResult.messages[0]?.content).toContain("* main -> node_main");
-    expect(tagListResult.messages[0]?.content).toContain("baseline -> node_main");
+    expect(statusResult.messages[0]?.content).toContain("bookmark=branch=main");
+    expect(workListResult.messages[0]?.content).toContain("name=main");
+    expect(bookmarkListResult.messages[0]?.content).toContain("branch | main -> node_main");
+    expect(bookmarkListResult.messages[0]?.content).toContain("tag | baseline -> node_main");
     expect(commitResult.messages[0]?.content).toContain("commit_feature_a");
     expect(logResult.messages[0]?.content).toContain("commit_main | 初始化 session graph | node_main");
     expect(graphLogResult.messages[0]?.content).toContain("node_main | root");
-    expect(switchCreateResult.messages[0]?.content).toContain("feature-a");
+    expect(workCreateResult.messages[0]?.content).toContain("feature-a");
     expect(switchResult.messages[0]?.content).toContain("工作区未自动回退");
   });
 
@@ -665,21 +815,20 @@ describe("SlashCommandBus", () => {
     const forkResult = await bus.execute("/session fork feature-a");
     const checkoutResult = await bus.execute("/session checkout baseline");
 
-    expect(listResult.messages[0]?.content).toContain("/session branch");
-    expect(listResult.messages[0]?.content).toContain("/session tag");
-    expect(forkResult.messages[0]?.content).toContain("/session switch -c");
-    expect(checkoutResult.messages[0]?.content).toContain("/session switch <ref>");
+    expect(listResult.messages[0]?.content).toContain("/bookmark list");
+    expect(forkResult.messages[0]?.content).toContain("/work new");
+    expect(checkoutResult.messages[0]?.content).toContain("/bookmark switch");
   });
 
-  it("支持 working head 命令", async () => {
+  it("旧的 working head 命令会返回迁移提示", async () => {
     const { bus } = buildBus();
 
     const listResult = await bus.execute("/session head list");
     const forkResult = await bus.execute("/session head fork worker-a");
     const detachResult = await bus.execute("/session head detach head_worker_a");
 
-    expect(listResult.messages[0]?.content).toContain("head_main");
-    expect(forkResult.messages[0]?.content).toContain("worker-a");
-    expect(detachResult.messages[0]?.content).toContain("detach");
+    expect(listResult.messages[0]?.content).toContain("/work");
+    expect(forkResult.messages[0]?.content).toContain("/work");
+    expect(detachResult.messages[0]?.content).toContain("/work");
   });
 });

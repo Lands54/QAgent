@@ -104,10 +104,10 @@ describe("inputEnhancements", () => {
   });
 
   it("Tab 时能唯一补全 slash 命令", () => {
-    const result = completeInput("/ex", []);
+    const result = completeInput("/cle", []);
 
-    expect(result.nextValue).toBe("/exit");
-    expect(result.hint).toContain("/exit");
+    expect(result.nextValue).toBe("/clear");
+    expect(result.hint).toContain("/clear");
   });
 
   it("补全存在多个候选时会返回提示", () => {
@@ -129,24 +129,23 @@ describe("inputEnhancements", () => {
     expect(candidates).toContain("/memory save --name= --description=");
   });
 
-  it("会包含新的 git 风格 session 命令模板", () => {
+  it("会包含新的 work / bookmark 命令模板", () => {
     const candidates = buildAutocompleteCandidates([]);
 
     expect(candidates).toContain("/session commit -m ");
-    expect(candidates).toContain("/session switch ");
+    expect(candidates).toContain("/work status");
+    expect(candidates).toContain("/work new ");
+    expect(candidates).toContain("/bookmark switch ");
     expect(candidates).toContain("/session graph log --limit=");
     expect(candidates).not.toContain("/session fork ");
     expect(candidates).not.toContain("/session checkout ");
   });
 
-  it("session 补全预览会显示明确占位，而不是依赖尾随空格区分", () => {
-    const preview = getCompletionPreview("/session tag", []);
+  it("bookmark 补全预览会显示明确占位，而不是依赖尾随空格区分", () => {
+    const preview = getCompletionPreview("/bookmark tag", []);
 
     expect(preview.suggestions.map((item) => item.displayValue ?? item.value)).toContain(
-      "/session tag",
-    );
-    expect(preview.suggestions.map((item) => item.displayValue ?? item.value)).toContain(
-      "/session tag <name>",
+      "/bookmark tag <name>",
     );
   });
 
@@ -178,14 +177,14 @@ describe("inputEnhancements", () => {
 
     expect(preview.mode).toBe("idle");
     expect(preview.suggestions.map((item) => item.value)).toContain("/help");
-    expect(preview.suggestions.map((item) => item.value)).toContain("/session status");
+    expect(preview.suggestions.map((item) => item.value)).toContain("/work status");
     expect(preview.hint).toContain("待机态");
   });
 
   it("重复按 Tab 时会在多个候选之间轮换", () => {
-    const step1 = completeInput("/agent ", [], 0);
+    const step1 = completeInput("/work ", [], 0);
     const step2 = completeInput(
-      "/agent ",
+      "/work ",
       [],
       step1.nextSuggestionIndex,
       step1.cycleQuery,
@@ -197,8 +196,8 @@ describe("inputEnhancements", () => {
       step2.cycleQuery,
     );
 
-    expect(step1.nextValue).toBe("/agent ");
-    expect(step1.cycleQuery).toBe("/agent ");
+    expect(step1.nextValue).toBe("/work ");
+    expect(step1.cycleQuery).toBe("/work ");
     expect(step2.nextValue).not.toBe(step1.nextValue);
     expect(step3.nextValue).not.toBe(step2.nextValue);
     expect(step2.hint).toContain("补全:");

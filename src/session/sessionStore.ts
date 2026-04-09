@@ -113,9 +113,17 @@ export class SessionStore {
   public async loadPendingApprovalCheckpoint(
     workingHeadId: string,
   ): Promise<PendingApprovalCheckpoint | undefined> {
-    return readJsonIfExists<PendingApprovalCheckpoint>(
+    const checkpoint = await readJsonIfExists<PendingApprovalCheckpoint>(
       this.getPendingApprovalCheckpointPath(workingHeadId),
     );
+    if (!checkpoint) {
+      return undefined;
+    }
+    return {
+      ...checkpoint,
+      worklineId: checkpoint.worklineId ?? checkpoint.headId,
+      executorId: checkpoint.executorId ?? checkpoint.agentId,
+    };
   }
 
   public async savePendingApprovalCheckpoint(

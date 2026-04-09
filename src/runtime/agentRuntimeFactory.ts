@@ -14,6 +14,7 @@ import type {
   SessionWorkingHead,
   SkillManifest,
 } from "../types.js";
+import { createId } from "../utils/index.js";
 
 export class AgentRuntimeFactory {
   public constructor(
@@ -44,9 +45,11 @@ export class AgentRuntimeFactory {
       | "getAvailableSkills"
     > & {
       initialRef?: SessionRefInfo;
+      executorId?: string;
     },
   ): Promise<HeadAgentRuntime> {
     const runtime = new HeadAgentRuntime({
+      executorId: input.executorId ?? createId("executor"),
       config: this.config,
       head: input.head,
       snapshot: input.snapshot,
@@ -78,6 +81,7 @@ export class AgentRuntimeFactory {
     initialRef?: SessionRefInfo,
   ): Promise<HeadAgentRuntime> {
     const runtime = new HeadAgentRuntime({
+      executorId: createId("executor"),
       config: this.config,
       head,
       snapshot,

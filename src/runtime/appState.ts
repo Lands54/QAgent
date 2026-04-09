@@ -4,12 +4,15 @@ import type {
   AgentViewState,
   ApprovalMode,
   ApprovalRequest,
+  BookmarkView,
+  ExecutorView,
   LlmMessage,
   SessionRefInfo,
   SessionSnapshot,
   SessionWorkingHead,
   SkillManifest,
   UIMessage,
+  WorklineView,
 } from "../types.js";
 
 export interface AgentStatus {
@@ -19,6 +22,14 @@ export interface AgentStatus {
 }
 
 export interface AppState {
+  activeWorklineId: string;
+  activeWorklineName?: string;
+  activeExecutorId: string;
+  activeExecutorKind?: AgentKind;
+  activeBookmarkLabel?: string;
+  worklines: WorklineView[];
+  executors: ExecutorView[];
+  bookmarks: BookmarkView[];
   activeAgentId: string;
   activeAgentKind?: AgentKind;
   activeWorkingHeadId: string;
@@ -49,6 +60,11 @@ export type AppEvent = never;
 export function createEmptyState(cwd: string): AppState {
   const now = new Date().toISOString();
   return {
+    activeWorklineId: "",
+    activeExecutorId: "",
+    worklines: [],
+    executors: [],
+    bookmarks: [],
     activeAgentId: "",
     activeWorkingHeadId: "",
     sessionId: "",

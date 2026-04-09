@@ -78,6 +78,7 @@ export interface AgentRuntimeCallbacks {
 }
 
 export interface HeadAgentRuntimeOptions {
+  executorId?: string;
   config: RuntimeConfig;
   head: SessionWorkingHead;
   snapshot: SessionSnapshot;
@@ -209,7 +210,7 @@ export class HeadAgentRuntime {
   }
 
   public get agentId(): string {
-    return this.options.head.id;
+    return this.options.executorId ?? this.options.head.id;
   }
 
   public get headId(): string {
@@ -457,7 +458,7 @@ export class HeadAgentRuntime {
   public async submitInput(
     input: string,
     options?: {
-      modelInputAppendix?: string;
+      buildModelInputAppendix?: () => Promise<string | undefined>;
       approvalMode?: ApprovalHandlingMode;
     },
   ): Promise<void> {
@@ -492,11 +493,8 @@ export class HeadAgentRuntime {
     }
 
     const now = new Date().toISOString();
-    const modelInput = this.buildModelUserInput(
-      trimmed,
-      now,
-      options?.modelInputAppendix,
-    );
+    const modelMessageId = createId("llm");
+    const modelInput = this.buildModelUserInput(trimmed, now);
     await this.appendConversationEntryInternal(
       createConversationEntry({
         kind: "user-input",
@@ -508,7 +506,7 @@ export class HeadAgentRuntime {
           createdAt: now,
         },
         model: {
-          id: createId("llm"),
+          id: modelMessageId,
           role: "user",
           content: modelInput,
           createdAt: now,
@@ -526,6 +524,12 @@ export class HeadAgentRuntime {
     await this.persistSnapshot();
 
     this.approvalHandlingMode = options?.approvalMode ?? "interactive";
+    await this.enrichUserInputBeforeRunLoop({
+      modelMessageId,
+      rawInput: trimmed,
+      createdAt: now,
+      buildModelInputAppendix: options?.buildModelInputAppendix,
+    });
     await this.runLoop();
   }
 
@@ -790,6 +794,66 @@ export class HeadAgentRuntime {
     return sections.join("\n");
   }
 
+  private async enrichUserInputBeforeRunLoop(input: {
+    modelMessageId: string;
+    rawInput: string;
+    createdAt: string;
+    buildModelInputAppendix?: () => Promise<string | undefined>;
+  }): Promise<void> {
+    if (!input.buildModelInputAppendix) {
+      return;
+    }
+
+    let appendix: string | undefined;
+    try {
+      appendix = await input.buildModelInputAppendix();
+    } catch (error) {
+      await this.appendUiOnlyMessage({
+        id: createId("ui"),
+        role: "error",
+        content: `fetch-memory 失败，已跳过：${(error as Error).message}`,
+        createdAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const normalizedAppendix = appendix?.trim();
+    if (!normalizedAppendix) {
+      return;
+    }
+
+    const nextContent = this.buildModelUserInput(
+      input.rawInput,
+      input.createdAt,
+      normalizedAppendix,
+    );
+    let updated = false;
+    this.options.snapshot = projectSnapshotConversationEntries(
+      {
+        ...this.options.snapshot,
+        conversationEntries: this.options.snapshot.conversationEntries.map((entry) => {
+          if (entry.model?.id !== input.modelMessageId) {
+            return entry;
+          }
+          updated = true;
+          return {
+            ...entry,
+            model: {
+              ...entry.model,
+              content: nextContent,
+            },
+          };
+        }),
+      },
+      this.isUiContextEnabled(),
+    );
+    if (!updated) {
+      return;
+    }
+    await this.persistSnapshot();
+    this.options.callbacks.onStateChanged(this);
+  }
+
   private async getMemoryService(): Promise<MemoryService> {
     const state = this.options.head.assetState.memory as
       | {
@@ -806,7 +870,7 @@ export class HeadAgentRuntime {
     });
   }
 
-  private getShellCwd(): string {
+  public getShellCwd(): string {
     return this.shellTool.getRuntimeStatus().cwd ?? this.options.snapshot.shellCwd;
   }
 
@@ -821,6 +885,8 @@ export class HeadAgentRuntime {
   ): Promise<ApprovalDecision> {
     const checkpoint: PendingApprovalCheckpoint = {
       checkpointId: createId("approval"),
+      executorId: this.agentId,
+      worklineId: this.headId,
       agentId: this.agentId,
       headId: this.headId,
       sessionId: this.sessionId,
@@ -1032,6 +1098,8 @@ export class HeadAgentRuntime {
       type,
       createdAt: new Date().toISOString(),
       sessionId: this.sessionId,
+      worklineId: this.headId,
+      executorId: this.agentId,
       headId: this.headId,
       agentId: this.agentId,
       payload,

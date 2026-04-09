@@ -5,7 +5,12 @@ import {
   formatCommandResultText,
   parseCliInvocation,
 } from "../command/index.js";
-import { createAppController } from "../runtime/index.js";
+import {
+  GatewayClientController,
+  getGatewayStatus,
+  serveGateway,
+  stopGateway,
+} from "../gateway/index.js";
 import { App } from "../ui/index.js";
 
 function printHelp(): void {
@@ -21,8 +26,12 @@ function printHelp(): void {
 
 常用命令:
   qagent run "帮我总结当前项目结构"
-  qagent session status
-  qagent session branch
+  qagent work status
+  qagent work new feature-a
+  qagent bookmark list
+  qagent executor list
+  qagent gateway status
+  qagent gateway stop
   qagent memory list
   qagent approval status
   qagent approval approve <checkpointId>
@@ -52,7 +61,39 @@ export async function runCli(argv: string[]): Promise<void> {
     return;
   }
 
-  const controller = await createAppController(invocation.cliOptions);
+  if (invocation.mode === "gateway") {
+    if (invocation.gatewayAction === "serve") {
+      await serveGateway(invocation.cliOptions);
+      return;
+    }
+    if (invocation.gatewayAction === "status") {
+      const status = await getGatewayStatus(invocation.cliOptions);
+      if (!status.manifest) {
+        process.stdout.write("gateway: stopped\n");
+        return;
+      }
+      process.stdout.write(
+        [
+          `gateway: ${status.health ? "running" : "stale"}`,
+          `pid: ${status.manifest.pid}`,
+          `url: ${status.manifest.baseUrl}`,
+          `cwd: ${status.manifest.cwd}`,
+        ].join("\n") + "\n",
+      );
+      process.exitCode = status.health ? 0 : 1;
+      return;
+    }
+    if (invocation.gatewayAction === "stop") {
+      const stopped = await stopGateway(invocation.cliOptions);
+      process.stdout.write(`${stopped ? "gateway stopped" : "gateway not running"}\n`);
+      return;
+    }
+  }
+
+  const controller = await GatewayClientController.create({
+    cliOptions: invocation.cliOptions,
+    clientLabel: invocation.mode === "tui" ? "tui" : "cli",
+  });
 
   if (invocation.mode === "tui") {
     const app = render(createElement(App, { controller }));
