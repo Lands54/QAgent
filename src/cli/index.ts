@@ -22,8 +22,9 @@ function printHelp(): void {
   console.log(`QAgent CLI
 
 用法:
-  qagent
-  qagent "帮我查看当前目录结构"
+  qagent                         显示帮助
+  qagent "帮我查看当前目录结构"   以 CLI run 快捷方式执行 prompt
+  qagent tui [prompt]            进入 TUI，可选带初始 prompt
   qagent resume [sessionId]
   qagent run <prompt> [--json|--stream]
   qagent <domain> <subcommand> [--json|--stream]

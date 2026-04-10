@@ -72,6 +72,16 @@ class FakeController {
   }
 }
 
+async function typeInput(view: ReturnType<typeof render>, input: string): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (const char of input) {
+    view.stdin.write(char);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  view.stdin.write("\r");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("App", () => {
   it("能渲染基础 TUI 结构", () => {
     const controller = new FakeController();
@@ -245,6 +255,27 @@ describe("App", () => {
     const view = render(<App controller={controller as never} />);
 
     expect(view.lastFrame()).toContain("helper: fetching memory... | saving memory...");
+  });
+
+  it("会在本地处理 /help，不依赖后端 submitInput", async () => {
+    const controller = new FakeController();
+    const view = render(<App controller={controller as never} />);
+
+    await typeInput(view, "/help");
+
+    expect(controller.submitInput).not.toHaveBeenCalled();
+    expect(view.lastFrame()).toContain("可用命令：");
+    expect(view.lastFrame()).toContain("/exit");
+  });
+
+  it("会在本地处理 /exit，不依赖后端 submitInput", async () => {
+    const controller = new FakeController();
+    const view = render(<App controller={controller as never} />);
+
+    await typeInput(view, "/exit");
+
+    expect(controller.submitInput).not.toHaveBeenCalled();
+    expect(controller.requestExit).toHaveBeenCalledTimes(1);
   });
 
 });

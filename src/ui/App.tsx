@@ -18,10 +18,24 @@ import { MessageList } from "./MessageList.js";
 import { buildFooterHint } from "./presentation/footerHint.js";
 import { StatusBar } from "./StatusBar.js";
 import { WorklineList } from "./WorklineList.js";
-import type { AppControllerLike, AppState } from "../runtime/index.js";
+import {
+  buildSlashHelpText,
+  type AppControllerLike,
+  type AppState,
+} from "../runtime/index.js";
+import type { UIMessage } from "../types.js";
 
 interface AppProps {
   controller: AppControllerLike;
+}
+
+function createLocalMessage(role: UIMessage["role"], content: string): UIMessage {
+  return {
+    id: `ui-local-${Date.now()}`,
+    role,
+    content,
+    createdAt: new Date().toISOString(),
+  };
 }
 
 export function App({ controller }: AppProps) {
@@ -30,6 +44,7 @@ export function App({ controller }: AppProps) {
   const stateFlushTimerRef = useRef<NodeJS.Timeout>();
   const [input, setInput] = useState("");
   const [localError, setLocalError] = useState<string>();
+  const [localMessages, setLocalMessages] = useState<UIMessage[]>([]);
   const [completionHint, setCompletionHint] = useState<string>();
   const [completionSuggestionIndex, setCompletionSuggestionIndex] = useState(0);
   const [completionCycleQuery, setCompletionCycleQuery] = useState<string>();
@@ -73,6 +88,7 @@ export function App({ controller }: AppProps) {
     setCompletionSuggestionIndex(0);
     setCompletionCycleQuery(undefined);
     setLocalError(undefined);
+    setLocalMessages([]);
     setInput("");
   }, [state.activeWorklineId, state.activeExecutorId, state.sessionId, state.activeBookmarkLabel]);
 
@@ -186,8 +202,31 @@ export function App({ controller }: AppProps) {
       setInput("");
       return;
     }
+    if (handleLocalSlashCommand(trimmed)) {
+      setInput("");
+      return;
+    }
     runControllerAction(controller.submitInput(trimmed), "发送输入失败");
     setInput("");
+  }
+
+  function handleLocalSlashCommand(trimmed: string): boolean {
+    if (trimmed === "/help") {
+      appendLocalMessage("info", buildSlashHelpText());
+      return true;
+    }
+    if (trimmed === "/exit") {
+      runControllerAction(controller.requestExit(), "退出失败");
+      return true;
+    }
+    return false;
+  }
+
+  function appendLocalMessage(role: UIMessage["role"], content: string): void {
+    setLocalMessages((messages) => [
+      ...messages,
+      createLocalMessage(role, content),
+    ]);
   }
 
   function runControllerAction(
@@ -239,7 +278,7 @@ export function App({ controller }: AppProps) {
       {state.pendingApproval ? <ApprovalModal request={state.pendingApproval} /> : null}
       <Box>
         <MessageList
-          messages={state.uiMessages}
+          messages={[...state.uiMessages, ...localMessages]}
           draftAssistantText={state.draftAssistantText}
         />
       </Box>

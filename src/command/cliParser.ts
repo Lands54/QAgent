@@ -118,6 +118,18 @@ export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
   if (tokens.length === 0) {
     return {
       cliOptions,
+      mode: "help",
+      output,
+    };
+  }
+
+  if (tokens[0] === "tui") {
+    const prompt = tokens.slice(1).join(" ").trim();
+    if (prompt) {
+      cliOptions.initialPrompt = prompt;
+    }
+    return {
+      cliOptions,
       mode: "tui",
       output,
     };
@@ -205,12 +217,13 @@ export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
     ]);
     if (!knownDomains.has(tokens[0] ?? "")) {
       return {
-        cliOptions: {
-          ...cliOptions,
-          initialPrompt: trailingTokens.join(" "),
-        },
-        mode: "tui",
+        cliOptions,
+        mode: "command",
         output,
+        request: {
+          domain: "run",
+          prompt: trailingTokens.join(" "),
+        },
       };
     }
     return {

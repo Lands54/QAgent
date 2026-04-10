@@ -6,6 +6,36 @@ import {
 } from "../../src/command/index.js";
 
 describe("CLI / Slash parser", () => {
+  it("无参数默认显示 help，而不是启动 TUI", () => {
+    const cli = parseCliInvocation([]);
+
+    expect(cli.mode).toBe("help");
+  });
+
+  it("显式 tui 子命令会进入 TUI", () => {
+    const cli = parseCliInvocation(["tui"]);
+
+    expect(cli.mode).toBe("tui");
+    expect(cli.cliOptions.initialPrompt).toBeUndefined();
+  });
+
+  it("显式 tui 子命令支持初始 prompt", () => {
+    const cli = parseCliInvocation(["tui", "帮我看看当前项目结构"]);
+
+    expect(cli.mode).toBe("tui");
+    expect(cli.cliOptions.initialPrompt).toBe("帮我看看当前项目结构");
+  });
+
+  it("resume 仍保持显式 TUI 入口语义", () => {
+    const latest = parseCliInvocation(["resume"]);
+    const specific = parseCliInvocation(["resume", "session_123"]);
+
+    expect(latest.mode).toBe("tui");
+    expect(latest.cliOptions.resumeSessionId).toBe("latest");
+    expect(specific.mode).toBe("tui");
+    expect(specific.cliOptions.resumeSessionId).toBe("session_123");
+  });
+
   it("相同语义的 slash 与 structured CLI 会解析成等价命令", () => {
     const slash = parseSlashCommand("/work status");
     const cli = parseCliInvocation(["work", "status"]);
@@ -35,11 +65,14 @@ describe("CLI / Slash parser", () => {
     expect(cli.request).toEqual(slash.kind === "command" ? slash.request : undefined);
   });
 
-  it("未知首 token 仍兼容为 TUI 初始 prompt", () => {
+  it("未知首 token 会作为 CLI run prompt 处理", () => {
     const cli = parseCliInvocation(["帮我看看当前项目结构"]);
 
-    expect(cli.mode).toBe("tui");
-    expect(cli.cliOptions.initialPrompt).toBe("帮我看看当前项目结构");
+    expect(cli.mode).toBe("command");
+    expect(cli.request).toEqual({
+      domain: "run",
+      prompt: "帮我看看当前项目结构",
+    });
   });
 
   it("支持 edge 子命令与远程 transport 参数", () => {
@@ -62,5 +95,12 @@ describe("CLI / Slash parser", () => {
     expect(cli.cliOptions.workspaceId).toBe("workspace-alpha");
     expect(cli.cliOptions.edgeBaseUrl).toBe("https://edge.example.com");
     expect(cli.cliOptions.apiToken).toBe("secret-token");
+  });
+
+  it("支持 gateway 子命令", () => {
+    const cli = parseCliInvocation(["gateway", "status"]);
+
+    expect(cli.mode).toBe("gateway");
+    expect(cli.gatewayAction).toBe("status");
   });
 });

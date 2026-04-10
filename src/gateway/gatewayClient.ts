@@ -1,10 +1,10 @@
-import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 
 import { loadRuntimeConfig } from "../config/index.js";
-import type { AppControllerLike, AppState } from "../runtime/index.js";
-import { createEmptyState } from "../runtime/index.js";
+import { createEmptyState, type AppControllerLike, type AppState } from "../runtime/index.js";
+import { SessionLockBusyError } from "../session/index.js";
 import type {
   CliOptions,
   CommandRequest,
@@ -12,9 +12,8 @@ import type {
   RuntimeConfig,
   RuntimeEvent,
 } from "../types.js";
-import { createId, getBuildInfo } from "../utils/index.js";
-import { clearGatewayManifest, readGatewayManifest } from "./manifest.js";
 import { GatewayServer } from "./gatewayServer.js";
+import { clearGatewayManifest, readGatewayManifest } from "./manifest.js";
 import type {
   GatewayCommandEnvelope,
   GatewayConnectionInput,
@@ -23,6 +22,7 @@ import type {
   GatewayOpenClientResponse,
   GatewaySseEvent,
 } from "./types.js";
+import { createId, getBuildInfo } from "../utils/index.js";
 
 type Listener = (state: AppState) => void;
 type RuntimeEventListener = (event: RuntimeEvent) => void;
@@ -31,7 +31,7 @@ interface BackendTransport {
   openClient(clientLabel: "cli" | "tui" | "api"): Promise<GatewayOpenClientResponse>;
   submitInput(clientId: string, input: string): Promise<{ exitRequested?: boolean }>;
   executeCommand(clientId: string, request: CommandRequest): Promise<CommandResult>;
-  closeClient(clientId: string): Promise<void>;
+  closeClient(clientId: string, signal?: AbortSignal): Promise<void>;
   openEventStream(
     clientId: string,
     onEvent: (event: GatewaySseEvent) => void,
@@ -302,9 +302,10 @@ class LocalGatewayTransport implements BackendTransport {
     return result.result;
   }
 
-  public async closeClient(clientId: string): Promise<void> {
+  public async closeClient(clientId: string, signal?: AbortSignal): Promise<void> {
     await fetch(`${this.baseUrl}/api/clients/${clientId}`, {
       method: "DELETE",
+      signal,
     });
   }
 
@@ -400,10 +401,11 @@ class RemoteEdgeTransport implements BackendTransport {
     return result.result;
   }
 
-  public async closeClient(clientId: string): Promise<void> {
+  public async closeClient(clientId: string, signal?: AbortSignal): Promise<void> {
     await fetch(`${this.workspaceBaseUrl}/clients/${clientId}`, {
       method: "DELETE",
       headers: authHeaders(this.apiToken),
+      signal,
     });
   }
 
@@ -502,7 +504,37 @@ export async function stopGateway(cliOptions: CliOptions): Promise<boolean> {
 }
 
 export async function serveGateway(cliOptions: CliOptions): Promise<void> {
-  const server = await GatewayServer.create(cliOptions);
+  let server: GatewayServer;
+  try {
+    server = await GatewayServer.create(cliOptions);
+  } catch (error) {
+    if (!(error instanceof SessionLockBusyError)) {
+      throw error;
+    }
+
+    const status = await getGatewayStatus(cliOptions);
+    if (status.manifest && status.health) {
+      process.stdout.write([
+        "gateway 已在运行",
+        `pid: ${status.manifest.pid}`,
+        `url: ${status.manifest.baseUrl}`,
+        `cwd: ${status.manifest.cwd}`,
+        "如需重启，请先运行：qagent gateway stop",
+      ].join("\n") + "\n");
+      return;
+    }
+
+    process.stderr.write([
+      "gateway 无法启动：当前 session lock 已被其他进程占用。",
+      `owner: ${error.metadata.ownerKind}`,
+      `pid: ${error.metadata.pid}`,
+      `startedAt: ${error.metadata.startedAt}`,
+      `lastHeartbeatAt: ${error.metadata.lastHeartbeatAt}`,
+      "如果确认该进程已失效，请先运行：qagent gateway status；必要时结束对应进程后重试。",
+    ].join("\n") + "\n");
+    process.exitCode = 1;
+    return;
+  }
   const { baseUrl } = await server.listen();
   process.stdout.write(`gateway listening on ${baseUrl}\n`);
 
@@ -611,11 +643,7 @@ export class BackendClientController implements AppControllerLike {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
     }
-    try {
-      await this.transport.closeClient(this.clientId);
-    } catch {
-      // ignore dispose errors
-    }
+    await this.closeClientBestEffort();
   }
 
   public async interruptAgent(): Promise<void> {
@@ -697,6 +725,31 @@ export class BackendClientController implements AppControllerLike {
       ).catch(() => {});
     }, 5_000);
     this.heartbeatTimer.unref?.();
+  }
+
+  private async closeClientBestEffort(): Promise<void> {
+    const closeAbortController = new AbortController();
+    let timeout: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<void>((resolve) => {
+      timeout = setTimeout(() => {
+        closeAbortController.abort();
+        resolve();
+      }, 500);
+      timeout.unref?.();
+    });
+
+    try {
+      await Promise.race([
+        this.transport.closeClient(this.clientId, closeAbortController.signal),
+        timeoutPromise,
+      ]);
+    } catch {
+      // ignore dispose errors
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
   }
 
   private async runInteractiveAction(

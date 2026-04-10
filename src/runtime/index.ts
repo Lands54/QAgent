@@ -29,3 +29,4 @@ export {
 } from "./appState.js";
 export type { AgentStatus, AppEvent, AppState } from "./appState.js";
 export { SlashCommandBus } from "./slashCommandBus.js";
+export { buildSlashHelpText } from "../command/index.js";

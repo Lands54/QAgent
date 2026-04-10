@@ -23,6 +23,7 @@ class TestBackendClientController extends BackendClientController {
 function createTransportStub(input?: {
   submitInput?: () => Promise<{ exitRequested?: boolean }>;
   openEventStream?: () => Promise<void>;
+  closeClient?: (signal?: AbortSignal) => Promise<void>;
 }) {
   return {
     openClient: vi.fn(),
@@ -30,7 +31,8 @@ function createTransportStub(input?: {
     executeCommand: vi.fn(async () => {
       throw new Error("not implemented");
     }),
-    closeClient: vi.fn(async () => {}),
+    closeClient: vi.fn(async (_clientId: string, signal?: AbortSignal) =>
+      input?.closeClient?.(signal)),
     openEventStream: vi.fn(input?.openEventStream ?? (async () => {})),
     heartbeatExecutor: vi.fn(async () => {}),
   };
@@ -82,5 +84,19 @@ describe("BackendClientController", () => {
     } finally {
       await controller.dispose();
     }
+  });
+
+  it("dispose 不会被 closeClient 的挂起请求卡住", async () => {
+    const transport = createTransportStub({
+      closeClient: async (signal) => {
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+    });
+    const controller = new TestBackendClientController(transport);
+
+    await expect(controller.dispose()).resolves.toBeUndefined();
+    expect(transport.closeClient).toHaveBeenCalledWith("client_test", expect.any(AbortSignal));
   });
 });
