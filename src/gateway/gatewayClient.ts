@@ -52,6 +52,42 @@ async function fetchJson<T>(
   return response.json() as Promise<T>;
 }
 
+function formatTransportError(error: unknown): string {
+  if (error instanceof Error && error.name === "AbortError") {
+    return "连接已取消。";
+  }
+
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const cause = error instanceof Error && "cause" in error
+    ? (error as Error & { cause?: unknown }).cause
+    : undefined;
+  const causeMessage =
+    cause instanceof Error
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : cause && typeof cause === "object" && "code" in cause
+          ? String((cause as { code?: unknown }).code ?? "")
+          : "";
+  const combined = `${errorMessage} ${causeMessage}`.trim();
+
+  if (
+    combined.includes("fetch failed")
+    || combined.includes("UND_ERR_SOCKET")
+    || combined.includes("other side closed")
+    || combined.includes("ECONNRESET")
+  ) {
+    return "与 gateway 的连接已断开，后端可能已退出或重启。";
+  }
+  if (combined.includes("ECONNREFUSED")) {
+    return "无法连接到 gateway，后端可能尚未启动。";
+  }
+  if (combined.length === 0) {
+    return "与 gateway 通信失败。";
+  }
+  return combined;
+}
+
 function authHeaders(token?: string): Record<string, string> | undefined {
   if (!token) {
     return undefined;
@@ -507,6 +543,7 @@ export class BackendClientController implements AppControllerLike {
   });
   private exitResolver?: () => void;
   private heartbeatTimer?: NodeJS.Timeout;
+  private exiting = false;
 
   protected constructor(
     private readonly transport: BackendTransport,
@@ -533,10 +570,12 @@ export class BackendClientController implements AppControllerLike {
   }
 
   public async submitInput(input: string): Promise<void> {
-    const result = await this.transport.submitInput(this.clientId, input);
-    if (result.exitRequested) {
-      await this.requestExit();
-    }
+    await this.runInteractiveAction("发送输入", async () => {
+      const result = await this.transport.submitInput(this.clientId, input);
+      if (result.exitRequested) {
+        await this.requestExit();
+      }
+    });
   }
 
   public async executeCommand(request: CommandRequest): Promise<CommandResult> {
@@ -544,13 +583,16 @@ export class BackendClientController implements AppControllerLike {
   }
 
   public async approvePendingRequest(approved: boolean): Promise<void> {
-    await this.executeCommand({
-      domain: "approval",
-      action: approved ? "approve" : "reject",
+    await this.runInteractiveAction("提交审批结果", async () => {
+      await this.executeCommand({
+        domain: "approval",
+        action: approved ? "approve" : "reject",
+      });
     });
   }
 
   public async requestExit(): Promise<void> {
+    this.exiting = true;
     this.state = {
       ...this.state,
       shouldExit: true,
@@ -564,6 +606,7 @@ export class BackendClientController implements AppControllerLike {
   }
 
   public async dispose(): Promise<void> {
+    this.exiting = true;
     this.abortController.abort();
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
@@ -576,31 +619,39 @@ export class BackendClientController implements AppControllerLike {
   }
 
   public async interruptAgent(): Promise<void> {
-    await this.executeCommand({
-      domain: "executor",
-      action: "interrupt",
+    await this.runInteractiveAction("中断执行", async () => {
+      await this.executeCommand({
+        domain: "executor",
+        action: "interrupt",
+      });
     });
   }
 
   public async resumeAgent(): Promise<void> {
-    await this.executeCommand({
-      domain: "executor",
-      action: "resume",
+    await this.runInteractiveAction("恢复执行", async () => {
+      await this.executeCommand({
+        domain: "executor",
+        action: "resume",
+      });
     });
   }
 
   public async switchAgent(agentId: string): Promise<void> {
-    await this.executeCommand({
-      domain: "work",
-      action: "switch",
-      worklineId: agentId,
+    await this.runInteractiveAction("切换工作线", async () => {
+      await this.executeCommand({
+        domain: "work",
+        action: "switch",
+        worklineId: agentId,
+      });
     });
   }
 
   public async switchAgentRelative(offset: number): Promise<void> {
-    await this.executeCommand({
-      domain: "work",
-      action: offset >= 0 ? "next" : "prev",
+    await this.runInteractiveAction("切换工作线", async () => {
+      await this.executeCommand({
+        domain: "work",
+        action: offset >= 0 ? "next" : "prev",
+      });
     });
   }
 
@@ -622,7 +673,17 @@ export class BackendClientController implements AppControllerLike {
         }
       },
       this.abortController.signal,
-    ).catch(() => {});
+    )
+      .then(() => {
+        if (!this.abortController.signal.aborted && !this.exiting) {
+          this.reportTransportError("监听事件流", new Error("事件流已关闭。"));
+        }
+      })
+      .catch((error) => {
+        if (!this.abortController.signal.aborted && !this.exiting) {
+          this.reportTransportError("监听事件流", error);
+        }
+      });
   }
 
   private startHeartbeat(): void {
@@ -636,6 +697,55 @@ export class BackendClientController implements AppControllerLike {
       ).catch(() => {});
     }, 5_000);
     this.heartbeatTimer.unref?.();
+  }
+
+  private async runInteractiveAction(
+    actionLabel: string,
+    action: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await action();
+    } catch (error) {
+      this.reportTransportError(actionLabel, error);
+    }
+  }
+
+  private reportTransportError(actionLabel: string, error: unknown): void {
+    if (this.abortController.signal.aborted || this.exiting) {
+      return;
+    }
+
+    const detail = formatTransportError(error);
+    const content = `${actionLabel}失败：${detail}`;
+    const lastMessage = this.state.uiMessages.at(-1);
+    const shouldAppendMessage = !(
+      lastMessage?.role === "error"
+      && lastMessage.title === "Gateway"
+      && lastMessage.content === content
+    );
+    const createdAt = new Date().toISOString();
+
+    this.state = {
+      ...this.state,
+      status: {
+        mode: "error",
+        detail,
+        updatedAt: createdAt,
+      },
+      uiMessages: shouldAppendMessage
+        ? [
+            ...this.state.uiMessages,
+            {
+              id: createId("ui"),
+              role: "error",
+              title: "Gateway",
+              content,
+              createdAt,
+            },
+          ]
+        : this.state.uiMessages,
+    };
+    this.events.emit("state", this.state);
   }
 }
 

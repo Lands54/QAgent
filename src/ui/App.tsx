@@ -1,4 +1,4 @@
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -29,6 +29,7 @@ export function App({ controller }: AppProps) {
   const pendingStateRef = useRef<AppState>();
   const stateFlushTimerRef = useRef<NodeJS.Timeout>();
   const [input, setInput] = useState("");
+  const [localError, setLocalError] = useState<string>();
   const [completionHint, setCompletionHint] = useState<string>();
   const [completionSuggestionIndex, setCompletionSuggestionIndex] = useState(0);
   const [completionCycleQuery, setCompletionCycleQuery] = useState<string>();
@@ -37,12 +38,7 @@ export function App({ controller }: AppProps) {
     draft: "",
   });
   const { exit } = useApp();
-  const { stdout } = useStdout();
   const inputHistory = extractUserInputHistory(state.modelMessages);
-  const shouldConstrainLayout = Boolean(stdout.isTTY);
-  const terminalHeight = shouldConstrainLayout
-    ? Math.max(stdout.rows ?? 24, 18)
-    : undefined;
 
   useEffect(() => {
     return controller.subscribe((nextState) => {
@@ -76,6 +72,7 @@ export function App({ controller }: AppProps) {
     setCompletionHint(undefined);
     setCompletionSuggestionIndex(0);
     setCompletionCycleQuery(undefined);
+    setLocalError(undefined);
     setInput("");
   }, [state.activeWorklineId, state.activeExecutorId, state.sessionId, state.activeBookmarkLabel]);
 
@@ -88,28 +85,28 @@ export function App({ controller }: AppProps) {
   useInput((value, key) => {
     if (state.pendingApproval) {
       if (key.ctrl && value.toLowerCase() === "c") {
-        void controller.interruptAgent();
+        runControllerAction(controller.interruptAgent(), "取消审批流程失败");
         return;
       }
       if (value.toLowerCase() === "y") {
-        void controller.approvePendingRequest(true);
+        runControllerAction(controller.approvePendingRequest(true), "批准请求失败");
       }
       if (value.toLowerCase() === "n" || key.escape) {
-        void controller.approvePendingRequest(false);
+        runControllerAction(controller.approvePendingRequest(false), "拒绝请求失败");
       }
       return;
     }
 
     if (isPreviousAgentShortcut(value, key)) {
       if (state.worklines.length > 1) {
-        void controller.switchAgentRelative(-1);
+        runControllerAction(controller.switchAgentRelative(-1), "切换工作线失败");
       }
       return;
     }
 
     if (isNextAgentShortcut(value, key)) {
       if (state.worklines.length > 1) {
-        void controller.switchAgentRelative(1);
+        runControllerAction(controller.switchAgentRelative(1), "切换工作线失败");
       }
       return;
     }
@@ -154,15 +151,16 @@ export function App({ controller }: AppProps) {
 
     if (key.ctrl && value.toLowerCase() === "c") {
       if (state.status.mode === "running" || state.status.mode === "awaiting-approval") {
-        void controller.interruptAgent();
+        runControllerAction(controller.interruptAgent(), "中断执行失败");
       } else {
-        void controller.requestExit();
+        runControllerAction(controller.requestExit(), "退出失败");
       }
     }
   });
 
   function handleChange(nextValue: string) {
     setInput(nextValue);
+    setLocalError(undefined);
     setCompletionHint(undefined);
     setCompletionSuggestionIndex(0);
     setCompletionCycleQuery(undefined);
@@ -179,6 +177,7 @@ export function App({ controller }: AppProps) {
     setCompletionHint(undefined);
     setCompletionSuggestionIndex(0);
     setCompletionCycleQuery(undefined);
+    setLocalError(undefined);
     setHistoryState({
       index: null,
       draft: "",
@@ -187,8 +186,24 @@ export function App({ controller }: AppProps) {
       setInput("");
       return;
     }
-    void controller.submitInput(trimmed);
+    runControllerAction(controller.submitInput(trimmed), "发送输入失败");
     setInput("");
+  }
+
+  function runControllerAction(
+    action: Promise<void>,
+    fallbackMessage: string,
+  ): void {
+    void action.catch((error) => {
+      setLocalError(formatActionError(error, fallbackMessage));
+    });
+  }
+
+  function formatActionError(error: unknown, fallbackMessage: string): string {
+    if (error instanceof Error && error.message.trim().length > 0) {
+      return error.message;
+    }
+    return fallbackMessage;
   }
 
   const completionPreview = getCompletionPreview(
@@ -202,12 +217,7 @@ export function App({ controller }: AppProps) {
   });
 
   return (
-    <Box
-      flexDirection="column"
-      gap={1}
-      height={terminalHeight}
-      overflow={shouldConstrainLayout ? "hidden" : undefined}
-    >
+    <Box flexDirection="column" gap={1}>
       <Text color="green">QAgent CLI v1</Text>
       <StatusBar
         executorKind={state.activeExecutorKind}
@@ -227,17 +237,13 @@ export function App({ controller }: AppProps) {
         <Text color="cyan">helper: {state.helperActivities.join(" | ")}</Text>
       ) : null}
       {state.pendingApproval ? <ApprovalModal request={state.pendingApproval} /> : null}
-      <Box
-        flexGrow={shouldConstrainLayout ? 1 : undefined}
-        minHeight={shouldConstrainLayout ? 8 : undefined}
-        overflow={shouldConstrainLayout ? "hidden" : undefined}
-      >
+      <Box>
         <MessageList
           messages={state.uiMessages}
           draftAssistantText={state.draftAssistantText}
-          constrained={shouldConstrainLayout}
         />
       </Box>
+      {localError ? <Text color="red">{localError}</Text> : null}
       <InputBox
         value={input}
         disabled={Boolean(state.pendingApproval)}
