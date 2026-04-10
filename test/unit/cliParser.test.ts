@@ -41,4 +41,26 @@ describe("CLI / Slash parser", () => {
     expect(cli.mode).toBe("tui");
     expect(cli.cliOptions.initialPrompt).toBe("帮我看看当前项目结构");
   });
+
+  it("支持 edge 子命令与远程 transport 参数", () => {
+    const cli = parseCliInvocation([
+      "--transport",
+      "remote",
+      "--workspace",
+      "workspace-alpha",
+      "--edge-url",
+      "https://edge.example.com",
+      "--api-token",
+      "secret-token",
+      "edge",
+      "status",
+    ]);
+
+    expect(cli.mode).toBe("edge");
+    expect(cli.edgeAction).toBe("status");
+    expect(cli.cliOptions.transportMode).toBe("remote");
+    expect(cli.cliOptions.workspaceId).toBe("workspace-alpha");
+    expect(cli.cliOptions.edgeBaseUrl).toBe("https://edge.example.com");
+    expect(cli.cliOptions.apiToken).toBe("secret-token");
+  });
 });

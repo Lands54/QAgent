@@ -24,6 +24,7 @@ export function WorklineList({ worklines, activeWorklineId }: WorklineListProps)
           <Text color="gray">
             status={workline.status}
             {workline.pendingApproval ? " | pending=approval" : ""}
+            {workline.queuedInputCount > 0 ? ` | queue=${workline.queuedInputCount}` : ""}
             {workline.attachmentLabel ? ` | bookmark=${workline.attachmentLabel}` : ""}
             {workline.writeLock ? ` | lock=${workline.writeLock}` : ""}
             {workline.detail ? ` | detail=${workline.detail}` : ""}

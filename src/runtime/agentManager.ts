@@ -329,6 +329,7 @@ export class AgentManager {
       executorKind: agent.kind,
       helperType: agent.helperType,
       pendingApproval: agent.pendingApproval,
+      queuedInputCount: agent.queuedInputCount,
       lastUserPrompt: agent.lastUserPrompt,
       active: false,
     };
@@ -453,6 +454,7 @@ export class AgentManager {
       executorKind: agent.kind,
       helperType: agent.helperType,
       pendingApproval: agent.pendingApproval,
+      queuedInputCount: agent.queuedInputCount,
       lastUserPrompt: agent.lastUserPrompt,
       active: runtime.headId === this.registry.getActiveRuntime().headId,
     };
@@ -702,6 +704,7 @@ export class AgentManager {
 
   public async dispose(): Promise<void> {
     await this.lifecycle.disposeAll();
+    await this.sessionService.dispose();
   }
 
   public async switchAgent(agentId: string): Promise<AgentViewState> {

@@ -1,12 +1,11 @@
-import { Box, Text, useApp, useInput } from "ink";
-import { useEffect, useState } from "react";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { useEffect, useRef, useState } from "react";
 
-import { ApprovalModal } from "./ApprovalModal.js";
-import { WorklineList } from "./WorklineList.js";
 import {
   isNextAgentShortcut,
   isPreviousAgentShortcut,
 } from "./agentNavigationShortcuts.js";
+import { ApprovalModal } from "./ApprovalModal.js";
 import { InputBox } from "./InputBox.js";
 import {
   completeInput,
@@ -18,6 +17,7 @@ import {
 import { MessageList } from "./MessageList.js";
 import { buildFooterHint } from "./presentation/footerHint.js";
 import { StatusBar } from "./StatusBar.js";
+import { WorklineList } from "./WorklineList.js";
 import type { AppControllerLike, AppState } from "../runtime/index.js";
 
 interface AppProps {
@@ -26,6 +26,8 @@ interface AppProps {
 
 export function App({ controller }: AppProps) {
   const [state, setState] = useState<AppState>(controller.getState());
+  const pendingStateRef = useRef<AppState>();
+  const stateFlushTimerRef = useRef<NodeJS.Timeout>();
   const [input, setInput] = useState("");
   const [completionHint, setCompletionHint] = useState<string>();
   const [completionSuggestionIndex, setCompletionSuggestionIndex] = useState(0);
@@ -35,11 +37,36 @@ export function App({ controller }: AppProps) {
     draft: "",
   });
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const inputHistory = extractUserInputHistory(state.modelMessages);
+  const shouldConstrainLayout = Boolean(stdout.isTTY);
+  const terminalHeight = shouldConstrainLayout
+    ? Math.max(stdout.rows ?? 24, 18)
+    : undefined;
 
   useEffect(() => {
-    return controller.subscribe(setState);
+    return controller.subscribe((nextState) => {
+      pendingStateRef.current = nextState;
+      if (stateFlushTimerRef.current) {
+        return;
+      }
+      stateFlushTimerRef.current = setTimeout(() => {
+        stateFlushTimerRef.current = undefined;
+        if (pendingStateRef.current) {
+          setState(pendingStateRef.current);
+          pendingStateRef.current = undefined;
+        }
+      }, 33);
+    });
   }, [controller]);
+
+  useEffect(() => {
+    return () => {
+      if (stateFlushTimerRef.current) {
+        clearTimeout(stateFlushTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     setHistoryState({
@@ -175,13 +202,19 @@ export function App({ controller }: AppProps) {
   });
 
   return (
-    <Box flexDirection="column" gap={1}>
+    <Box
+      flexDirection="column"
+      gap={1}
+      height={terminalHeight}
+      overflow={shouldConstrainLayout ? "hidden" : undefined}
+    >
       <Text color="green">QAgent CLI v1</Text>
       <StatusBar
         executorKind={state.activeExecutorKind}
         worklineId={state.activeWorklineId}
         worklineName={state.activeWorklineName}
         sessionId={state.sessionId}
+        queuedInputCount={state.activeQueuedInputCount}
         bookmarkLabel={state.activeBookmarkLabel}
         shellCwd={state.shellCwd}
         approvalMode={state.approvalMode}
@@ -194,10 +227,17 @@ export function App({ controller }: AppProps) {
         <Text color="cyan">helper: {state.helperActivities.join(" | ")}</Text>
       ) : null}
       {state.pendingApproval ? <ApprovalModal request={state.pendingApproval} /> : null}
-      <MessageList
-        messages={state.uiMessages}
-        draftAssistantText={state.draftAssistantText}
-      />
+      <Box
+        flexGrow={shouldConstrainLayout ? 1 : undefined}
+        minHeight={shouldConstrainLayout ? 8 : undefined}
+        overflow={shouldConstrainLayout ? "hidden" : undefined}
+      >
+        <MessageList
+          messages={state.uiMessages}
+          draftAssistantText={state.draftAssistantText}
+          constrained={shouldConstrainLayout}
+        />
+      </Box>
       <InputBox
         value={input}
         disabled={Boolean(state.pendingApproval)}

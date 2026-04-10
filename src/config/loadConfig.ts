@@ -14,6 +14,8 @@ interface PartialRuntimeConfig {
   model?: Partial<RuntimeConfig["model"]>;
   runtime?: Partial<RuntimeConfig["runtime"]>;
   tool?: Partial<RuntimeConfig["tool"]>;
+  gateway?: Partial<RuntimeConfig["gateway"]>;
+  edge?: Partial<RuntimeConfig["edge"]>;
 }
 
 function omitUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
@@ -123,6 +125,14 @@ function mergeConfig(
       ...baseConfig.tool,
       ...omitUndefined(partial.tool ?? {}),
     },
+    gateway: {
+      ...baseConfig.gateway,
+      ...omitUndefined(partial.gateway ?? {}),
+    },
+    edge: {
+      ...baseConfig.edge,
+      ...omitUndefined(partial.edge ?? {}),
+    },
   };
 }
 
@@ -179,6 +189,21 @@ function fromEnv(provider: ModelProvider): PartialRuntimeConfig {
       approvalMode: process.env.QAGENT_APPROVAL_MODE as RuntimeConfig["tool"]["approvalMode"] | undefined,
       shellExecutable: process.env.QAGENT_SHELL ?? process.env.SHELL,
     },
+    gateway: {
+      transportMode:
+        process.env.QAGENT_TRANSPORT_MODE === "remote"
+          ? "remote"
+          : process.env.QAGENT_TRANSPORT_MODE === "local"
+            ? "local"
+            : undefined,
+      workspaceId: process.env.QAGENT_WORKSPACE_ID,
+      edgeBaseUrl: process.env.QAGENT_EDGE_BASE_URL,
+      apiToken: process.env.QAGENT_EDGE_API_TOKEN ?? process.env.QAGENT_API_TOKEN,
+    },
+    edge: {
+      bindHost: process.env.QAGENT_EDGE_BIND_HOST,
+      port: process.env.QAGENT_EDGE_PORT ? Number(process.env.QAGENT_EDGE_PORT) : undefined,
+    },
   };
 }
 
@@ -200,6 +225,16 @@ export async function loadRuntimeConfig(
     model: {
       provider: cliOptions.provider,
       model: cliOptions.model,
+    },
+    gateway: {
+      transportMode: cliOptions.transportMode,
+      workspaceId: cliOptions.workspaceId,
+      edgeBaseUrl: cliOptions.edgeBaseUrl,
+      apiToken: cliOptions.apiToken,
+    },
+    edge: {
+      bindHost: cliOptions.edgeBindHost,
+      port: cliOptions.edgePort,
     },
   };
   const provider = resolveProvider(cliOptions, [
@@ -236,6 +271,16 @@ export async function loadRuntimeConfig(
       shellExecutable: process.platform === "win32"
         ? "powershell.exe"
         : process.env.SHELL ?? "/bin/zsh",
+    },
+    gateway: {
+      transportMode: "local",
+      workspaceId: undefined,
+      edgeBaseUrl: undefined,
+      apiToken: undefined,
+    },
+    edge: {
+      bindHost: "127.0.0.1",
+      port: 8787,
     },
     cli: {
       initialPrompt: cliOptions.initialPrompt,

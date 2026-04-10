@@ -7,6 +7,7 @@ interface StatusBarProps {
   worklineId: string;
   worklineName?: string;
   sessionId: string;
+  queuedInputCount: number;
   bookmarkLabel?: string;
   shellCwd: string;
   approvalMode: string;
@@ -20,6 +21,7 @@ export function StatusBar({
   worklineId,
   worklineName,
   sessionId,
+  queuedInputCount,
   bookmarkLabel,
   shellCwd,
   approvalMode,
@@ -50,7 +52,7 @@ export function StatusBar({
         workline={worklineName ?? "N/A"} ({worklineId || "N/A"}) | executor={executorKind ?? "N/A"} | session={sessionId || "N/A"}
       </Text>
       <Text>
-        status={status.mode} | detail={status.detail} | bookmark={bookmarkLabel ?? "N/A"}
+        status={status.mode} | detail={status.detail} | queue={queuedInputCount} | bookmark={bookmarkLabel ?? "N/A"}
       </Text>
       <Text>
         shell={shellCwd} | approval={approvalMode} | skills={skillCount} | worklines={worklineCount}

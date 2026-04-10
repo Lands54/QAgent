@@ -4,20 +4,16 @@ import { fileURLToPath } from "node:url";
 
 import { loadRuntimeConfig } from "../config/index.js";
 import type { AppControllerLike, AppState } from "../runtime/index.js";
-import {
-  createEmptyState,
-} from "../runtime/index.js";
+import { createEmptyState } from "../runtime/index.js";
 import type {
   CliOptions,
   CommandRequest,
   CommandResult,
+  RuntimeConfig,
   RuntimeEvent,
 } from "../types.js";
-import { createId } from "../utils/index.js";
-import {
-  clearGatewayManifest,
-  readGatewayManifest,
-} from "./manifest.js";
+import { createId, getBuildInfo } from "../utils/index.js";
+import { clearGatewayManifest, readGatewayManifest } from "./manifest.js";
 import { GatewayServer } from "./gatewayServer.js";
 import type {
   GatewayCommandEnvelope,
@@ -26,11 +22,23 @@ import type {
   GatewayManifest,
   GatewayOpenClientResponse,
   GatewaySseEvent,
-  GatewayStateResponse,
 } from "./types.js";
 
 type Listener = (state: AppState) => void;
 type RuntimeEventListener = (event: RuntimeEvent) => void;
+
+interface BackendTransport {
+  openClient(clientLabel: "cli" | "tui" | "api"): Promise<GatewayOpenClientResponse>;
+  submitInput(clientId: string, input: string): Promise<{ exitRequested?: boolean }>;
+  executeCommand(clientId: string, request: CommandRequest): Promise<CommandResult>;
+  closeClient(clientId: string): Promise<void>;
+  openEventStream(
+    clientId: string,
+    onEvent: (event: GatewaySseEvent) => void,
+    signal: AbortSignal,
+  ): Promise<void>;
+  heartbeatExecutor(executorId: string, clientId: string): Promise<void>;
+}
 
 async function fetchJson<T>(
   url: string,
@@ -42,6 +50,15 @@ async function fetchJson<T>(
     throw new Error(text || `请求失败：${response.status}`);
   }
   return response.json() as Promise<T>;
+}
+
+function authHeaders(token?: string): Record<string, string> | undefined {
+  if (!token) {
+    return undefined;
+  }
+  return {
+    authorization: `Bearer ${token}`,
+  };
 }
 
 async function pingGateway(baseUrl: string): Promise<GatewayHealthResponse | undefined> {
@@ -63,6 +80,18 @@ async function waitForGateway(baseUrl: string, timeoutMs = 10_000): Promise<void
   throw new Error("等待 gateway 启动超时。");
 }
 
+function isGatewayCompatible(
+  config: RuntimeConfig,
+  health: GatewayHealthResponse,
+): boolean {
+  const buildInfo = getBuildInfo();
+  return (
+    health.version === buildInfo.version
+    && health.buildSha === buildInfo.buildSha
+    && health.workspaceId === (config.gateway.workspaceId ?? "local")
+  );
+}
+
 async function spawnGatewayProcess(cliOptions: CliOptions): Promise<void> {
   const scriptPath = fileURLToPath(new URL("../../bin/qagent.js", import.meta.url));
   const args = [scriptPath, "gateway", "serve"];
@@ -77,6 +106,18 @@ async function spawnGatewayProcess(cliOptions: CliOptions): Promise<void> {
   }
   if (cliOptions.model) {
     args.push("--model", cliOptions.model);
+  }
+  if (cliOptions.transportMode) {
+    args.push("--transport", cliOptions.transportMode);
+  }
+  if (cliOptions.workspaceId) {
+    args.push("--workspace", cliOptions.workspaceId);
+  }
+  if (cliOptions.edgeBaseUrl) {
+    args.push("--edge-url", cliOptions.edgeBaseUrl);
+  }
+  if (cliOptions.apiToken) {
+    args.push("--api-token", cliOptions.apiToken);
   }
   const child = spawn(process.execPath, args, {
     cwd: cliOptions.cwd ?? process.cwd(),
@@ -95,16 +136,29 @@ async function ensureGatewayManifest(
   const config = await loadRuntimeConfig(cliOptions);
   const sessionRoot = config.resolvedPaths.sessionRoot;
   let manifest = await readGatewayManifest(sessionRoot);
-  if (manifest && await pingGateway(manifest.baseUrl)) {
-    return {
-      manifest,
-      initialState: createEmptyState(config.cwd),
-    };
-  }
   if (manifest) {
+    const health = await pingGateway(manifest.baseUrl);
+    if (health && isGatewayCompatible(config, health)) {
+      return {
+        manifest,
+        initialState: createEmptyState(config.cwd),
+      };
+    }
+    if (health) {
+      try {
+        await fetchJson(`${manifest.baseUrl}/api/admin/stop`, {
+          method: "POST",
+        });
+      } catch {
+        // ignore restart failures
+      }
+    }
     await clearGatewayManifest(sessionRoot);
   }
-  await spawnGatewayProcess(cliOptions);
+  await spawnGatewayProcess({
+    ...cliOptions,
+    transportMode: "local",
+  });
 
   const startedAt = Date.now();
   while (Date.now() - startedAt < 10_000) {
@@ -149,6 +203,234 @@ async function readSseStream(
       onEvent(JSON.parse(dataLine.slice("data: ".length)) as GatewaySseEvent);
     }
   }
+}
+
+class LocalGatewayTransport implements BackendTransport {
+  public static async create(
+    cliOptions: CliOptions,
+  ): Promise<{
+    initialState: AppState;
+    transport: LocalGatewayTransport;
+  }> {
+    const { manifest, initialState } = await ensureGatewayManifest(cliOptions);
+    return {
+      initialState,
+      transport: new LocalGatewayTransport(manifest.baseUrl),
+    };
+  }
+
+  private constructor(private readonly baseUrl: string) {}
+
+  public async openClient(clientLabel: "cli" | "tui" | "api"): Promise<GatewayOpenClientResponse> {
+    return fetchJson<GatewayOpenClientResponse>(`${this.baseUrl}/api/clients/open`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ clientLabel }),
+    });
+  }
+
+  public async submitInput(
+    clientId: string,
+    input: string,
+  ): Promise<{ exitRequested?: boolean }> {
+    return fetchJson<{ exitRequested?: boolean }>(`${this.baseUrl}/api/input`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        clientId,
+        input,
+      }),
+    });
+  }
+
+  public async executeCommand(clientId: string, request: CommandRequest): Promise<CommandResult> {
+    const envelope: GatewayCommandEnvelope = {
+      commandId: createId("cmd"),
+      clientId,
+      request,
+    };
+    const result = await fetchJson<{
+      commandId: string;
+      result: CommandResult;
+    }>(`${this.baseUrl}/api/commands`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(envelope),
+    });
+    return result.result;
+  }
+
+  public async closeClient(clientId: string): Promise<void> {
+    await fetch(`${this.baseUrl}/api/clients/${clientId}`, {
+      method: "DELETE",
+    });
+  }
+
+  public async openEventStream(
+    clientId: string,
+    onEvent: (event: GatewaySseEvent) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const response = await fetch(
+      `${this.baseUrl}/api/events?clientId=${encodeURIComponent(clientId)}`,
+      {
+        signal,
+        headers: {
+          accept: "text/event-stream",
+        },
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`连接 gateway SSE 失败：${response.status}`);
+    }
+    await readSseStream(response, onEvent);
+  }
+
+  public async heartbeatExecutor(executorId: string, clientId: string): Promise<void> {
+    await fetch(`${this.baseUrl}/api/executors/${executorId}/heartbeat`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        clientId,
+      }),
+    });
+  }
+}
+
+class RemoteEdgeTransport implements BackendTransport {
+  public constructor(
+    private readonly edgeBaseUrl: string,
+    private readonly workspaceId: string,
+    private readonly apiToken: string,
+  ) {}
+
+  private get workspaceBaseUrl(): string {
+    return `${this.edgeBaseUrl}/v1/workspaces/${encodeURIComponent(this.workspaceId)}`;
+  }
+
+  public async openClient(clientLabel: "cli" | "tui" | "api"): Promise<GatewayOpenClientResponse> {
+    return fetchJson<GatewayOpenClientResponse>(`${this.workspaceBaseUrl}/clients/open`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...authHeaders(this.apiToken),
+      },
+      body: JSON.stringify({ clientLabel }),
+    });
+  }
+
+  public async submitInput(
+    clientId: string,
+    input: string,
+  ): Promise<{ exitRequested?: boolean }> {
+    return fetchJson<{ exitRequested?: boolean }>(`${this.workspaceBaseUrl}/input`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...authHeaders(this.apiToken),
+      },
+      body: JSON.stringify({
+        clientId,
+        input,
+      }),
+    });
+  }
+
+  public async executeCommand(clientId: string, request: CommandRequest): Promise<CommandResult> {
+    const envelope: GatewayCommandEnvelope = {
+      commandId: createId("cmd"),
+      clientId,
+      request,
+    };
+    const result = await fetchJson<{
+      commandId: string;
+      result: CommandResult;
+    }>(`${this.workspaceBaseUrl}/commands`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...authHeaders(this.apiToken),
+      },
+      body: JSON.stringify(envelope),
+    });
+    return result.result;
+  }
+
+  public async closeClient(clientId: string): Promise<void> {
+    await fetch(`${this.workspaceBaseUrl}/clients/${clientId}`, {
+      method: "DELETE",
+      headers: authHeaders(this.apiToken),
+    });
+  }
+
+  public async openEventStream(
+    clientId: string,
+    onEvent: (event: GatewaySseEvent) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const response = await fetch(
+      `${this.workspaceBaseUrl}/events?clientId=${encodeURIComponent(clientId)}`,
+      {
+        signal,
+        headers: {
+          accept: "text/event-stream",
+          ...authHeaders(this.apiToken),
+        },
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`连接 edge SSE 失败：${response.status}`);
+    }
+    await readSseStream(response, onEvent);
+  }
+
+  public async heartbeatExecutor(executorId: string, clientId: string): Promise<void> {
+    await fetch(`${this.workspaceBaseUrl}/executors/${executorId}/heartbeat`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...authHeaders(this.apiToken),
+      },
+      body: JSON.stringify({
+        clientId,
+      }),
+    });
+  }
+}
+
+async function createBackendTransport(
+  input: GatewayConnectionInput,
+): Promise<{
+  initialState: AppState;
+  transport: BackendTransport;
+}> {
+  const config = await loadRuntimeConfig(input.cliOptions);
+  if (config.gateway.transportMode === "remote") {
+    if (
+      !config.gateway.workspaceId
+      || !config.gateway.edgeBaseUrl
+      || !config.gateway.apiToken
+    ) {
+      throw new Error("远程模式需要 workspaceId、edgeBaseUrl、apiToken。");
+    }
+    return {
+      initialState: createEmptyState(config.cwd),
+      transport: new RemoteEdgeTransport(
+        config.gateway.edgeBaseUrl,
+        config.gateway.workspaceId,
+        config.gateway.apiToken,
+      ),
+    };
+  }
+  return LocalGatewayTransport.create(input.cliOptions);
 }
 
 export async function getGatewayStatus(
@@ -202,25 +484,14 @@ export async function serveGateway(cliOptions: CliOptions): Promise<void> {
   await server.waitUntilStopped();
 }
 
-export class GatewayClientController implements AppControllerLike {
+export class BackendClientController implements AppControllerLike {
   public static async create(
     input: GatewayConnectionInput,
-  ): Promise<GatewayClientController> {
-    const { manifest, initialState } = await ensureGatewayManifest(input.cliOptions);
-    const opened = await fetchJson<GatewayOpenClientResponse>(
-      `${manifest.baseUrl}/api/clients/open`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          clientLabel: input.clientLabel,
-        }),
-      },
-    );
-    const controller = new GatewayClientController(
-      manifest.baseUrl,
+  ): Promise<BackendClientController> {
+    const { initialState, transport } = await createBackendTransport(input);
+    const opened = await transport.openClient(input.clientLabel);
+    const controller = new BackendClientController(
+      transport,
       opened.clientId,
       opened.state ?? initialState,
     );
@@ -237,8 +508,8 @@ export class GatewayClientController implements AppControllerLike {
   private exitResolver?: () => void;
   private heartbeatTimer?: NodeJS.Timeout;
 
-  private constructor(
-    private readonly baseUrl: string,
+  protected constructor(
+    private readonly transport: BackendTransport,
     private readonly clientId: string,
     private state: AppState,
   ) {}
@@ -262,38 +533,14 @@ export class GatewayClientController implements AppControllerLike {
   }
 
   public async submitInput(input: string): Promise<void> {
-    const result = await fetchJson<{ exitRequested?: boolean }>(`${this.baseUrl}/api/input`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        clientId: this.clientId,
-        input,
-      }),
-    });
+    const result = await this.transport.submitInput(this.clientId, input);
     if (result.exitRequested) {
       await this.requestExit();
     }
   }
 
   public async executeCommand(request: CommandRequest): Promise<CommandResult> {
-    const envelope: GatewayCommandEnvelope = {
-      commandId: createId("cmd"),
-      clientId: this.clientId,
-      request,
-    };
-    const result = await fetchJson<{
-      commandId: string;
-      result: CommandResult;
-    }>(`${this.baseUrl}/api/commands`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(envelope),
-    });
-    return result.result;
+    return this.transport.executeCommand(this.clientId, request);
   }
 
   public async approvePendingRequest(approved: boolean): Promise<void> {
@@ -322,9 +569,7 @@ export class GatewayClientController implements AppControllerLike {
       clearInterval(this.heartbeatTimer);
     }
     try {
-      await fetch(`${this.baseUrl}/api/clients/${this.clientId}`, {
-        method: "DELETE",
-      });
+      await this.transport.closeClient(this.clientId);
     } catch {
       // ignore dispose errors
     }
@@ -360,32 +605,24 @@ export class GatewayClientController implements AppControllerLike {
   }
 
   private async startEventStream(): Promise<void> {
-    const response = await fetch(
-      `${this.baseUrl}/api/events?clientId=${encodeURIComponent(this.clientId)}`,
-      {
-        signal: this.abortController.signal,
-        headers: {
-          accept: "text/event-stream",
-        },
+    void this.transport.openEventStream(
+      this.clientId,
+      (event) => {
+        if (event.type === "state.snapshot") {
+          this.state = event.payload.state;
+          this.events.emit("state", this.state);
+          return;
+        }
+        if (event.type === "runtime.event") {
+          this.events.emit("runtime-event", event.payload.event);
+          return;
+        }
+        if (event.type === "gateway.stopping" || event.type === "gateway.disconnected") {
+          void this.requestExit();
+        }
       },
-    );
-    if (!response.ok) {
-      throw new Error(`连接 gateway SSE 失败：${response.status}`);
-    }
-    void readSseStream(response, (event) => {
-      if (event.type === "state.snapshot") {
-        this.state = event.payload.state;
-        this.events.emit("state", this.state);
-        return;
-      }
-      if (event.type === "runtime.event") {
-        this.events.emit("runtime-event", event.payload.event);
-        return;
-      }
-      if (event.type === "gateway.stopping") {
-        void this.requestExit();
-      }
-    }).catch(() => {});
+      this.abortController.signal,
+    ).catch(() => {});
   }
 
   private startHeartbeat(): void {
@@ -393,15 +630,13 @@ export class GatewayClientController implements AppControllerLike {
       if (!this.state.activeExecutorId) {
         return;
       }
-      void fetch(`${this.baseUrl}/api/executors/${this.state.activeExecutorId}/heartbeat`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          clientId: this.clientId,
-        }),
-      }).catch(() => {});
+      void this.transport.heartbeatExecutor(
+        this.state.activeExecutorId,
+        this.clientId,
+      ).catch(() => {});
     }, 5_000);
+    this.heartbeatTimer.unref?.();
   }
 }
+
+export { BackendClientController as GatewayClientController };

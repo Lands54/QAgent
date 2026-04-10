@@ -3,6 +3,7 @@ export type SkillScope = "project" | "global";
 export type ToolName = "shell";
 export type ModelProvider = "openai" | "openrouter";
 export type AgentKind = "interactive" | "task";
+export type TransportMode = "local" | "remote";
 export type HelperAgentType =
   | "fetch-memory"
   | "save-memory"
@@ -67,6 +68,16 @@ export interface RuntimeConfig {
     approvalMode: ApprovalMode;
     shellExecutable: string;
   };
+  gateway: {
+    transportMode: TransportMode;
+    workspaceId?: string;
+    edgeBaseUrl?: string;
+    apiToken?: string;
+  };
+  edge: {
+    bindHost: string;
+    port: number;
+  };
   cli: {
     initialPrompt?: string;
     resumeSessionId?: string;
@@ -79,9 +90,205 @@ export interface CliOptions {
   configPath?: string;
   provider?: ModelProvider;
   model?: string;
+  transportMode?: TransportMode;
+  workspaceId?: string;
+  edgeBaseUrl?: string;
+  apiToken?: string;
+  edgeBindHost?: string;
+  edgePort?: number;
   initialPrompt?: string;
   resumeSessionId?: string;
   help?: boolean;
+}
+
+export interface EdgeManifest {
+  pid: number;
+  port: number;
+  baseUrl: string;
+  startedAt: string;
+  updatedAt: string;
+  version: string;
+  buildSha: string;
+}
+
+export interface GatewayHealthSummary {
+  clientCount: number;
+  leaseCount: number;
+  localBaseUrl: string;
+  lastUpdatedAt: string;
+}
+
+export interface WorkspaceRegistration {
+  workspaceId: string;
+  sessionRoot: string;
+  pid: number;
+  version: string;
+  buildSha: string;
+  capabilities: string[];
+  connectedAt: string;
+  lastSeenAt: string;
+  health: GatewayHealthSummary;
+}
+
+export interface GatewayConnectionState {
+  workspaceId: string;
+  online: boolean;
+  sessionRoot?: string;
+  pid?: number;
+  version?: string;
+  buildSha?: string;
+  connectedAt?: string;
+  lastSeenAt?: string;
+  health?: GatewayHealthSummary;
+}
+
+export interface RemoteClientSession {
+  clientId: string;
+  workspaceId: string;
+  clientLabel: "cli" | "tui" | "api";
+  createdAt: string;
+  lastSeenAt: string;
+}
+
+export interface EdgeGatewayCommandEnvelope {
+  commandId: string;
+  clientId: string;
+  executorId?: string;
+  request: CommandRequest;
+}
+
+export type EdgeGatewayRpcAction =
+  | {
+      kind: "openClient";
+      payload: {
+        clientId?: string;
+        clientLabel: "cli" | "tui" | "api";
+      };
+    }
+  | {
+      kind: "closeClient";
+      payload: {
+        clientId: string;
+      };
+    }
+  | {
+      kind: "getState";
+      payload: {
+        clientId: string;
+      };
+    }
+  | {
+      kind: "submitInput";
+      payload: {
+        clientId: string;
+        input: string;
+      };
+    }
+  | {
+      kind: "executeCommand";
+      payload: EdgeGatewayCommandEnvelope;
+    }
+  | {
+      kind: "openExecutor";
+      payload: {
+        clientId: string;
+        worklineId?: string;
+      };
+    }
+  | {
+      kind: "heartbeatExecutor";
+      payload: {
+        executorId: string;
+        clientId: string;
+      };
+    }
+  | {
+      kind: "releaseExecutor";
+      payload: {
+        executorId: string;
+        clientId?: string;
+      };
+    }
+  | {
+      kind: "stopGateway";
+      payload: {
+        reason?: string;
+      };
+    };
+
+export interface GatewayRegisterMessage {
+  type: "gateway.register";
+  requestId: string;
+  payload: {
+    workspaceId: string;
+    sessionRoot: string;
+    pid: number;
+    version: string;
+    buildSha: string;
+    capabilities: string[];
+    health: GatewayHealthSummary;
+  };
+}
+
+export interface GatewayRegisteredMessage {
+  type: "gateway.registered";
+  requestId: string;
+  payload: {
+    workspaceId: string;
+    connectedAt: string;
+  };
+}
+
+export interface EdgeGatewayRpcRequest {
+  type: "gateway.rpc.request";
+  requestId: string;
+  workspaceId: string;
+  action: EdgeGatewayRpcAction;
+}
+
+export type EdgeGatewayRpcResult =
+  | {
+      type: "gateway.rpc.result";
+      requestId: string;
+      workspaceId: string;
+      ok: true;
+      payload: unknown;
+    }
+  | {
+      type: "gateway.rpc.result";
+      requestId: string;
+      workspaceId: string;
+      ok: false;
+      error: string;
+    };
+
+export interface GatewayEventEnvelope {
+  type: "gateway.event";
+  workspaceId: string;
+  event: unknown;
+}
+
+export interface GatewayHealthEnvelope {
+  type: "gateway.health";
+  workspaceId: string;
+  payload: GatewayHealthSummary;
+}
+
+export type EdgeGatewaySocketMessage =
+  | GatewayRegisterMessage
+  | GatewayRegisteredMessage
+  | EdgeGatewayRpcRequest
+  | EdgeGatewayRpcResult
+  | GatewayEventEnvelope
+  | GatewayHealthEnvelope;
+
+export interface EdgeHealthResponse {
+  ok: true;
+  pid: number;
+  baseUrl: string;
+  workspaceCount: number;
+  version: string;
+  buildSha: string;
 }
 
 export type CommandDomain =
@@ -797,6 +1004,7 @@ export interface AgentViewState extends AgentRecord {
   shellCwd: string;
   dirty: boolean;
   pendingApproval?: ApprovalRequest;
+  queuedInputCount: number;
   lastUserPrompt?: string;
 }
 
@@ -814,6 +1022,7 @@ export interface WorklineView {
   executorKind?: AgentKind;
   helperType?: HelperAgentType;
   pendingApproval?: ApprovalRequest;
+  queuedInputCount: number;
   lastUserPrompt?: string;
   active: boolean;
 }

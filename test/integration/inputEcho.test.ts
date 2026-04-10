@@ -88,6 +88,38 @@ class SlowFetchMemoryModelClient implements ModelClient {
   }
 }
 
+class QueuedInputModelClient implements ModelClient {
+  public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
+    const latestUserMessage = [...request.messages]
+      .reverse()
+      .find((message) => message.role === "user");
+    const latestContent = latestUserMessage?.content ?? "";
+
+    if (latestContent.includes("first")) {
+      await sleep(150);
+      return {
+        assistantText: "done:first",
+        toolCalls: [],
+        finishReason: "stop",
+      };
+    }
+
+    if (latestContent.includes("second")) {
+      return {
+        assistantText: "done:second",
+        toolCalls: [],
+        finishReason: "stop",
+      };
+    }
+
+    return {
+      assistantText: "done:unknown",
+      toolCalls: [],
+      finishReason: "stop",
+    };
+  }
+}
+
 async function createAgentManager(
   config: RuntimeConfig,
   modelClient: ModelClient,
@@ -154,6 +186,46 @@ describe("input echo integration", () => {
       expect(finalUserModelMessage?.content).toContain(
         "以下是系统自动补充的 Memory.md 参考",
       );
+    } finally {
+      await agentManager.dispose();
+    }
+  });
+
+  it("运行中连续输入会进入 FIFO 队列并顺序执行", async () => {
+    const projectDir = await makeTempDir("qagent-input-queue-");
+    const config = buildConfig(projectDir);
+    const agentManager = await createAgentManager(
+      config,
+      new QueuedInputModelClient(),
+    );
+
+    try {
+      agentManager.setFetchMemoryHookEnabled(false);
+      agentManager.setSaveMemoryHookEnabled(false);
+
+      const first = agentManager.submitInputToActiveAgent("first");
+      await sleep(30);
+      const second = agentManager.submitInputToActiveAgent("second");
+      await sleep(30);
+
+      expect(agentManager.getActiveRuntime().getViewState().queuedInputCount).toBe(1);
+      expect(agentManager.getExecutorStatus().queuedInputCount).toBe(1);
+      expect(agentManager.getWorklineStatus().queuedInputCount).toBe(1);
+
+      await Promise.all([first, second]);
+
+      const snapshot = agentManager.getActiveRuntime().getSnapshot();
+      const userMessages = snapshot.uiMessages
+        .filter((message) => message.role === "user")
+        .map((message) => message.content);
+      const assistantMessages = snapshot.uiMessages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.content);
+
+      expect(userMessages.slice(-2)).toEqual(["first", "second"]);
+      expect(assistantMessages.slice(-2)).toEqual(["done:first", "done:second"]);
+      expect(agentManager.getExecutorStatus().queuedInputCount).toBe(0);
+      expect(agentManager.getWorklineStatus().queuedInputCount).toBe(0);
     } finally {
       await agentManager.dispose();
     }

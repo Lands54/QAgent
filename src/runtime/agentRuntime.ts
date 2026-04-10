@@ -58,6 +58,14 @@ interface PendingApprovalState {
 
 type ApprovalHandlingMode = "interactive" | "checkpoint";
 
+interface QueuedInputTask {
+  input: string;
+  buildModelInputAppendix?: () => Promise<string | undefined>;
+  approvalMode?: ApprovalHandlingMode;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
 export interface AgentRuntimePolicy {
   kind: AgentKind;
   autoMemoryFork: boolean;
@@ -176,6 +184,8 @@ export class HeadAgentRuntime {
   private readonly policy: AgentRuntimePolicy;
   private readonly runtimeApprovalPolicy: ApprovalPolicy;
   private approvalHandlingMode: ApprovalHandlingMode = "interactive";
+  private readonly queuedInputs: QueuedInputTask[] = [];
+  private drainingInputQueue = false;
 
   public constructor(private readonly options: HeadAgentRuntimeOptions) {
     this.config = options.config;
@@ -271,6 +281,10 @@ export class HeadAgentRuntime {
     return this.pendingApproval?.checkpoint;
   }
 
+  public getQueuedInputCount(): number {
+    return this.queuedInputs.length;
+  }
+
   public isRunning(): boolean {
     return this.agentRunner.isRunning();
   }
@@ -322,6 +336,7 @@ export class HeadAgentRuntime {
       shellCwd: this.getShellCwd(),
       dirty: this.ref?.dirty ?? false,
       pendingApproval: this.pendingApproval?.request,
+      queuedInputCount: this.queuedInputs.length,
       lastUserPrompt: this.options.snapshot.lastUserPrompt,
       createdAt: this.options.head.createdAt,
       updatedAt: this.options.head.updatedAt,
@@ -332,7 +347,7 @@ export class HeadAgentRuntime {
     config: RuntimeConfig,
     modelClient: ModelClient,
   ): Promise<void> {
-    if (this.isRunning()) {
+    if (this.isRunning() || this.queuedInputs.length > 0) {
       throw new Error(`Agent 正在运行，无法更新模型：${this.options.head.name}`);
     }
     this.config = config;
@@ -467,74 +482,27 @@ export class HeadAgentRuntime {
       return;
     }
 
-    if (this.isRunning()) {
-      await this.appendUiOnlyMessage({
-        id: createId("ui"),
-        role: "error",
-        content: "Agent 正在执行中。可先中断，再提交新任务。",
-        createdAt: new Date().toISOString(),
+    return new Promise<void>((resolve, reject) => {
+      this.queuedInputs.push({
+        input: trimmed,
+        buildModelInputAppendix: options?.buildModelInputAppendix,
+        approvalMode: options?.approvalMode,
+        resolve,
+        reject,
       });
-      return;
-    }
-
-    const autoBranch = await this.options.sessionService.prepareHeadForUserInput(
-      this.headId,
-      this.options.snapshot,
-    );
-    if (autoBranch) {
-      this.options.head = autoBranch.head;
-      this.ref = autoBranch.ref;
-      await this.appendUiOnlyMessage({
-        id: createId("ui"),
-        role: "info",
-        content: autoBranch.message,
-        createdAt: new Date().toISOString(),
-      });
-    }
-
-    const now = new Date().toISOString();
-    const modelMessageId = createId("llm");
-    const modelInput = this.buildModelUserInput(trimmed, now);
-    await this.appendConversationEntryInternal(
-      createConversationEntry({
-        kind: "user-input",
-        createdAt: now,
-        ui: {
-          id: createId("ui"),
-          role: "user",
-          content: trimmed,
-          createdAt: now,
-        },
-        model: {
-          id: modelMessageId,
-          role: "user",
-          content: modelInput,
-          createdAt: now,
-        },
-      }),
-    );
-    this.options.snapshot.lastUserPrompt = trimmed;
-    await this.persistEvent(
-      createConversationLastUserPromptSetEvent({
-        workingHeadId: this.headId,
-        sessionId: this.sessionId,
-        prompt: trimmed,
-      }),
-    );
-    await this.persistSnapshot();
-
-    this.approvalHandlingMode = options?.approvalMode ?? "interactive";
-    await this.enrichUserInputBeforeRunLoop({
-      modelMessageId,
-      rawInput: trimmed,
-      createdAt: now,
-      buildModelInputAppendix: options?.buildModelInputAppendix,
+      this.options.callbacks.onStateChanged(this);
+      void this.drainInputQueue();
     });
-    await this.runLoop();
   }
 
-  public async runLoop(): Promise<void> {
-    await this.agentRunner.runLoop();
+  public async runLoop(input?: {
+    startStep?: number;
+    toolCalls?: ReadonlyArray<ToolCall>;
+    nextToolCallIndex?: number;
+    assistantMessageId?: string;
+  }): Promise<void> {
+    await this.agentRunner.runLoop(input);
+    this.scheduleInputQueueDrain();
   }
 
   public async interrupt(): Promise<void> {
@@ -668,6 +636,7 @@ export class HeadAgentRuntime {
     this.status = "closed";
     this.statusDetail = "已关闭";
     this.pendingApproval = undefined;
+    this.clearQueuedInputs();
     this.options.callbacks.onStateChanged(this);
   }
 
@@ -676,7 +645,49 @@ export class HeadAgentRuntime {
       return;
     }
     this.disposed = true;
+    this.clearQueuedInputs();
     await this.shellTool.dispose();
+  }
+
+  private async drainInputQueue(): Promise<void> {
+    if (this.drainingInputQueue || this.disposed || this.pendingApproval || this.isRunning()) {
+      return;
+    }
+    const next = this.queuedInputs.shift();
+    if (!next) {
+      return;
+    }
+
+    this.drainingInputQueue = true;
+    this.options.callbacks.onStateChanged(this);
+    try {
+      await this.executeQueuedInput(next);
+      next.resolve();
+    } catch (error) {
+      next.reject(error);
+    } finally {
+      this.drainingInputQueue = false;
+      this.options.callbacks.onStateChanged(this);
+      this.scheduleInputQueueDrain();
+    }
+  }
+
+  private scheduleInputQueueDrain(): void {
+    if (this.disposed || this.pendingApproval || this.isRunning()) {
+      return;
+    }
+    if (this.queuedInputs.length === 0) {
+      this.options.callbacks.onStateChanged(this);
+      return;
+    }
+    void this.drainInputQueue();
+  }
+
+  private clearQueuedInputs(): void {
+    const queued = this.queuedInputs.splice(0, this.queuedInputs.length);
+    for (const task of queued) {
+      task.resolve();
+    }
   }
 
   private createRunner(): AgentRunner {
@@ -768,6 +779,63 @@ export class HeadAgentRuntime {
           this.policy.maxAgentSteps ?? this.config.runtime.maxAgentSteps,
       },
     };
+  }
+
+  private async executeQueuedInput(task: QueuedInputTask): Promise<void> {
+    const now = new Date().toISOString();
+    const modelMessageId = createId("llm");
+    const modelInput = this.buildModelUserInput(task.input, now);
+    await this.appendConversationEntryInternal(
+      createConversationEntry({
+        kind: "user-input",
+        createdAt: now,
+        ui: {
+          id: createId("ui"),
+          role: "user",
+          content: task.input,
+          createdAt: now,
+        },
+        model: {
+          id: modelMessageId,
+          role: "user",
+          content: modelInput,
+          createdAt: now,
+        },
+      }),
+    );
+    this.options.snapshot.lastUserPrompt = task.input;
+    await this.persistEvent(
+      createConversationLastUserPromptSetEvent({
+        workingHeadId: this.headId,
+        sessionId: this.sessionId,
+        prompt: task.input,
+      }),
+    );
+    await this.persistSnapshot();
+
+    const autoBranch = await this.options.sessionService.prepareHeadForUserInput(
+      this.headId,
+      this.options.snapshot,
+    );
+    if (autoBranch) {
+      this.options.head = autoBranch.head;
+      this.ref = autoBranch.ref;
+      await this.appendUiOnlyMessage({
+        id: createId("ui"),
+        role: "info",
+        content: autoBranch.message,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    this.approvalHandlingMode = task.approvalMode ?? "interactive";
+    await this.enrichUserInputBeforeRunLoop({
+      modelMessageId,
+      rawInput: task.input,
+      createdAt: now,
+      buildModelInputAppendix: task.buildModelInputAppendix,
+    });
+    await this.runLoop();
   }
 
   private buildModelUserInput(
@@ -1128,7 +1196,7 @@ export class HeadAgentRuntime {
       checkpoint.resumeState.nextToolCallIndex
     ];
     if (!currentToolCall) {
-      await this.agentRunner.runLoop({
+      await this.runLoop({
         startStep: checkpoint.resumeState.step + 1,
       });
       return;
@@ -1154,7 +1222,7 @@ export class HeadAgentRuntime {
     const nextToolCallIndex = checkpoint.resumeState.nextToolCallIndex + 1;
     if (nextToolCallIndex < checkpoint.resumeState.toolCalls.length) {
       this.approvalHandlingMode = "checkpoint";
-      await this.agentRunner.runLoop({
+      await this.runLoop({
         startStep: checkpoint.resumeState.step,
         toolCalls: checkpoint.resumeState.toolCalls,
         nextToolCallIndex,
@@ -1164,7 +1232,7 @@ export class HeadAgentRuntime {
     }
 
     this.approvalHandlingMode = "checkpoint";
-    await this.agentRunner.runLoop({
+    await this.runLoop({
       startStep: checkpoint.resumeState.step + 1,
     });
   }

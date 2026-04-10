@@ -247,6 +247,7 @@ describe("SessionService", () => {
       },
     ]);
 
+    await service.dispose();
     const resumedService = new SessionService(root);
     const resumed = await resumedService.initialize({
       cwd: "/tmp/project",
@@ -257,6 +258,7 @@ describe("SessionService", () => {
 
     expect(checkout.head.currentNodeId).toBe(firstCommit.commit.nodeId);
     expect(checkout.snapshot.modelMessages.at(-1)?.content).toBe("first commit summary");
+    await resumedService.dispose();
   });
 
   it("已有 repo 时，显式 resume 指定 sessionId 会切换到对应 working head", async () => {
@@ -277,7 +279,9 @@ describe("SessionService", () => {
     };
     await service.persistWorkingSnapshot(forkSnapshot);
 
-    const resumed = await new SessionService(root).initialize({
+    await service.dispose();
+    const resumedService = new SessionService(root);
+    const resumed = await resumedService.initialize({
       cwd: "/tmp/project",
       shellCwd: "/tmp/project",
       approvalMode: "always",
@@ -288,6 +292,55 @@ describe("SessionService", () => {
     expect(resumed.snapshot.shellCwd).toBe("/tmp/project/worker-a");
     expect(resumed.ref.workingHeadId).toBe(forked.head.id);
     expect(resumed.head.name).toBe("worker-a");
+    await resumedService.dispose();
+  });
+
+  it("同一 sessionRoot 下第二个 SessionService 不能同时 initialize", async () => {
+    const root = await makeTempDir("qagent-session-single-owner-");
+    const first = new SessionService(root, [], {
+      ownerKind: "test-first",
+      processLeaseHeartbeatMs: 5,
+      processLeaseTtlMs: 20,
+      mutationHeartbeatMs: 5,
+      mutationTtlMs: 20,
+      mutationPollMs: 5,
+    });
+    const second = new SessionService(root, [], {
+      ownerKind: "test-second",
+      processLeaseHeartbeatMs: 5,
+      processLeaseTtlMs: 20,
+      mutationHeartbeatMs: 5,
+      mutationTtlMs: 20,
+      mutationPollMs: 5,
+    });
+
+    await first.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+
+    await expect(
+      second.initialize({
+        cwd: "/tmp/project",
+        shellCwd: "/tmp/project",
+        approvalMode: "always",
+      }),
+    ).rejects.toThrow(/session lock process 当前已被占用/);
+
+    await first.dispose();
+    await expect(
+      second.initialize({
+        cwd: "/tmp/project",
+        shellCwd: "/tmp/project",
+        approvalMode: "always",
+      }),
+    ).resolves.toMatchObject({
+      ref: {
+        label: "branch=main",
+      },
+    });
+    await second.dispose();
   });
 
   it("能尽力迁移 v1 session repo，并导入旧 session 为 working heads", async () => {

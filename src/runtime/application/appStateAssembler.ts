@@ -71,6 +71,7 @@ export class AppStateAssembler {
       activeWorklineName: input.activeView.name,
       activeExecutorId: input.activeView.id,
       activeExecutorKind: input.activeView.kind,
+      activeQueuedInputCount: input.activeView.queuedInputCount,
       activeBookmarkLabel: input.activeRuntime.getRef()?.label,
       worklines: input.worklines,
       executors: input.executors,

@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
-import { createId } from "../utils/index.js";
+import { createId, getBuildInfo } from "../utils/index.js";
 import { clearGatewayManifest, writeGatewayManifest } from "./manifest.js";
+import { GatewayEdgeBridgeClient } from "./edgeBridgeClient.js";
 import { GatewayHost } from "./gatewayHost.js";
 import type {
   GatewayCommandEnvelope,
@@ -52,6 +53,7 @@ export class GatewayServer {
     this.stopResolver = resolve;
   });
   private stopResolver?: () => void;
+  private edgeBridge?: GatewayEdgeBridgeClient;
   private readonly heartbeatSweepTimer = setInterval(() => {
     this.host.sweepExpiredLeases(20_000);
   }, 5_000);
@@ -63,7 +65,11 @@ export class GatewayServer {
           writeSse(client.response, event);
           continue;
         }
-        if (event.type === "gateway.stopping" || client.clientId === event.clientId) {
+        if (
+          event.type === "gateway.stopping"
+          || event.type === "gateway.disconnected"
+          || ("clientId" in event && client.clientId === event.clientId)
+        ) {
           writeSse(client.response, event);
         }
       }
@@ -83,15 +89,46 @@ export class GatewayServer {
     }
     const port = address.port;
     const baseUrl = `http://127.0.0.1:${port}`;
+    const buildInfo = getBuildInfo();
+    const workspaceId = this.host.getConfig().gateway.workspaceId ?? "local";
     await writeGatewayManifest(this.host.getConfig().resolvedPaths.sessionRoot, {
       pid: process.pid,
       port,
       baseUrl,
       cwd: this.host.getConfig().cwd,
       sessionRoot: this.host.getConfig().resolvedPaths.sessionRoot,
+      workspaceId,
+      version: buildInfo.version,
+      buildSha: buildInfo.buildSha,
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
+    const gatewayConfig = this.host.getConfig().gateway;
+    const hasRemoteConfig = Boolean(
+      gatewayConfig.workspaceId
+      || gatewayConfig.edgeBaseUrl
+      || gatewayConfig.apiToken,
+    );
+    if (hasRemoteConfig) {
+      if (
+        !gatewayConfig.workspaceId
+        || !gatewayConfig.edgeBaseUrl
+        || !gatewayConfig.apiToken
+      ) {
+        throw new Error("gateway 远程注册配置不完整，需要 workspaceId、edgeBaseUrl、apiToken。");
+      }
+      this.edgeBridge = new GatewayEdgeBridgeClient({
+        host: this.host,
+        edgeBaseUrl: gatewayConfig.edgeBaseUrl,
+        workspaceId: gatewayConfig.workspaceId,
+        apiToken: gatewayConfig.apiToken,
+        localBaseUrl: baseUrl,
+        requestStop: (reason) => {
+          void this.stop(reason);
+        },
+      });
+      await this.edgeBridge.start();
+    }
     return {
       port,
       baseUrl,
@@ -103,6 +140,9 @@ export class GatewayServer {
   }
 
   public async stop(reason = "manual-stop"): Promise<void> {
+    await this.edgeBridge?.notifyStopping(reason);
+    await this.edgeBridge?.dispose();
+    this.edgeBridge = undefined;
     for (const client of this.sseClients) {
       writeSse(client.response, {
         id: createId("gw"),
@@ -135,13 +175,17 @@ export class GatewayServer {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     try {
       if (request.method === "GET" && url.pathname === "/api/health") {
+        const buildInfo = getBuildInfo();
         const payload: GatewayHealthResponse = {
           ok: true,
           pid: process.pid,
           cwd: this.host.getConfig().cwd,
           sessionRoot: this.host.getConfig().resolvedPaths.sessionRoot,
+          workspaceId: this.host.getConfig().gateway.workspaceId ?? "local",
           clientCount: this.host.getClientCount(),
           leaseCount: this.host.getLeaseCount(),
+          version: buildInfo.version,
+          buildSha: buildInfo.buildSha,
         };
         json(response, 200, payload);
         return;

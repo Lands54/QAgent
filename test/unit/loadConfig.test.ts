@@ -98,4 +98,29 @@ describe("loadRuntimeConfig", () => {
     expect(config.runtime.fetchMemoryMaxAgentSteps).toBe(3);
     expect(config.runtime.autoMemoryForkMaxAgentSteps).toBe(4);
   });
+
+  it("支持远程 gateway / edge 配置", async () => {
+    const tempHome = await makeTempDir("qagent-home-");
+    const tempProject = await makeTempDir("qagent-project-");
+    vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+    await mkdir(path.join(tempHome, ".agent"), { recursive: true });
+    await mkdir(path.join(tempProject, ".agent"), { recursive: true });
+
+    process.env.QAGENT_TRANSPORT_MODE = "remote";
+    process.env.QAGENT_EDGE_BASE_URL = "https://edge.example.com";
+    process.env.QAGENT_EDGE_API_TOKEN = "env-token";
+
+    const config = await loadRuntimeConfig({
+      cwd: tempProject,
+      workspaceId: "workspace-1",
+      edgePort: 9001,
+    });
+
+    expect(config.gateway.transportMode).toBe("remote");
+    expect(config.gateway.workspaceId).toBe("workspace-1");
+    expect(config.gateway.edgeBaseUrl).toBe("https://edge.example.com");
+    expect(config.gateway.apiToken).toBe("env-token");
+    expect(config.edge.port).toBe(9001);
+    expect(config.edge.bindHost).toBe("127.0.0.1");
+  });
 });

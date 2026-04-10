@@ -6,7 +6,12 @@ import {
   parseCliInvocation,
 } from "../command/index.js";
 import {
-  GatewayClientController,
+  serveEdge,
+  getEdgeStatus,
+  stopEdge,
+} from "../edge/index.js";
+import {
+  BackendClientController,
   getGatewayStatus,
   serveGateway,
   stopGateway,
@@ -23,6 +28,7 @@ function printHelp(): void {
   qagent run <prompt> [--json|--stream]
   qagent <domain> <subcommand> [--json|--stream]
   qagent --cwd <path> --provider <openai|openrouter> --model <model>
+  qagent --transport <local|remote> --workspace <id> --edge-url <url> --api-token <token>
 
 常用命令:
   qagent run "帮我总结当前项目结构"
@@ -32,6 +38,8 @@ function printHelp(): void {
   qagent executor list
   qagent gateway status
   qagent gateway stop
+  qagent edge serve
+  qagent edge status
   qagent memory list
   qagent approval status
   qagent approval approve <checkpointId>
@@ -41,6 +49,10 @@ function printHelp(): void {
   --provider <id>   指定模型 provider
   --config <path>   指定额外配置文件
   --model <model>   覆盖模型名称
+  --transport <m>   选择 local 或 remote backend
+  --workspace <id>  指定远程 workspaceId
+  --edge-url <url>  指定 Edge API 地址
+  --api-token <t>   指定远程 API Token
   --json            以 JSON 输出单次命令结果
   --stream          以 NDJSON 流式输出 runtime events
   -h, --help        显示帮助
@@ -90,7 +102,36 @@ export async function runCli(argv: string[]): Promise<void> {
     }
   }
 
-  const controller = await GatewayClientController.create({
+  if (invocation.mode === "edge") {
+    if (invocation.edgeAction === "serve") {
+      await serveEdge(invocation.cliOptions);
+      return;
+    }
+    if (invocation.edgeAction === "status") {
+      const status = await getEdgeStatus(invocation.cliOptions);
+      if (!status.manifest) {
+        process.stdout.write("edge: stopped\n");
+        return;
+      }
+      process.stdout.write(
+        [
+          `edge: ${status.health ? "running" : "stale"}`,
+          `pid: ${status.manifest.pid}`,
+          `url: ${status.manifest.baseUrl}`,
+          `version: ${status.manifest.version}`,
+        ].join("\n") + "\n",
+      );
+      process.exitCode = status.health ? 0 : 1;
+      return;
+    }
+    if (invocation.edgeAction === "stop") {
+      const stopped = await stopEdge(invocation.cliOptions);
+      process.stdout.write(`${stopped ? "edge stopped" : "edge not running"}\n`);
+      return;
+    }
+  }
+
+  const controller = await BackendClientController.create({
     cliOptions: invocation.cliOptions,
     clientLabel: invocation.mode === "tui" ? "tui" : "cli",
   });

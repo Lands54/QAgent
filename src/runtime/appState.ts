@@ -26,6 +26,7 @@ export interface AppState {
   activeWorklineName?: string;
   activeExecutorId: string;
   activeExecutorKind?: AgentKind;
+  activeQueuedInputCount: number;
   activeBookmarkLabel?: string;
   worklines: WorklineView[];
   executors: ExecutorView[];
@@ -62,6 +63,7 @@ export function createEmptyState(cwd: string): AppState {
   return {
     activeWorklineId: "",
     activeExecutorId: "",
+    activeQueuedInputCount: 0,
     worklines: [],
     executors: [],
     bookmarks: [],

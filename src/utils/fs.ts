@@ -1,4 +1,5 @@
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export async function pathExists(targetPath: string): Promise<boolean> {
@@ -39,8 +40,17 @@ export async function writeJson(
   targetPath: string,
   value: unknown,
 ): Promise<void> {
+  await writeTextAtomic(targetPath, JSON.stringify(value, null, 2));
+}
+
+export async function writeTextAtomic(
+  targetPath: string,
+  value: string,
+): Promise<void> {
   await ensureDir(path.dirname(targetPath));
-  await writeFile(targetPath, JSON.stringify(value, null, 2), "utf8");
+  const tempPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(tempPath, value, "utf8");
+  await rename(tempPath, targetPath);
 }
 
 export async function appendNdjson(

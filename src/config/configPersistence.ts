@@ -5,6 +5,8 @@ interface PersistedRuntimeConfig {
   model?: Partial<RuntimeConfig["model"]>;
   runtime?: Partial<RuntimeConfig["runtime"]>;
   tool?: Partial<RuntimeConfig["tool"]>;
+  gateway?: Partial<RuntimeConfig["gateway"]>;
+  edge?: Partial<RuntimeConfig["edge"]>;
 }
 
 function omitUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
@@ -30,6 +32,14 @@ function mergePersistedConfig(
     tool: {
       ...(current.tool ?? {}),
       ...omitUndefined(patch.tool ?? {}),
+    },
+    gateway: {
+      ...(current.gateway ?? {}),
+      ...omitUndefined(patch.gateway ?? {}),
+    },
+    edge: {
+      ...(current.edge ?? {}),
+      ...omitUndefined(patch.edge ?? {}),
     },
   };
 }

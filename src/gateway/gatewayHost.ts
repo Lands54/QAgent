@@ -75,7 +75,9 @@ export class GatewayHost {
         projectMemoryDir: config.resolvedPaths.projectMemoryDir,
         globalMemoryDir: config.resolvedPaths.globalMemoryDir,
       }),
-    ]);
+    ], {
+      ownerKind: "gateway-host",
+    });
     this.skillRegistry = new SkillRegistry(config.resolvedPaths);
     this.approvalPolicy = new ApprovalPolicy(config.tool.approvalMode);
     this.modelClient = createModelClient(config.model);

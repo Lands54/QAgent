@@ -3,10 +3,11 @@ import { parseCommandTokens } from "./common.js";
 
 export interface ParsedCliInvocation {
   cliOptions: CliOptions;
-  mode: "tui" | "help" | "command" | "gateway";
+  mode: "tui" | "help" | "command" | "gateway" | "edge";
   output: "text" | "json" | "stream";
   request?: CommandRequest;
   gatewayAction?: "serve" | "status" | "stop";
+  edgeAction?: "serve" | "status" | "stop";
   error?: string;
 }
 
@@ -77,6 +78,40 @@ export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
       tokens.splice(0, 2);
       continue;
     }
+    if (current === "--transport") {
+      const mode = tokens[1];
+      if (mode === "local" || mode === "remote") {
+        cliOptions.transportMode = mode;
+      }
+      tokens.splice(0, 2);
+      continue;
+    }
+    if (current === "--workspace") {
+      cliOptions.workspaceId = tokens[1];
+      tokens.splice(0, 2);
+      continue;
+    }
+    if (current === "--edge-url") {
+      cliOptions.edgeBaseUrl = tokens[1];
+      tokens.splice(0, 2);
+      continue;
+    }
+    if (current === "--api-token") {
+      cliOptions.apiToken = tokens[1];
+      tokens.splice(0, 2);
+      continue;
+    }
+    if (current === "--edge-host") {
+      cliOptions.edgeBindHost = tokens[1];
+      tokens.splice(0, 2);
+      continue;
+    }
+    if (current === "--edge-port") {
+      const port = Number(tokens[1]);
+      cliOptions.edgePort = Number.isFinite(port) ? port : undefined;
+      tokens.splice(0, 2);
+      continue;
+    }
     break;
   }
 
@@ -112,6 +147,24 @@ export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
       mode: "help",
       output,
       error: "用法：qagent gateway <serve|status|stop>",
+    };
+  }
+
+  if (tokens[0] === "edge") {
+    const action = tokens[1];
+    if (action === "serve" || action === "status" || action === "stop") {
+      return {
+        cliOptions,
+        mode: "edge",
+        output,
+        edgeAction: action,
+      };
+    }
+    return {
+      cliOptions,
+      mode: "help",
+      output,
+      error: "用法：qagent edge <serve|status|stop>",
     };
   }
 

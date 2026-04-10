@@ -76,7 +76,9 @@ export class AgentRegistry {
   public hasBusyAgents(): boolean {
     return this.getEntries().some((entry) => {
       const view = entry.runtime.getViewState();
-      return entry.runtime.isRunning() || Boolean(view.pendingApproval);
+      return entry.runtime.isRunning()
+        || Boolean(view.pendingApproval)
+        || view.queuedInputCount > 0;
     });
   }
 }

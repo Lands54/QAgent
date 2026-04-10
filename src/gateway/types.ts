@@ -12,6 +12,9 @@ export interface GatewayManifest {
   baseUrl: string;
   cwd: string;
   sessionRoot: string;
+  workspaceId: string;
+  version: string;
+  buildSha: string;
   startedAt: string;
   updatedAt: string;
 }
@@ -65,8 +68,11 @@ export interface GatewayHealthResponse {
   pid: number;
   cwd: string;
   sessionRoot: string;
+  workspaceId: string;
   clientCount: number;
   leaseCount: number;
+  version: string;
+  buildSha: string;
 }
 
 export type GatewaySseEvent =
@@ -95,6 +101,15 @@ export type GatewaySseEvent =
       createdAt: string;
       payload: {
         reason: string;
+      };
+    }
+  | {
+      id: string;
+      type: "gateway.disconnected";
+      createdAt: string;
+      payload: {
+        reason: string;
+        workspaceId?: string;
       };
     };
 

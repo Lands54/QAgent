@@ -20,6 +20,26 @@ async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function waitForCondition(
+  check: () => boolean,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    if (check()) {
+      return;
+    }
+    await sleep(10);
+  }
+  throw new Error("等待条件超时。");
+}
+
 function buildConfig(projectDir: string): RuntimeConfig {
   return {
     cwd: projectDir,
@@ -89,6 +109,54 @@ class ApprovalCheckpointModelClient implements ModelClient {
           createdAt: new Date().toISOString(),
           input: {
             command: "printf checkpoint-approved",
+          },
+        },
+      ],
+      finishReason: "tool_calls",
+    };
+  }
+}
+
+class ApprovalQueueModelClient implements ModelClient {
+  public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
+    const latestUserMessage = [...request.messages]
+      .reverse()
+      .find((message) => message.role === "user");
+    const latestContent = latestUserMessage?.content ?? "";
+
+    if (latestContent.includes("second")) {
+      return {
+        assistantText: "已处理 second",
+        toolCalls: [],
+        finishReason: "stop",
+      };
+    }
+
+    const alreadyExecuted = request.messages.some((message) => {
+      return (
+        message.role === "tool"
+        && message.toolCallId === "tool-approval-queue"
+        && message.content.includes("queue-approved")
+      );
+    });
+
+    if (alreadyExecuted) {
+      return {
+        assistantText: "已处理 first",
+        toolCalls: [],
+        finishReason: "stop",
+      };
+    }
+
+    return {
+      assistantText: "",
+      toolCalls: [
+        {
+          id: "tool-approval-queue",
+          name: "shell",
+          createdAt: new Date().toISOString(),
+          input: {
+            command: "printf queue-approved",
           },
         },
       ],
@@ -223,4 +291,62 @@ describe("pending approval integration", () => {
       await secondManager.dispose();
     }
   });
+
+  it("待审批期间后续输入会排队，审批完成后继续消费", async () => {
+    const projectDir = await makeTempDir("qagent-pending-approval-queue-");
+    const config = buildConfig(projectDir);
+    const manager = await createAgentManager(
+      config,
+      new ApprovalQueueModelClient(),
+    );
+    let second: Promise<void> | undefined;
+
+    try {
+      manager.setFetchMemoryHookEnabled(false);
+      manager.setSaveMemoryHookEnabled(false);
+
+      const first = await manager.runAgentPrompt("first", {
+        approvalMode: "checkpoint",
+      });
+      expect(first.settled).toBe("approval_required");
+      expect(first.checkpoint?.toolCall.input.command).toBe("printf queue-approved");
+
+      second = manager.submitInputToActiveAgent("second");
+      void second.catch(() => {});
+      await waitForCondition(() => manager.getExecutorStatus().queuedInputCount === 1);
+
+      expect(manager.getPendingApprovalCheckpoint()).toBeDefined();
+      expect(manager.getActiveRuntime().getViewState().queuedInputCount).toBe(1);
+      expect(manager.getExecutorStatus().queuedInputCount).toBe(1);
+      expect(manager.getWorklineStatus().queuedInputCount).toBe(1);
+
+      const snapshotWhilePending = manager.getActiveRuntime().getSnapshot();
+      const userMessagesWhilePending = snapshotWhilePending.uiMessages
+        .filter((message) => message.role === "user")
+        .map((message) => message.content);
+      expect(userMessagesWhilePending.at(-1)).toBe("first");
+
+      await manager.resolvePendingApprovalCheckpoint(true, {
+        checkpointId: first.checkpoint?.checkpointId,
+      });
+      await waitForCondition(() => manager.getExecutorStatus().queuedInputCount === 0, 10_000);
+      await second;
+
+      const finalSnapshot = manager.getActiveRuntime().getSnapshot();
+      const finalUserMessages = finalSnapshot.uiMessages
+        .filter((message) => message.role === "user")
+        .map((message) => message.content);
+      const finalAssistantMessages = finalSnapshot.uiMessages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.content);
+
+      expect(finalUserMessages.slice(-2)).toEqual(["first", "second"]);
+      expect(finalAssistantMessages.slice(-2)).toEqual(["已处理 first", "已处理 second"]);
+      expect(manager.getPendingApprovalCheckpoint()).toBeUndefined();
+      expect(manager.getExecutorStatus().queuedInputCount).toBe(0);
+      expect(manager.getWorklineStatus().queuedInputCount).toBe(0);
+    } finally {
+      await manager.dispose();
+    }
+  }, 15_000);
 });

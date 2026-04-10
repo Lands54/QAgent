@@ -1,0 +1,72 @@
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+
+import { SessionLockService } from "../../src/session/index.js";
+
+async function makeTempDir(prefix: string) {
+  return mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+describe("SessionLockService", () => {
+  it("首个 process lease 能获取，第二个活跃持有者会被拒绝", async () => {
+    const root = await makeTempDir("qagent-session-lock-");
+    const first = new SessionLockService(root, {
+      ownerKind: "first",
+      processLeaseHeartbeatMs: 20,
+      processLeaseTtlMs: 200,
+      mutationHeartbeatMs: 20,
+      mutationTtlMs: 200,
+      mutationPollMs: 10,
+    });
+    const second = new SessionLockService(root, {
+      ownerKind: "second",
+      processLeaseHeartbeatMs: 20,
+      processLeaseTtlMs: 200,
+      mutationHeartbeatMs: 20,
+      mutationTtlMs: 200,
+      mutationPollMs: 10,
+    });
+
+    await first.ensureProcessLease();
+    await expect(second.ensureProcessLease()).rejects.toThrow(/owner=first/);
+
+    await first.dispose();
+    await expect(second.ensureProcessLease()).resolves.toBeUndefined();
+    await second.dispose();
+  });
+
+  it("stale process lease 过期后可被接管", async () => {
+    const root = await makeTempDir("qagent-session-lock-stale-");
+    const first = new SessionLockService(root, {
+      ownerKind: "stale-holder",
+      processLeaseHeartbeatMs: 100,
+      processLeaseTtlMs: 20,
+      mutationHeartbeatMs: 5,
+      mutationTtlMs: 20,
+      mutationPollMs: 5,
+    });
+    const second = new SessionLockService(root, {
+      ownerKind: "next-holder",
+      processLeaseHeartbeatMs: 100,
+      processLeaseTtlMs: 20,
+      mutationHeartbeatMs: 5,
+      mutationTtlMs: 20,
+      mutationPollMs: 5,
+    });
+
+    await first.ensureProcessLease();
+    await sleep(35);
+    await expect(second.ensureProcessLease()).resolves.toBeUndefined();
+
+    await first.dispose();
+    await second.dispose();
+  });
+});
