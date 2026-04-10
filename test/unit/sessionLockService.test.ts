@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -68,5 +68,31 @@ describe("SessionLockService", () => {
 
     await first.dispose();
     await second.dispose();
+  });
+
+  it("heartbeat 读取异常会走错误回调而不是未处理 rejection", async () => {
+    const root = await makeTempDir("qagent-session-lock-heartbeat-");
+    const heartbeatErrors: unknown[] = [];
+    const service = new SessionLockService(root, {
+      ownerKind: "heartbeat-holder",
+      processLeaseHeartbeatMs: 20,
+      processLeaseTtlMs: 200,
+      mutationHeartbeatMs: 5,
+      mutationTtlMs: 200,
+      mutationPollMs: 5,
+      onHeartbeatError: (error) => {
+        heartbeatErrors.push(error);
+      },
+    });
+
+    const handle = await service.acquireRepoMutationLock();
+    const metadataPath = path.join(root, "__locks", "repo-mutation", "lease.json");
+    await writeFile(metadataPath, "{", "utf8");
+    await sleep(50);
+
+    expect(heartbeatErrors.length).toBeGreaterThan(0);
+
+    await writeFile(metadataPath, JSON.stringify(handle.metadata), "utf8");
+    await handle.release();
   });
 });

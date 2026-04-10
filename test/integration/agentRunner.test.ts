@@ -33,6 +33,47 @@ async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
+function buildTempRuntimeConfig(projectDir: string): RuntimeConfig {
+  return {
+    cwd: projectDir,
+    resolvedPaths: {
+      cwd: projectDir,
+      homeDir: projectDir,
+      globalAgentDir: path.join(projectDir, ".global"),
+      projectRoot: projectDir,
+      projectAgentDir: path.join(projectDir, ".agent"),
+      globalConfigPath: path.join(projectDir, ".global", "config.json"),
+      projectConfigPath: path.join(projectDir, ".agent", "config.json"),
+      globalMemoryDir: path.join(projectDir, ".global", "memory"),
+      projectMemoryDir: path.join(projectDir, ".agent", "memory"),
+      globalSkillsDir: path.join(projectDir, ".global", "skills"),
+      projectSkillsDir: path.join(projectDir, ".agent", "skills"),
+      sessionRoot: path.join(projectDir, ".agent", "sessions"),
+    },
+    model: {
+      provider: "openai",
+      baseUrl: "https://example.invalid/v1",
+      model: "test-model",
+      temperature: 0,
+    },
+    runtime: {
+      maxAgentSteps: 4,
+      fetchMemoryMaxAgentSteps: 3,
+      autoMemoryForkMaxAgentSteps: 4,
+      shellCommandTimeoutMs: 10_000,
+      maxToolOutputChars: 2_000,
+      maxConversationSummaryMessages: 10,
+      autoCompactThresholdTokens: 120_000,
+      compactRecentKeepGroups: 8,
+    },
+    tool: {
+      approvalMode: "always",
+      shellExecutable: "/bin/zsh",
+    },
+    cli: {},
+  };
+}
+
 class FakeModelClient implements ModelClient {
   private turn = 0;
 
@@ -73,44 +114,7 @@ class FakeModelClient implements ModelClient {
 describe("AgentRunner", () => {
   it("能在工具调用后继续下一轮并产出最终回答", async () => {
     const projectDir = await makeTempDir("qagent-runner-");
-    const config: RuntimeConfig = {
-      cwd: projectDir,
-      resolvedPaths: {
-        cwd: projectDir,
-        homeDir: projectDir,
-        globalAgentDir: path.join(projectDir, ".global"),
-        projectRoot: projectDir,
-        projectAgentDir: path.join(projectDir, ".agent"),
-        globalConfigPath: path.join(projectDir, ".global", "config.json"),
-        projectConfigPath: path.join(projectDir, ".agent", "config.json"),
-        globalMemoryDir: path.join(projectDir, ".global", "memory"),
-        projectMemoryDir: path.join(projectDir, ".agent", "memory"),
-        globalSkillsDir: path.join(projectDir, ".global", "skills"),
-        projectSkillsDir: path.join(projectDir, ".agent", "skills"),
-        sessionRoot: path.join(projectDir, ".agent", "sessions"),
-      },
-      model: {
-        provider: "openai",
-        baseUrl: "https://example.invalid/v1",
-        model: "test-model",
-        temperature: 0,
-      },
-      runtime: {
-        maxAgentSteps: 4,
-        fetchMemoryMaxAgentSteps: 3,
-        autoMemoryForkMaxAgentSteps: 4,
-        shellCommandTimeoutMs: 10_000,
-        maxToolOutputChars: 2_000,
-        maxConversationSummaryMessages: 10,
-        autoCompactThresholdTokens: 120_000,
-        compactRecentKeepGroups: 8,
-      },
-      tool: {
-        approvalMode: "always",
-        shellExecutable: "/bin/zsh",
-      },
-      cli: {},
-    };
+    const config = buildTempRuntimeConfig(projectDir);
 
     const modelMessages: LlmMessage[] = [
       {
@@ -204,6 +208,69 @@ describe("AgentRunner", () => {
     expect(toolResults[0]?.command).toBe("pwd");
     expect(assistantTurns.at(-1)?.content).toBe("完成");
     expect(statusLines.at(-1)).toBe("等待输入");
+  });
+
+  it("dispose 会中断正在等待模型响应的 runLoop", async () => {
+    const projectDir = await makeTempDir("qagent-dispose-running-");
+    const config = buildTempRuntimeConfig(projectDir);
+
+    class HangingModelClient implements ModelClient {
+      public signal?: AbortSignal;
+      private resolveStarted?: () => void;
+      public readonly started = new Promise<void>((resolve) => {
+        this.resolveStarted = resolve;
+      });
+
+      public async runTurn(
+        _request: ModelTurnRequest,
+        _hooks?: unknown,
+        signal?: AbortSignal,
+      ): Promise<ModelTurnResult> {
+        this.signal = signal;
+        this.resolveStarted?.();
+        return new Promise<ModelTurnResult>((_resolve, reject) => {
+          const abort = () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          };
+          if (signal?.aborted) {
+            abort();
+            return;
+          }
+          signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+    }
+
+    const modelClient = new HangingModelClient();
+    const sessionService = new SessionService(config.resolvedPaths.sessionRoot, [
+      createMemorySessionAssetProvider({
+        projectMemoryDir: config.resolvedPaths.projectMemoryDir,
+        globalMemoryDir: config.resolvedPaths.globalMemoryDir,
+      }),
+    ]);
+    const agentManager = new AgentManager(
+      config,
+      modelClient,
+      new PromptAssembler(),
+      sessionService,
+      new ApprovalPolicy("always"),
+      () => [],
+    );
+    await agentManager.initialize({
+      cwd: projectDir,
+      shellCwd: projectDir,
+      approvalMode: "always",
+    });
+    agentManager.setFetchMemoryHookEnabled(false);
+
+    const running = agentManager.submitInputToActiveAgent("保持等待");
+    await modelClient.started;
+
+    await expect(agentManager.dispose()).resolves.toBeUndefined();
+    await expect(running).resolves.toBeUndefined();
+    expect(modelClient.signal?.aborted).toBe(true);
   });
 
   it("会在运行时把全部 mock skill 的 YAML 元信息注入 system prompt，并且只暴露一个 shell tool", async () => {

@@ -1,8 +1,8 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
 
-import { readJsonIfExists, writeJson } from "../utils/index.js";
 import type { EdgeManifest } from "../types.js";
+import { readJsonIfExists, writeJson } from "../utils/index.js";
 
 export function getEdgeManifestPath(globalAgentDir: string): string {
   return path.join(globalAgentDir, "edge-manifest.json");

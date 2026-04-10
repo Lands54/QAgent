@@ -11,6 +11,37 @@ export interface ParsedCliInvocation {
   error?: string;
 }
 
+function parseOptionError(
+  cliOptions: CliOptions,
+  output: ParsedCliInvocation["output"],
+  error: string,
+): ParsedCliInvocation {
+  return {
+    cliOptions,
+    mode: "help",
+    output,
+    error,
+  };
+}
+
+function isOptionToken(value: string): boolean {
+  return value === "-h" || value.startsWith("--");
+}
+
+function readOptionValue(
+  tokens: string[],
+  optionName: string,
+): { value: string } | { error: string } {
+  const value = tokens[1];
+  if (!value || isOptionToken(value)) {
+    return {
+      error: `选项 ${optionName} 需要一个值。`,
+    };
+  }
+
+  return { value };
+}
+
 export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
   const cliOptions: CliOptions = {};
   let output: ParsedCliInvocation["output"] = "text";
@@ -56,59 +87,118 @@ export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
       continue;
     }
     if (current === "--cwd") {
-      cliOptions.cwd = tokens[1];
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      cliOptions.cwd = result.value;
       tokens.splice(0, 2);
       continue;
     }
     if (current === "--config") {
-      cliOptions.configPath = tokens[1];
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      cliOptions.configPath = result.value;
       tokens.splice(0, 2);
       continue;
     }
     if (current === "--provider") {
-      const provider = tokens[1];
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      const provider = result.value;
       if (provider === "openai" || provider === "openrouter") {
         cliOptions.provider = provider;
+      } else {
+        return parseOptionError(
+          cliOptions,
+          output,
+          "选项 --provider 仅支持 openai 或 openrouter。",
+        );
       }
       tokens.splice(0, 2);
       continue;
     }
     if (current === "--model") {
-      cliOptions.model = tokens[1];
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      cliOptions.model = result.value;
       tokens.splice(0, 2);
       continue;
     }
     if (current === "--transport") {
-      const mode = tokens[1];
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      const mode = result.value;
       if (mode === "local" || mode === "remote") {
         cliOptions.transportMode = mode;
+      } else {
+        return parseOptionError(
+          cliOptions,
+          output,
+          "选项 --transport 仅支持 local 或 remote。",
+        );
       }
       tokens.splice(0, 2);
       continue;
     }
     if (current === "--workspace") {
-      cliOptions.workspaceId = tokens[1];
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      cliOptions.workspaceId = result.value;
       tokens.splice(0, 2);
       continue;
     }
     if (current === "--edge-url") {
-      cliOptions.edgeBaseUrl = tokens[1];
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      cliOptions.edgeBaseUrl = result.value;
       tokens.splice(0, 2);
       continue;
     }
     if (current === "--api-token") {
-      cliOptions.apiToken = tokens[1];
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      cliOptions.apiToken = result.value;
       tokens.splice(0, 2);
       continue;
     }
     if (current === "--edge-host") {
-      cliOptions.edgeBindHost = tokens[1];
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      cliOptions.edgeBindHost = result.value;
       tokens.splice(0, 2);
       continue;
     }
     if (current === "--edge-port") {
-      const port = Number(tokens[1]);
-      cliOptions.edgePort = Number.isFinite(port) ? port : undefined;
+      const result = readOptionValue(tokens, current);
+      if ("error" in result) {
+        return parseOptionError(cliOptions, output, result.error);
+      }
+      const port = Number(result.value);
+      if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+        return parseOptionError(
+          cliOptions,
+          output,
+          "选项 --edge-port 需要 0 到 65535 之间的整数。",
+        );
+      }
+      cliOptions.edgePort = port;
       tokens.splice(0, 2);
       continue;
     }

@@ -9,10 +9,53 @@ import type {
 } from "../types.js";
 import { createId } from "../utils/index.js";
 
+const DEFAULT_MODEL_REQUEST_TIMEOUT_MS = 120_000;
+
 interface OpenAIStreamToolCallBuffer {
   id?: string;
   name?: string;
   arguments: string;
+}
+
+function createModelRequestSignal(
+  signal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+): {
+  signal?: AbortSignal;
+  cleanup(): void;
+} {
+  const resolvedTimeoutMs = timeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS;
+  if (resolvedTimeoutMs <= 0) {
+    return {
+      signal,
+      cleanup: () => {},
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort(new Error(`模型请求超时：${resolvedTimeoutMs}ms`));
+  }, resolvedTimeoutMs);
+  timeout.unref?.();
+
+  const abortFromParent = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(signal?.reason);
+    }
+  };
+  if (signal?.aborted) {
+    abortFromParent();
+  } else {
+    signal?.addEventListener("abort", abortFromParent, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abortFromParent);
+    },
+  };
 }
 
 export function buildModelHeaders(
@@ -111,62 +154,64 @@ export class OpenAICompatibleModelClient implements ModelClient {
     hooks?: ModelStreamHooks,
     signal?: AbortSignal,
   ): Promise<ModelTurnResult> {
-    const response = await fetch(
-      `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`,
-      {
-        method: "POST",
-        headers: buildModelHeaders(this.config),
-        body: JSON.stringify({
-          model: this.config.model,
-          temperature: this.config.temperature,
-          max_tokens: this.config.maxTokens,
-          stream: true,
-          messages: [
-            {
-              role: "system",
-              content: request.systemPrompt,
-            },
-            ...request.messages.map(toOpenAIMessage),
-          ],
-          tools: request.tools.map((tool) => ({
-            type: "function",
-            function: {
-              name: tool.name,
-              description: tool.description,
-              parameters: tool.inputSchema,
-            },
-          })),
-        }),
-        signal,
-      },
-    );
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(
-        `模型请求失败：HTTP ${response.status} ${response.statusText}\n${errorBody}`,
+    const requestSignal = createModelRequestSignal(signal, this.config.requestTimeoutMs);
+    try {
+      const response = await fetch(
+        `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`,
+        {
+          method: "POST",
+          headers: buildModelHeaders(this.config),
+          body: JSON.stringify({
+            model: this.config.model,
+            temperature: this.config.temperature,
+            max_tokens: this.config.maxTokens,
+            stream: true,
+            messages: [
+              {
+                role: "system",
+                content: request.systemPrompt,
+              },
+              ...request.messages.map(toOpenAIMessage),
+            ],
+            tools: request.tools.map((tool) => ({
+              type: "function",
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.inputSchema,
+              },
+            })),
+          }),
+          signal: requestSignal.signal,
+        },
       );
-    }
 
-    if (!response.body) {
-      const data = (await response.json()) as Record<string, unknown>;
-      return this.parseJsonResponse(data, hooks);
-    }
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(
+          `模型请求失败：HTTP ${response.status} ${response.statusText}\n${errorBody}`,
+        );
+      }
 
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!contentType.includes("text/event-stream")) {
-      const data = (await response.json()) as Record<string, unknown>;
-      return this.parseJsonResponse(data, hooks);
-    }
+      if (!response.body) {
+        const data = (await response.json()) as Record<string, unknown>;
+        return this.parseJsonResponse(data, hooks);
+      }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf8");
-    const toolBuffers = new Map<number, OpenAIStreamToolCallBuffer>();
-    let buffer = "";
-    let finished = false;
-    let assistantText = "";
-    let finishReason = "stop";
-    let textStarted = false;
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("text/event-stream")) {
+        const data = (await response.json()) as Record<string, unknown>;
+        return this.parseJsonResponse(data, hooks);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf8");
+      const toolBuffers = new Map<number, OpenAIStreamToolCallBuffer>();
+      let buffer = "";
+      let finished = false;
+      let assistantText = "";
+      let finishReason = "stop";
+      let textStarted = false;
 
     const handleData = (raw: string) => {
       if (!raw) {
@@ -254,11 +299,14 @@ export class OpenAICompatibleModelClient implements ModelClient {
       hooks?.onTextComplete?.(assistantText);
     }
 
-    return {
-      assistantText,
-      toolCalls: finalizeToolCalls(toolBuffers),
-      finishReason,
-    };
+      return {
+        assistantText,
+        toolCalls: finalizeToolCalls(toolBuffers),
+        finishReason,
+      };
+    } finally {
+      requestSignal.cleanup();
+    }
   }
 
   private parseJsonResponse(

@@ -1,7 +1,6 @@
 import matter from "gray-matter";
 import path from "node:path";
 
-
 import type { ResolvedPaths, SkillManifest, SkillScope } from "../types.js";
 import { listDirectories, pathExists, readTextIfExists } from "../utils/index.js";
 
@@ -35,14 +34,23 @@ async function discoverSkillsInScope(
       continue;
     }
 
-    const parsed = matter(content);
+    let parsed: ReturnType<typeof matter>;
+    try {
+      parsed = matter(content);
+    } catch {
+      continue;
+    }
+
     const directoryName = path.basename(directoryPath);
     const data = parsed.data as {
-      name?: string;
-      description?: string;
+      name?: unknown;
+      description?: unknown;
     };
-    const name = data.name?.trim();
-    const description = data.description?.trim();
+    const name = typeof data.name === "string" ? data.name.trim() : undefined;
+    const description =
+      typeof data.description === "string"
+        ? data.description.trim()
+        : undefined;
     const validName =
       typeof name === "string" &&
       /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(name) &&

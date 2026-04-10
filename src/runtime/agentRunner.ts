@@ -64,6 +64,8 @@ interface AgentRunnerDependencies {
 
 export class AgentRunner {
   private abortController?: AbortController;
+  private idlePromise?: Promise<void>;
+  private resolveIdle?: () => void;
   private running = false;
 
   public constructor(private readonly deps: AgentRunnerDependencies) {}
@@ -83,6 +85,9 @@ export class AgentRunner {
     }
 
     this.running = true;
+    this.idlePromise = new Promise<void>((resolve) => {
+      this.resolveIdle = resolve;
+    });
     this.abortController = new AbortController();
 
     try {
@@ -187,11 +192,18 @@ export class AgentRunner {
     } finally {
       this.running = false;
       this.abortController = undefined;
+      this.resolveIdle?.();
+      this.resolveIdle = undefined;
+      this.idlePromise = undefined;
     }
   }
 
   public interrupt(): void {
     this.abortController?.abort();
+  }
+
+  public async waitForIdle(): Promise<void> {
+    await this.idlePromise;
   }
 
   private ensureNotAborted(): void {

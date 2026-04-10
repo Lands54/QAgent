@@ -97,6 +97,35 @@ describe("CLI / Slash parser", () => {
     expect(cli.cliOptions.apiToken).toBe("secret-token");
   });
 
+  it("顶层选项缺值时不会吞掉后续 flag", () => {
+    const cli = parseCliInvocation(["--cwd", "--json", "run", "hi"]);
+
+    expect(cli.mode).toBe("help");
+    expect(cli.error).toContain("--cwd");
+    expect(cli.cliOptions.cwd).toBeUndefined();
+    expect(cli.output).toBe("text");
+  });
+
+  it("会拒绝非法的顶层枚举参数", () => {
+    const provider = parseCliInvocation(["--provider", "anthropic", "run", "hi"]);
+    const transport = parseCliInvocation(["--transport", "tunnel", "edge", "status"]);
+
+    expect(provider.mode).toBe("help");
+    expect(provider.error).toContain("--provider");
+    expect(provider.cliOptions.provider).toBeUndefined();
+    expect(transport.mode).toBe("help");
+    expect(transport.error).toContain("--transport");
+    expect(transport.cliOptions.transportMode).toBeUndefined();
+  });
+
+  it("会拒绝非法的 edge 端口参数", () => {
+    const cli = parseCliInvocation(["--edge-port", "abc", "edge", "serve"]);
+
+    expect(cli.mode).toBe("help");
+    expect(cli.error).toContain("--edge-port");
+    expect(cli.cliOptions.edgePort).toBeUndefined();
+  });
+
   it("支持 gateway 子命令", () => {
     const cli = parseCliInvocation(["gateway", "status"]);
 

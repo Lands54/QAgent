@@ -255,14 +255,19 @@ async function loadMemoryRecord(
     return undefined;
   }
 
-  const parsed = matter(rawContent);
+  let parsed: ReturnType<typeof matter>;
+  try {
+    parsed = matter(rawContent);
+  } catch {
+    return undefined;
+  }
   const frontmatter = validateMemoryFrontmatter(directoryPath, parsed.data);
   if (!frontmatter) {
     return undefined;
   }
 
   const [metadata, fileStats] = await Promise.all([
-    readJsonIfExists<MemoryMetadata>(memoryMetadataPath(directoryPath)),
+    readMemoryMetadata(directoryPath),
     stat(filePath).catch(() => undefined),
   ]);
   const fallbackTimestamp =
@@ -282,6 +287,18 @@ async function loadMemoryRecord(
     directoryPath,
     path: filePath,
   };
+}
+
+async function readMemoryMetadata(
+  directoryPath: string,
+): Promise<MemoryMetadata | undefined> {
+  try {
+    return await readJsonIfExists<MemoryMetadata>(
+      memoryMetadataPath(directoryPath),
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 async function writeMemoryRecord(

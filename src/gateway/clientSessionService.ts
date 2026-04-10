@@ -153,9 +153,17 @@ export class ClientSessionService {
     this.leasesByExecutor.delete(executorId);
     this.leasesByWorkline.delete(lease.worklineId);
     const client = this.clients.get(lease.clientId);
-    if (client?.activeExecutorId === lease.executorId) {
+    if (
+      client?.activeExecutorId === lease.executorId
+      || client?.activeWorklineId === lease.worklineId
+    ) {
       this.setClientContext(lease.clientId, {
-        activeExecutorId: undefined,
+        activeExecutorId: client.activeExecutorId === lease.executorId
+          ? undefined
+          : client.activeExecutorId,
+        activeWorklineId: client.activeWorklineId === lease.worklineId
+          ? undefined
+          : client.activeWorklineId,
       });
     }
   }

@@ -140,4 +140,20 @@ describe("BackendClientController", () => {
       vi.useRealTimers();
     }
   });
+
+  it("waitForExit 会在 requestExit 后完成", async () => {
+    const transport = createTransportStub();
+    const controller = new TestBackendClientController(transport);
+
+    try {
+      const waiting = controller.waitForExit().then(() => "resolved");
+      await controller.requestExit();
+      await expect(Promise.race([
+        waiting,
+        new Promise((resolve) => setTimeout(() => resolve("timeout"), 100)),
+      ])).resolves.toBe("resolved");
+    } finally {
+      await controller.dispose();
+    }
+  });
 });

@@ -86,7 +86,7 @@ export interface SessionCommitResult extends SessionMutationResult {
   commit: SessionCommitRecord;
 }
 
-export interface SessionServiceOptions extends SessionServiceLockOptions {}
+export type SessionServiceOptions = SessionServiceLockOptions;
 
 interface ForkHeadOptions {
   sourceHeadId?: string;

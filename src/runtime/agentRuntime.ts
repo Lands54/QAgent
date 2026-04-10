@@ -1,4 +1,5 @@
 import { AgentRunner } from "./agentRunner.js";
+import { ApprovalRequiredInterruptError } from "./runtimeErrors.js";
 import type { PromptAssembler } from "../context/index.js";
 import { MemoryService } from "../memory/index.js";
 import {
@@ -48,7 +49,6 @@ import type {
   UIMessage,
 } from "../types.js";
 import { createId, firstLine, formatDuration } from "../utils/index.js";
-import { ApprovalRequiredInterruptError } from "./runtimeErrors.js";
 
 interface PendingApprovalState {
   request: ApprovalRequest;
@@ -109,6 +109,23 @@ function mapLifecycleStatusToHeadStatus(
     return "closed";
   }
   return status;
+}
+
+async function waitWithTimeout(promise: Promise<void>, timeoutMs: number): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<void>((resolve) => {
+    timeout = setTimeout(resolve, timeoutMs);
+  });
+  try {
+    await Promise.race([
+      promise,
+      timeoutPromise,
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function buildToolUiMessage(result: Parameters<HeadAgentRuntime["commitToolResult"]>[0]): UIMessage {
@@ -646,6 +663,8 @@ export class HeadAgentRuntime {
     }
     this.disposed = true;
     this.clearQueuedInputs();
+    this.agentRunner.interrupt();
+    await waitWithTimeout(this.agentRunner.waitForIdle(), 5_000);
     await this.shellTool.dispose();
   }
 

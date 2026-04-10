@@ -368,7 +368,9 @@ export class GatewayHost {
       resumeSessionId: this.config.cli.resumeSessionId,
     });
     this.agentManager.subscribe(() => {
-      void this.refreshAllClientStates();
+      void this.refreshAllClientStates().catch((error: unknown) => {
+        this.logger.error("state.refresh.error", gatewayErrorFields(error));
+      });
     });
     this.agentManager.subscribeRuntimeEvents((event) => {
       this.forwardRuntimeEvent(event);
@@ -463,8 +465,15 @@ export class GatewayHost {
   private async refreshAllClientStates(): Promise<void> {
     await Promise.all(
       this.clientSessions.listClients().map(async (client) => {
-        const state = await this.buildState(client.clientId);
-        this.emitStateSnapshot(client.clientId, state);
+        try {
+          const state = await this.buildState(client.clientId);
+          this.emitStateSnapshot(client.clientId, state);
+        } catch (error) {
+          this.logger.error("state.refresh.client.error", {
+            clientId: client.clientId,
+            ...gatewayErrorFields(error),
+          });
+        }
       }),
     );
   }
@@ -613,7 +622,11 @@ export class GatewayHost {
       },
       closeWorkline: async (worklineId) => {
         const workline = await this.agentManager.closeWorkline(worklineId);
-        if (workline.id === this.clientSessions.requireClient(clientId).activeWorklineId) {
+        const client = this.clientSessions.requireClient(clientId);
+        if (workline.id === client.activeWorklineId) {
+          if (client.activeExecutorId) {
+            this.releaseExecutor(client.activeExecutorId, clientId);
+          }
           this.openExecutor(clientId);
         }
         return workline;

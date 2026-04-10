@@ -50,6 +50,7 @@ export interface RuntimeConfig {
     model: string;
     temperature: number;
     maxTokens?: number;
+    requestTimeoutMs?: number;
     systemPrompt?: string;
     appName?: string;
     appUrl?: string;

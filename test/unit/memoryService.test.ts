@@ -127,6 +127,11 @@ describe("MemoryService", () => {
       description: "合法的记忆",
       content: "这是有效内容。",
     });
+    await writeFile(
+      path.join(paths.projectMemoryDir, "valid-memory", ".memory-meta.json"),
+      "{",
+      "utf8",
+    );
     await writeMemoryDirectory({
       rootDir: paths.projectMemoryDir,
       name: "missing-description",
@@ -168,6 +173,13 @@ describe("MemoryService", () => {
         "无效 memory",
         "",
       ].join("\n"),
+      "utf8",
+    );
+    const malformedDir = path.join(paths.projectMemoryDir, "malformed-memory");
+    await mkdir(malformedDir, { recursive: true });
+    await writeFile(
+      path.join(malformedDir, "MEMORY.md"),
+      ["---", "name: [", "---", "坏 frontmatter 不应打断列表"].join("\n"),
       "utf8",
     );
 

@@ -1,7 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { buildModelHeaders } from "../../src/model/openaiCompatibleModelClient.js";
+import {
+  OpenAICompatibleModelClient,
+  buildModelHeaders,
+} from "../../src/model/openaiCompatibleModelClient.js";
 import type { RuntimeConfig } from "../../src/types.js";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("buildModelHeaders", () => {
   it("为 OpenRouter 构建带专用 header 的请求头", () => {
@@ -37,5 +44,32 @@ describe("buildModelHeaders", () => {
     expect(headers.authorization).toBe("Bearer openai-key");
     expect(headers["X-OpenRouter-Title"]).toBeUndefined();
     expect(headers["HTTP-Referer"]).toBeUndefined();
+  });
+
+  it("模型请求超过 requestTimeoutMs 会主动 abort", async () => {
+    const config: RuntimeConfig["model"] = {
+      provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "openai-key",
+      model: "gpt-4.1-mini",
+      temperature: 0.2,
+      requestTimeoutMs: 10,
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation((async (_url, init) => {
+      const signal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          reject(signal.reason);
+        }, { once: true });
+      });
+    }) as typeof fetch);
+
+    const client = new OpenAICompatibleModelClient(config);
+
+    await expect(client.runTurn({
+      systemPrompt: "test",
+      messages: [],
+      tools: [],
+    })).rejects.toThrow("模型请求超时");
   });
 });

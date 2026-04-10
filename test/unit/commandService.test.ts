@@ -497,6 +497,40 @@ describe("CommandService", () => {
     expect(((result.payload as { uiMessages: UIMessage[] }).uiMessages)[0]?.content).toBe("$ pwd");
   });
 
+  it("memory show 未找到时返回非 0 结果", async () => {
+    const service = new CommandService(createDeps({
+      showMemory: async () => undefined,
+    }));
+
+    const result = await service.execute({
+      domain: "memory",
+      action: "show",
+      name: "missing-memory",
+    });
+
+    expect(result.status).toBe("runtime_error");
+    expect(result.exitCode).toBe(1);
+    expect(result.code).toBe("memory.not_found");
+    expect(result.messages[0]?.text).toContain("missing-memory");
+  });
+
+  it("skills show 未找到时返回非 0 结果", async () => {
+    const service = new CommandService(createDeps({
+      getAvailableSkills: () => [],
+    }));
+
+    const result = await service.execute({
+      domain: "skills",
+      action: "show",
+      key: "missing-skill",
+    });
+
+    expect(result.status).toBe("runtime_error");
+    expect(result.exitCode).toBe(1);
+    expect(result.code).toBe("skills.not_found");
+    expect(result.messages[0]?.text).toContain("missing-skill");
+  });
+
   it("会把异步命令执行错误包装成 runtime_error 结果", async () => {
     const service = new CommandService(createDeps({
       createBookmark: async () => {

@@ -54,6 +54,7 @@ describe("loadRuntimeConfig", () => {
     process.env.HOME = tempHome;
     process.env.QAGENT_MODEL = "env-model";
     process.env.QAGENT_SHELL_TIMEOUT_MS = "3333";
+    process.env.QAGENT_MODEL_REQUEST_TIMEOUT_MS = "4444";
     process.env.QAGENT_AUTO_MEMORY_FORK_MAX_AGENT_STEPS = "7";
 
     const config = await loadRuntimeConfig({
@@ -68,6 +69,7 @@ describe("loadRuntimeConfig", () => {
     expect(config.runtime.fetchMemoryMaxAgentSteps).toBe(5);
     expect(config.runtime.autoMemoryForkMaxAgentSteps).toBe(7);
     expect(config.runtime.shellCommandTimeoutMs).toBe(3333);
+    expect(config.model.requestTimeoutMs).toBe(4444);
     expect(config.tool.approvalMode).toBe("risky");
     expect(config.resolvedPaths.projectAgentDir).toBe(
       path.join(tempProject, ".agent"),
@@ -97,6 +99,62 @@ describe("loadRuntimeConfig", () => {
     expect(config.model.appUrl).toBe("https://example.com/qagent");
     expect(config.runtime.fetchMemoryMaxAgentSteps).toBe(3);
     expect(config.runtime.autoMemoryForkMaxAgentSteps).toBe(4);
+  });
+
+  it("环境变量 provider 覆盖项目配置时会同步使用对应默认值", async () => {
+    const tempHome = await makeTempDir("qagent-home-");
+    const tempProject = await makeTempDir("qagent-project-");
+    vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+    await mkdir(path.join(tempHome, ".agent"), { recursive: true });
+    await mkdir(path.join(tempProject, ".agent"), { recursive: true });
+    await writeFile(
+      path.join(tempProject, ".agent", "config.json"),
+      JSON.stringify({
+        model: {
+          provider: "openai",
+          baseUrl: "https://api.openai.com/v1",
+        },
+      }),
+      "utf8",
+    );
+
+    process.env.QAGENT_PROVIDER = "openrouter";
+    process.env.OPENROUTER_API_KEY = "or-key";
+
+    const config = await loadRuntimeConfig({
+      cwd: tempProject,
+    });
+
+    expect(config.model.provider).toBe("openrouter");
+    expect(config.model.baseUrl).toBe("https://openrouter.ai/api/v1");
+    expect(config.model.apiKey).toBe("or-key");
+    expect(config.model.appName).toBe("QAgent CLI");
+  });
+
+  it("CLI provider 覆盖项目配置时会同步使用对应默认 baseUrl", async () => {
+    const tempHome = await makeTempDir("qagent-home-");
+    const tempProject = await makeTempDir("qagent-project-");
+    vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+    await mkdir(path.join(tempHome, ".agent"), { recursive: true });
+    await mkdir(path.join(tempProject, ".agent"), { recursive: true });
+    await writeFile(
+      path.join(tempProject, ".agent", "config.json"),
+      JSON.stringify({
+        model: {
+          provider: "openai",
+          baseUrl: "https://api.openai.com/v1",
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadRuntimeConfig({
+      cwd: tempProject,
+      provider: "openrouter",
+    });
+
+    expect(config.model.provider).toBe("openrouter");
+    expect(config.model.baseUrl).toBe("https://openrouter.ai/api/v1");
   });
 
   it("支持远程 gateway / edge 配置", async () => {

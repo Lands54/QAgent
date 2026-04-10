@@ -1,6 +1,6 @@
 import type { CommandResult, UIMessage } from "../types.js";
-import { createId } from "../utils/index.js";
 import { formatCommandMessages, formatUiMessagesAsText } from "./common.js";
+import { createId } from "../utils/index.js";
 
 export function formatCommandResultText(result: CommandResult): string {
   const payload = result.payload as

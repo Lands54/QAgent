@@ -1,16 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
-
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 
+import { clearEdgeManifest, readEdgeManifest, writeEdgeManifest } from "./manifest.js";
 import { loadRuntimeConfig } from "../config/index.js";
 import type {
   GatewayCommandEnvelope,
+  GatewayOpenClientResponse,
   GatewayOpenClientRequest,
   GatewaySseEvent,
 } from "../gateway/index.js";
-import { clearEdgeManifest, readEdgeManifest, writeEdgeManifest } from "./manifest.js";
 import type {
+  CliOptions,
   EdgeGatewayRpcAction,
   EdgeGatewayRpcRequest,
   EdgeGatewayRpcResult,
@@ -20,10 +21,15 @@ import type {
   GatewayConnectionState,
   GatewayRegisteredMessage,
   RemoteClientSession,
+  RuntimeConfig,
   WorkspaceRegistration,
 } from "../types.js";
-import type { CliOptions, RuntimeConfig } from "../types.js";
-import { createId, getBuildInfo } from "../utils/index.js";
+import {
+  createId,
+  getBuildInfo,
+  HttpJsonBodyError,
+  readJsonBody,
+} from "../utils/index.js";
 
 interface SseClient {
   workspaceId: string;
@@ -47,17 +53,6 @@ function json(response: ServerResponse, statusCode: number, payload: unknown): v
   response.statusCode = statusCode;
   response.setHeader("content-type", "application/json; charset=utf-8");
   response.end(JSON.stringify(payload));
-}
-
-async function readJson(request: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  if (chunks.length === 0) {
-    return {};
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
 function writeSse(response: ServerResponse, event: GatewaySseEvent): void {
@@ -101,11 +96,12 @@ export class EdgeServer {
   private readonly sseClients = new Set<SseClient>();
   private readonly workspaces = new Map<string, ConnectedWorkspace>();
   private readonly remoteClients = new Map<string, RemoteClientSession>();
+  private stopResolver?: () => void;
   private readonly stopped = new Promise<void>((resolve) => {
     this.stopResolver = resolve;
   });
-  private stopResolver?: () => void;
   private baseUrl?: string;
+  private stopping = false;
 
   private constructor(private readonly config: RuntimeConfig) {
     this.server.on("upgrade", (request, socket, head) => {
@@ -151,41 +147,49 @@ export class EdgeServer {
   }
 
   public async stop(reason = "manual-stop"): Promise<void> {
-    const stopEvent: GatewaySseEvent = {
-      id: createId("edge"),
-      type: "gateway.stopping",
-      createdAt: nowIso(),
-      payload: {
-        reason,
-      },
-    };
-    for (const client of this.sseClients) {
-      writeSse(client.response, stopEvent);
-      client.response.end();
+    if (this.stopping) {
+      await this.stopped;
+      return;
     }
-    this.sseClients.clear();
-
-    for (const workspace of this.workspaces.values()) {
-      for (const pending of workspace.pendingRpcs.values()) {
-        pending.reject(new Error("edge 正在停止。"));
+    this.stopping = true;
+    try {
+      const stopEvent: GatewaySseEvent = {
+        id: createId("edge"),
+        type: "gateway.stopping",
+        createdAt: nowIso(),
+        payload: {
+          reason,
+        },
+      };
+      for (const client of this.sseClients) {
+        writeSse(client.response, stopEvent);
+        client.response.end();
       }
-      workspace.pendingRpcs.clear();
-      workspace.socket.close();
-    }
-    this.workspaces.clear();
-    this.remoteClients.clear();
+      this.sseClients.clear();
 
-    await clearEdgeManifest(this.config.resolvedPaths.globalAgentDir);
-    await new Promise<void>((resolve, reject) => {
-      this.server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
+      for (const workspace of this.workspaces.values()) {
+        for (const pending of workspace.pendingRpcs.values()) {
+          pending.reject(new Error("edge 正在停止。"));
         }
-        resolve();
+        workspace.pendingRpcs.clear();
+        workspace.socket.close();
+      }
+      this.workspaces.clear();
+      this.remoteClients.clear();
+
+      await clearEdgeManifest(this.config.resolvedPaths.globalAgentDir);
+      await new Promise<void>((resolve, reject) => {
+        this.server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
       });
-    });
-    this.stopResolver?.();
+    } finally {
+      this.stopResolver?.();
+    }
   }
 
   private async handleUpgrade(
@@ -210,7 +214,9 @@ export class EdgeServer {
 
   private handleGatewaySocket(socket: WebSocket): void {
     socket.on("message", (data: RawData) => {
-      void this.handleGatewayMessage(socket, data.toString());
+      void this.handleGatewayMessage(socket, data.toString()).catch(() => {
+        socket.close(1003, "invalid gateway message");
+      });
     });
     socket.on("close", () => {
       this.handleGatewayDisconnect(socket, "gateway disconnected");
@@ -428,7 +434,11 @@ export class EdgeServer {
 
       if (request.method === "POST" && url.pathname === "/api/admin/stop") {
         json(response, 200, { ok: true });
-        void this.stop("admin-stop");
+        void this.stop("admin-stop").catch((error) => {
+          process.stderr.write(
+            `edge stop failed: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        });
         return;
       }
 
@@ -455,12 +465,12 @@ export class EdgeServer {
       }
 
       if (request.method === "POST" && suffix === "/clients/open") {
-        const body = await readJson(request) as GatewayOpenClientRequest;
+        const body = await readJsonBody(request) as GatewayOpenClientRequest;
         const result = await this.sendRpc(workspaceId, {
           kind: "openClient",
           payload: body,
         });
-        const payload = result.payload as import("../gateway/index.js").GatewayOpenClientResponse;
+        const payload = result.payload as GatewayOpenClientResponse;
         if (payload.clientId) {
           this.remoteClients.set(workspaceClientKey(workspaceId, payload.clientId), {
             clientId: payload.clientId,
@@ -512,7 +522,7 @@ export class EdgeServer {
       }
 
       if (request.method === "POST" && suffix === "/input") {
-        const body = await readJson(request) as {
+        const body = await readJsonBody(request) as {
           clientId: string;
           input: string;
         };
@@ -525,7 +535,7 @@ export class EdgeServer {
       }
 
       if (request.method === "POST" && suffix === "/commands") {
-        const body = await readJson(request) as GatewayCommandEnvelope;
+        const body = await readJsonBody(request) as GatewayCommandEnvelope;
         const result = await this.sendRpc(workspaceId, {
           kind: "executeCommand",
           payload: body,
@@ -535,7 +545,7 @@ export class EdgeServer {
       }
 
       if (request.method === "POST" && suffix === "/executors/open") {
-        const body = await readJson(request) as {
+        const body = await readJsonBody(request) as {
           clientId: string;
           worklineId?: string;
         };
@@ -557,7 +567,7 @@ export class EdgeServer {
           json(response, 400, { error: "缺少 executorId。" });
           return;
         }
-        const body = await readJson(request) as { clientId: string };
+        const body = await readJsonBody(request) as { clientId: string };
         const result = await this.sendRpc(workspaceId, {
           kind: "heartbeatExecutor",
           payload: { executorId, clientId: body.clientId },
@@ -617,7 +627,10 @@ export class EdgeServer {
 
       json(response, 404, { error: "未找到接口。" });
     } catch (error) {
-      json(response, 500, {
+      const statusCode = error instanceof HttpJsonBodyError
+        ? error.statusCode
+        : 500;
+      json(response, statusCode, {
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -686,10 +699,20 @@ export async function serveEdge(cliOptions: CliOptions): Promise<void> {
     await server.stop(signal);
   };
   process.once("SIGINT", () => {
-    void stop("SIGINT");
+    void stop("SIGINT").catch((error) => {
+      process.stderr.write(
+        `edge stop failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      process.exitCode = 1;
+    });
   });
   process.once("SIGTERM", () => {
-    void stop("SIGTERM");
+    void stop("SIGTERM").catch((error) => {
+      process.stderr.write(
+        `edge stop failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      process.exitCode = 1;
+    });
   });
 
   await server.waitUntilStopped();

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -52,5 +52,32 @@ describe("SessionStore", () => {
     expect(loaded?.uiMessages[0]?.content).toBe("hello");
     expect(latest?.sessionId).toBe(snapshot.sessionId);
     expect(rawSnapshot).not.toHaveProperty("activeSkillIds");
+  });
+
+  it("loadMostRecent 会跳过损坏的 snapshot JSON", async () => {
+    const root = await makeTempDir("qagent-session-corrupt-");
+    const store = new SessionStore(root);
+    const valid = await store.initializeHeadSession({
+      workingHeadId: "head_valid",
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    await store.initializeHeadSession({
+      workingHeadId: "head_bad",
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    await writeFile(
+      path.join(root, "__heads", "head_bad", "snapshot.json"),
+      "{",
+      "utf8",
+    );
+
+    await expect(store.load("head_bad")).resolves.toBeUndefined();
+    await expect(store.loadMostRecent()).resolves.toMatchObject({
+      workingHeadId: valid.workingHeadId,
+    });
   });
 });

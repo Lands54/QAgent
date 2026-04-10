@@ -46,7 +46,9 @@ export class GatewayEdgeBridgeClient {
 
   public constructor(private readonly input: GatewayEdgeBridgeInput) {
     this.unsubscribe = this.input.host.subscribe((event) => {
-      void this.sendEvent(event);
+      void this.sendEvent(event).catch(() => {
+        this.closeCurrentSocket(1011, "gateway bridge event send failed");
+      });
     });
   }
 
@@ -87,11 +89,17 @@ export class GatewayEdgeBridgeClient {
     this.socket = socket;
 
     socket.on("open", () => {
-      this.sendRegister();
-      this.startHeartbeat();
+      try {
+        this.sendRegister();
+        this.startHeartbeat();
+      } catch {
+        socket.close(1011, "gateway bridge register failed");
+      }
     });
     socket.on("message", (raw: RawData) => {
-      void this.handleMessage(raw.toString());
+      void this.handleMessage(raw.toString()).catch(() => {
+        socket.close(1003, "invalid edge message");
+      });
     });
     socket.on("close", () => {
       this.handleDisconnect();
@@ -124,9 +132,17 @@ export class GatewayEdgeBridgeClient {
       clearInterval(this.heartbeatTimer);
     }
     this.heartbeatTimer = setInterval(() => {
-      void this.sendHealth();
+      void this.sendHealth().catch(() => {
+        this.closeCurrentSocket(1011, "gateway bridge health send failed");
+      });
     }, 5_000);
     this.heartbeatTimer.unref?.();
+  }
+
+  private closeCurrentSocket(code: number, reason: string): void {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.close(code, reason);
+    }
   }
 
   private getBuildHealthSummary() {

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import type { Key } from "ink";
+import { describe, expect, it } from "vitest";
 
 import {
   buildAgentShortcutHint,

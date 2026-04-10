@@ -43,31 +43,44 @@ function defaultAppName(provider: ModelProvider): string | undefined {
   return provider === "openrouter" ? "QAgent CLI" : undefined;
 }
 
+function readEnvProvider(): ModelProvider | undefined {
+  const envProvider =
+    process.env.QAGENT_PROVIDER ?? process.env.QAGENT_MODEL_PROVIDER;
+  return isModelProvider(envProvider) ? envProvider : undefined;
+}
+
+function providerDefaultsConfig(
+  provider: ModelProvider | undefined,
+): PartialRuntimeConfig | undefined {
+  if (!provider) {
+    return undefined;
+  }
+
+  return {
+    model: {
+      provider,
+      baseUrl: defaultBaseUrlForProvider(provider),
+    },
+  };
+}
+
 function resolveProvider(
   cliOptions: CliOptions,
   partials: Array<PartialRuntimeConfig | undefined>,
 ): ModelProvider {
-  const configuredProvider = pickLastDefined<ModelProvider>(
-    partials.map((partial) => {
+  const configuredProvider = pickLastDefined<ModelProvider>([
+    ...partials.map((partial) => {
       const provider = partial?.model?.provider;
       return typeof provider === "string" && isModelProvider(provider)
         ? provider
         : undefined;
     }),
-  );
+    readEnvProvider(),
+    isModelProvider(cliOptions.provider) ? cliOptions.provider : undefined,
+  ]);
 
   if (configuredProvider) {
     return configuredProvider;
-  }
-
-  if (isModelProvider(cliOptions.provider)) {
-    return cliOptions.provider;
-  }
-
-  const envProvider =
-    process.env.QAGENT_PROVIDER ?? process.env.QAGENT_MODEL_PROVIDER;
-  if (isModelProvider(envProvider)) {
-    return envProvider;
   }
 
   if (process.env.OPENROUTER_API_KEY) {
@@ -142,6 +155,7 @@ function fromEnv(provider: ModelProvider): PartialRuntimeConfig {
   const autoMemoryForkMaxSteps =
     process.env.QAGENT_AUTO_MEMORY_FORK_MAX_AGENT_STEPS;
   const shellTimeout = process.env.QAGENT_SHELL_TIMEOUT_MS;
+  const modelRequestTimeout = process.env.QAGENT_MODEL_REQUEST_TIMEOUT_MS;
   const autoCompactThreshold = process.env.QAGENT_AUTO_COMPACT_THRESHOLD_TOKENS;
   const compactRecentKeepGroups = process.env.QAGENT_COMPACT_RECENT_KEEP_GROUPS;
   const envProvider =
@@ -163,6 +177,7 @@ function fromEnv(provider: ModelProvider): PartialRuntimeConfig {
       apiKey,
       baseUrl,
       model: process.env.QAGENT_MODEL,
+      requestTimeoutMs: modelRequestTimeout ? Number(modelRequestTimeout) : undefined,
       systemPrompt: process.env.QAGENT_SYSTEM_PROMPT,
       appName:
         process.env.QAGENT_APP_NAME ??
@@ -237,11 +252,14 @@ export async function loadRuntimeConfig(
       port: cliOptions.edgePort,
     },
   };
+  const envProvider = readEnvProvider();
+  const cliProvider = isModelProvider(cliOptions.provider)
+    ? cliOptions.provider
+    : undefined;
   const provider = resolveProvider(cliOptions, [
     globalConfig,
     projectConfig,
     explicitConfig,
-    cliConfig,
   ]);
 
   const defaults: RuntimeConfig = {
@@ -252,6 +270,7 @@ export async function loadRuntimeConfig(
       baseUrl: defaultBaseUrlForProvider(provider),
       model: "gpt-4.1-mini",
       temperature: 0.2,
+      requestTimeoutMs: 120_000,
       systemPrompt:
         "你是 QAgent，一个命令行中的自治代理。你只能通过 shell 工具与外部系统交互。",
       appName: defaultAppName(provider),
@@ -292,7 +311,9 @@ export async function loadRuntimeConfig(
   let merged = mergeConfig(defaults, globalConfig);
   merged = mergeConfig(merged, projectConfig);
   merged = mergeConfig(merged, explicitConfig);
+  merged = mergeConfig(merged, providerDefaultsConfig(envProvider));
   merged = mergeConfig(merged, fromEnv(provider));
+  merged = mergeConfig(merged, providerDefaultsConfig(cliProvider));
   merged = mergeConfig(merged, cliConfig);
 
   return {

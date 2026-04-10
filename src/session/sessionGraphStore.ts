@@ -11,6 +11,16 @@ import type {
 } from "../types.js";
 import { ensureDir, pathExists, readJsonIfExists, writeJson } from "../utils/index.js";
 
+async function readSessionJsonIfExists<T>(
+  targetPath: string,
+): Promise<T | undefined> {
+  try {
+    return await readJsonIfExists<T>(targetPath);
+  } catch {
+    return undefined;
+  }
+}
+
 export class SessionGraphStore {
   private readonly repoRoot: string;
   private readonly nodesRoot: string;
@@ -46,7 +56,7 @@ export class SessionGraphStore {
   }
 
   public async loadState(): Promise<SessionRepoState | undefined> {
-    return readJsonIfExists<SessionRepoState>(this.getStatePath());
+    return readSessionJsonIfExists<SessionRepoState>(this.getStatePath());
   }
 
   public async saveState(state: SessionRepoState): Promise<void> {
@@ -54,7 +64,9 @@ export class SessionGraphStore {
   }
 
   public async loadBranches(): Promise<SessionBranchRef[]> {
-    return (await readJsonIfExists<SessionBranchRef[]>(this.getBranchesPath())) ?? [];
+    return (
+      await readSessionJsonIfExists<SessionBranchRef[]>(this.getBranchesPath())
+    ) ?? [];
   }
 
   public async saveBranches(branches: SessionBranchRef[]): Promise<void> {
@@ -65,7 +77,7 @@ export class SessionGraphStore {
   }
 
   public async loadTags(): Promise<SessionTagRef[]> {
-    return (await readJsonIfExists<SessionTagRef[]>(this.getTagsPath())) ?? [];
+    return (await readSessionJsonIfExists<SessionTagRef[]>(this.getTagsPath())) ?? [];
   }
 
   public async saveTags(tags: SessionTagRef[]): Promise<void> {
@@ -77,7 +89,7 @@ export class SessionGraphStore {
 
   public async loadCommits(): Promise<SessionCommitRecord[]> {
     return (
-      await readJsonIfExists<SessionCommitRecord[]>(this.getCommitsPath())
+      await readSessionJsonIfExists<SessionCommitRecord[]>(this.getCommitsPath())
     ) ?? [];
   }
 
@@ -89,7 +101,7 @@ export class SessionGraphStore {
   }
 
   public async loadNode(nodeId: string): Promise<SessionNode | undefined> {
-    return readJsonIfExists<SessionNode>(this.getNodePath(nodeId));
+    return readSessionJsonIfExists<SessionNode>(this.getNodePath(nodeId));
   }
 
   public async saveNode(node: SessionNode): Promise<void> {
@@ -116,7 +128,7 @@ export class SessionGraphStore {
   }
 
   public async loadHead(headId: string): Promise<SessionWorkingHead | undefined> {
-    return readJsonIfExists<SessionWorkingHead>(this.getHeadPath(headId));
+    return readSessionJsonIfExists<SessionWorkingHead>(this.getHeadPath(headId));
   }
 
   public async saveHead(head: SessionWorkingHead): Promise<void> {

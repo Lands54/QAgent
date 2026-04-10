@@ -545,10 +545,20 @@ export async function serveGateway(cliOptions: CliOptions): Promise<void> {
     await server.stop(signal);
   };
   process.once("SIGINT", () => {
-    void stop("SIGINT");
+    void stop("SIGINT").catch((error) => {
+      process.stderr.write(
+        `gateway stop failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      process.exitCode = 1;
+    });
   });
   process.once("SIGTERM", () => {
-    void stop("SIGTERM");
+    void stop("SIGTERM").catch((error) => {
+      process.stderr.write(
+        `gateway stop failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      process.exitCode = 1;
+    });
   });
 
   await server.waitUntilStopped();
@@ -572,10 +582,10 @@ export class BackendClientController implements AppControllerLike {
 
   private readonly events = new EventEmitter();
   private readonly abortController = new AbortController();
+  private exitResolver?: () => void;
   private readonly exitPromise = new Promise<void>((resolve) => {
     this.exitResolver = resolve;
   });
-  private exitResolver?: () => void;
   private heartbeatTimer?: NodeJS.Timeout;
   private exiting = false;
   private disposed = false;

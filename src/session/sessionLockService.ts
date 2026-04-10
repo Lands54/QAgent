@@ -35,6 +35,10 @@ export interface SessionServiceLockOptions {
   mutationHeartbeatMs?: number;
   mutationTtlMs?: number;
   mutationPollMs?: number;
+  onHeartbeatError?: (
+    error: unknown,
+    metadata: Readonly<SessionLockMetadata>,
+  ) => void;
 }
 
 export interface SessionLockHandle {
@@ -178,7 +182,13 @@ export class SessionLockService {
   ): SessionLockHandle {
     let released = false;
     const timer = setInterval(() => {
-      void this.heartbeat(lockDir, metadata);
+      void this.heartbeat(lockDir, metadata).catch((error: unknown) => {
+        try {
+          this.options.onHeartbeatError?.(error, metadata);
+        } catch {
+          // Heartbeat runs in the background and must not crash the owner.
+        }
+      });
     }, heartbeatMs);
     timer.unref?.();
 

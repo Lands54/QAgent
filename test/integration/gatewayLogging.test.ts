@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runCli } from "../../src/cli/index.js";
 import { GatewayServer } from "../../src/gateway/index.js";
+import { DEFAULT_JSON_BODY_LIMIT_BYTES } from "../../src/utils/index.js";
 
 async function makeTempDir(prefix: string): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -20,6 +21,19 @@ afterEach(() => {
 });
 
 describe("Gateway logging", () => {
+  it("waitUntilStopped 会在 gateway stop 后完成", async () => {
+    const projectDir = await makeTempDir("qagent-gateway-stop-");
+    const server = await GatewayServer.create({ cwd: projectDir });
+    await server.listen();
+
+    const stopped = server.waitUntilStopped().then(() => "resolved");
+    await server.stop("test-cleanup");
+    await expect(Promise.race([
+      stopped,
+      new Promise((resolve) => setTimeout(() => resolve("timeout"), 100)),
+    ])).resolves.toBe("resolved");
+  });
+
   it("会写入项目内 gateway 日志，并且只记录元数据", async () => {
     const projectDir = await makeTempDir("qagent-gateway-logging-");
     const server = await GatewayServer.create({ cwd: projectDir });
@@ -102,5 +116,28 @@ describe("Gateway logging", () => {
     expect(logContents).toContain("\"inputLength\"");
     expect(logContents).not.toContain(secret);
     expect(logContents).not.toContain("/help");
+  });
+
+  it("会拒绝过大的 JSON 请求体", async () => {
+    const projectDir = await makeTempDir("qagent-gateway-body-limit-");
+    const server = await GatewayServer.create({ cwd: projectDir });
+    const { baseUrl } = await server.listen();
+
+    try {
+      const response = await fetch(`${baseUrl}/api/clients/open`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: "x".repeat(DEFAULT_JSON_BODY_LIMIT_BYTES + 1),
+      });
+
+      expect(response.status).toBe(413);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "请求 body 过大。",
+      });
+    } finally {
+      await server.stop("test-cleanup");
+    }
   });
 });

@@ -519,23 +519,28 @@ export class CommandService {
         return validationError("memory.show_usage", "用法：memory show <name>");
       }
       const record = await this.deps.showMemory(request.name);
+      if (!record) {
+        return runtimeErrorResult(
+          "memory.not_found",
+          `未找到 memory：${request.name}`,
+          { record },
+        );
+      }
       return success(
         "memory.show",
         [
-          record
-            ? info(
-                [
-                  `id: ${record.id}`,
-                  `name: ${record.name}`,
-                  `description: ${record.description}`,
-                  `scope: ${record.scope}`,
-                  `directory: ${record.directoryPath}`,
-                  `path: ${record.path}`,
-                  "",
-                  record.content,
-                ].join("\n"),
-              )
-            : error(`未找到 memory：${request.name}`),
+          info(
+            [
+              `id: ${record.id}`,
+              `name: ${record.name}`,
+              `description: ${record.description}`,
+              `scope: ${record.scope}`,
+              `directory: ${record.directoryPath}`,
+              `path: ${record.path}`,
+              "",
+              record.content,
+            ].join("\n"),
+          ),
         ],
         {
           record,
@@ -579,21 +584,29 @@ export class CommandService {
       );
     }
 
+    if (!request.key) {
+      return validationError("skills.show_usage", "用法：skills show <name|id>");
+    }
     const skill = skills.find((item) => item.id === request.key || item.name === request.key);
+    if (!skill) {
+      return runtimeErrorResult(
+        "skills.not_found",
+        `未找到 skill：${request.key}`,
+        { skill },
+      );
+    }
     return success(
       "skills.show",
       [
-        skill
-          ? info(
-              [
-                `id: ${skill.id}`,
-                `name: ${skill.name}`,
-                `description: ${skill.description}`,
-                `path: ${skill.filePath}`,
-                "说明：不需要手动激活，模型会在合适时自动使用。",
-              ].join("\n"),
-            )
-          : error(`未找到 skill：${request.key ?? ""}`),
+        info(
+          [
+            `id: ${skill.id}`,
+            `name: ${skill.name}`,
+            `description: ${skill.description}`,
+            `path: ${skill.filePath}`,
+            "说明：不需要手动激活，模型会在合适时自动使用。",
+          ].join("\n"),
+        ),
       ],
       {
         skill,

@@ -67,10 +67,29 @@ function buildConfig(projectDir: string): RuntimeConfig {
   };
 }
 
-class SlowFetchMemoryModelClient implements ModelClient {
+class ControlledFetchMemoryModelClient implements ModelClient {
+  public readonly fetchMemoryStarted: Promise<void>;
+  private readonly fetchMemoryReleased: Promise<void>;
+  private resolveFetchMemoryStarted?: () => void;
+  private resolveFetchMemory?: () => void;
+
+  public constructor() {
+    this.fetchMemoryStarted = new Promise<void>((resolve) => {
+      this.resolveFetchMemoryStarted = resolve;
+    });
+    this.fetchMemoryReleased = new Promise<void>((resolve) => {
+      this.resolveFetchMemory = resolve;
+    });
+  }
+
+  public releaseFetchMemory(): void {
+    this.resolveFetchMemory?.();
+  }
+
   public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
     if (request.systemPrompt.includes("fetch-memory 子任务")) {
-      await sleep(300);
+      this.resolveFetchMemoryStarted?.();
+      await this.fetchMemoryReleased;
       return {
         assistantText: JSON.stringify({
           selectedMemoryNames: ["reply-language"],
@@ -150,9 +169,10 @@ describe("input echo integration", () => {
   it("慢速 fetch-memory 不应阻塞用户消息回显", async () => {
     const projectDir = await makeTempDir("qagent-input-echo-");
     const config = buildConfig(projectDir);
+    const modelClient = new ControlledFetchMemoryModelClient();
     const agentManager = await createAgentManager(
       config,
-      new SlowFetchMemoryModelClient(),
+      modelClient,
     );
 
     try {
@@ -163,7 +183,7 @@ describe("input echo integration", () => {
       });
 
       const submission = agentManager.submitInputToActiveAgent("帮我写一个答复");
-      await sleep(60);
+      await modelClient.fetchMemoryStarted;
 
       const snapshotWhileFetching = agentManager.getActiveRuntime().getSnapshot();
       const userModelMessageWhileFetching = snapshotWhileFetching.modelMessages
@@ -177,6 +197,7 @@ describe("input echo integration", () => {
         "以下是系统自动补充的 Memory.md 参考",
       );
 
+      modelClient.releaseFetchMemory();
       await submission;
 
       const finalSnapshot = agentManager.getActiveRuntime().getSnapshot();

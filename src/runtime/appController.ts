@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 
-import { CommandService } from "../command/index.js";
 import { AgentManager } from "./agentManager.js";
+import { CommandService } from "../command/index.js";
 import {
   defaultBaseUrlForProvider,
   loadRuntimeConfig,
@@ -14,12 +14,6 @@ import { createModelClient } from "../model/index.js";
 import { SessionService } from "../session/index.js";
 import { SkillRegistry } from "../skills/index.js";
 import { ApprovalPolicy } from "../tool/index.js";
-import { AppStateAssembler } from "./application/appStateAssembler.js";
-import {
-  createEmptyState,
-  type AppState,
-} from "./appState.js";
-import { SlashCommandBus } from "./slashCommandBus.js";
 import type {
   ApprovalMode,
   CliOptions,
@@ -29,7 +23,15 @@ import type {
   ModelProvider,
   RuntimeEvent,
   RuntimeConfig,
+  UIMessage,
 } from "../types.js";
+import { createId } from "../utils/index.js";
+import { AppStateAssembler } from "./application/appStateAssembler.js";
+import {
+  createEmptyState,
+  type AppState,
+} from "./appState.js";
+import { SlashCommandBus } from "./slashCommandBus.js";
 
 type Listener = (state: AppState) => void;
 type RuntimeEventListener = (event: RuntimeEvent) => void;
@@ -202,7 +204,7 @@ export class AppController {
       return;
     }
 
-    void this.agentManager.submitInputToActiveAgent(trimmed);
+    this.submitInputToActiveAgent(trimmed);
   }
 
   public async executeCommand(request: CommandRequest): Promise<CommandResult> {
@@ -338,6 +340,48 @@ export class AppController {
     }
   }
 
+  private submitInputToActiveAgent(input: string): void {
+    void this.agentManager.submitInputToActiveAgent(input).catch((error) => {
+      const detail = formatControllerError(error);
+      const content = `发送输入失败：${detail}`;
+      void this.appendActiveAgentError(content, detail).catch(() => {
+        this.applyLocalError(content, detail);
+      });
+    });
+  }
+
+  private async appendActiveAgentError(content: string, detail: string): Promise<void> {
+    await this.agentManager.appendUiMessagesToActiveAgent([
+      createErrorMessage(content),
+    ]);
+    this.applyLocalError(content, detail);
+  }
+
+  private applyLocalError(content: string, detail: string): void {
+    const lastMessage = this.state.uiMessages.at(-1);
+    const shouldAppendMessage = !(
+      lastMessage?.role === "error"
+      && lastMessage.title === "Agent"
+      && lastMessage.content === content
+    );
+    const now = new Date().toISOString();
+    this.state = {
+      ...this.state,
+      status: {
+        mode: "error",
+        detail,
+        updatedAt: now,
+      },
+      uiMessages: shouldAppendMessage
+        ? [
+            ...this.state.uiMessages,
+            createErrorMessage(content, now),
+          ]
+        : this.state.uiMessages,
+    };
+    this.events.emit("state", this.state);
+  }
+
   private async rebuildModelRuntime(): Promise<void> {
     this.modelClient = createModelClient(this.config.model);
     await this.agentManager.rebuildModelRuntime(this.config, this.modelClient);
@@ -430,6 +474,23 @@ export class AppController {
       },
     });
   }
+}
+
+function formatControllerError(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function createErrorMessage(content: string, createdAt = new Date().toISOString()): UIMessage {
+  return {
+    id: createId("ui"),
+    role: "error",
+    title: "Agent",
+    content,
+    createdAt,
+  };
 }
 
 export async function createAppController(

@@ -1,7 +1,7 @@
 import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { AppController } from "../../src/runtime/appController.js";
 import type { RuntimeEvent, SessionEvent } from "../../src/types.js";
@@ -25,6 +25,20 @@ async function readEvents(projectDir: string, headId: string): Promise<SessionEv
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => JSON.parse(line) as SessionEvent);
+}
+
+async function waitForCondition(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("等待条件满足超时。");
 }
 
 describe("AppController", () => {
@@ -163,6 +177,39 @@ describe("AppController", () => {
       const lastMessage = controller.getState().uiMessages.at(-1);
       expect(lastMessage?.role).toBe("error");
       expect(lastMessage?.content).toContain("branch 名称必须匹配");
+    } finally {
+      await controller.dispose();
+    }
+  });
+
+  it("非 slash 输入后台失败会显示错误消息", async () => {
+    const projectDir = await makeTempDir("qagent-app-controller-input-error-");
+    const controller = await AppController.create({
+      cwd: projectDir,
+    });
+    const agentManager = (controller as unknown as {
+      agentManager: {
+        submitInputToActiveAgent: (input: string) => Promise<void>;
+      };
+    }).agentManager;
+    vi.spyOn(agentManager, "submitInputToActiveAgent")
+      .mockRejectedValue(new Error("queued input failed"));
+
+    try {
+      await expect(controller.submitInput("hello")).resolves.toBeUndefined();
+
+      await waitForCondition(() => {
+        return controller
+          .getState()
+          .uiMessages
+          .some((message) => message.content.includes("queued input failed"));
+      });
+
+      const lastMessage = controller.getState().uiMessages.at(-1);
+      expect(lastMessage?.role).toBe("error");
+      expect(lastMessage?.title).toBe("Agent");
+      expect(lastMessage?.content).toContain("发送输入失败");
+      expect(controller.getState().status.mode).toBe("error");
     } finally {
       await controller.dispose();
     }

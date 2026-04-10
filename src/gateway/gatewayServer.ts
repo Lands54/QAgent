@@ -15,7 +15,12 @@ import type {
   GatewaySseEvent,
 } from "./types.js";
 import type { CliOptions } from "../types.js";
-import { createId, getBuildInfo } from "../utils/index.js";
+import {
+  createId,
+  getBuildInfo,
+  HttpJsonBodyError,
+  readJsonBody,
+} from "../utils/index.js";
 
 interface SseClient {
   clientId?: string;
@@ -27,17 +32,6 @@ function json(response: ServerResponse, statusCode: number, payload: unknown): v
   response.statusCode = statusCode;
   response.setHeader("content-type", "application/json; charset=utf-8");
   response.end(JSON.stringify(payload));
-}
-
-async function readJson(request: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  if (chunks.length === 0) {
-    return {};
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
 function writeSse(response: ServerResponse, event: GatewaySseEvent): void {
@@ -70,10 +64,10 @@ export class GatewayServer {
     void this.handleRequest(request, response);
   });
   private readonly sseClients = new Set<SseClient>();
+  private stopResolver?: () => void;
   private readonly stopped = new Promise<void>((resolve) => {
     this.stopResolver = resolve;
   });
-  private stopResolver?: () => void;
   private edgeBridge?: GatewayEdgeBridgeClient;
   private readonly heartbeatSweepTimer: NodeJS.Timeout;
   private readonly logger: GatewayLogger;
@@ -166,7 +160,12 @@ export class GatewayServer {
           apiToken: gatewayConfig.apiToken,
           localBaseUrl: baseUrl,
           requestStop: (reason) => {
-            void this.stop(reason);
+            void this.stop(reason).catch((error) => {
+              this.logger.error("gateway.stop.requested.error", {
+                reason,
+                ...gatewayErrorFields(error),
+              });
+            });
           },
         });
         await this.edgeBridge.start();
@@ -297,7 +296,7 @@ export class GatewayServer {
       }
 
       if (request.method === "POST" && url.pathname === "/api/clients/open") {
-        const body = await readJson(request) as {
+        const body = await readJsonBody(request) as {
           clientId?: string;
           clientLabel: "cli" | "tui" | "api";
         };
@@ -360,7 +359,7 @@ export class GatewayServer {
       }
 
       if (request.method === "POST" && url.pathname === "/api/input") {
-        const body = await readJson(request) as {
+        const body = await readJsonBody(request) as {
           clientId: string;
           input: string;
         };
@@ -378,7 +377,7 @@ export class GatewayServer {
       }
 
       if (request.method === "POST" && url.pathname === "/api/commands") {
-        const body = await readJson(request) as GatewayCommandEnvelope;
+        const body = await readJsonBody(request) as GatewayCommandEnvelope;
         Object.assign(requestLogFields, {
           clientId: body.clientId,
           commandId: body.commandId,
@@ -395,7 +394,7 @@ export class GatewayServer {
       }
 
       if (request.method === "POST" && url.pathname === "/api/executors/open") {
-        const body = await readJson(request) as {
+        const body = await readJsonBody(request) as {
           clientId: string;
           worklineId?: string;
         };
@@ -422,7 +421,7 @@ export class GatewayServer {
           json(response, 400, { error: "缺少 executorId。" });
           return;
         }
-        const body = await readJson(request) as { clientId: string };
+        const body = await readJsonBody(request) as { clientId: string };
         Object.assign(requestLogFields, {
           clientId: body.clientId,
           executorId,
@@ -468,14 +467,22 @@ export class GatewayServer {
       if (request.method === "POST" && url.pathname === "/api/admin/stop") {
         this.logger.info("admin.stop", { reason: "admin-stop" });
         json(response, 200, { ok: true });
-        void this.stop("admin-stop");
+        void this.stop("admin-stop").catch((error) => {
+          this.logger.error("gateway.stop.admin.error", {
+            reason: "admin-stop",
+            ...gatewayErrorFields(error),
+          });
+        });
         return;
       }
 
       json(response, 404, { error: "未找到接口。" });
     } catch (error) {
       Object.assign(requestLogFields, gatewayErrorFields(error));
-      json(response, 500, {
+      const statusCode = error instanceof HttpJsonBodyError
+        ? error.statusCode
+        : 500;
+      json(response, statusCode, {
         error: error instanceof Error ? error.message : String(error),
       });
     }

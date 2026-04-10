@@ -19,6 +19,16 @@ import {
   writeJson,
 } from "../utils/index.js";
 
+async function readSessionJsonIfExists<T>(
+  targetPath: string,
+): Promise<T | undefined> {
+  try {
+    return await readJsonIfExists<T>(targetPath);
+  } catch {
+    return undefined;
+  }
+}
+
 interface InitializeHeadSessionInput {
   workingHeadId: string;
   sessionId?: string;
@@ -69,7 +79,9 @@ export class SessionStore {
   }
 
   public async load(workingHeadId: string): Promise<SessionSnapshot | undefined> {
-    const snapshot = await readJsonIfExists<SessionSnapshot>(this.getSnapshotPath(workingHeadId));
+    const snapshot = await readSessionJsonIfExists<SessionSnapshot>(
+      this.getSnapshotPath(workingHeadId),
+    );
     if (!snapshot) {
       return undefined;
     }
@@ -113,7 +125,7 @@ export class SessionStore {
   public async loadPendingApprovalCheckpoint(
     workingHeadId: string,
   ): Promise<PendingApprovalCheckpoint | undefined> {
-    const checkpoint = await readJsonIfExists<PendingApprovalCheckpoint>(
+    const checkpoint = await readSessionJsonIfExists<PendingApprovalCheckpoint>(
       this.getPendingApprovalCheckpointPath(workingHeadId),
     );
     if (!checkpoint) {

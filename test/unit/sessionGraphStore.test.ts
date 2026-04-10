@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -122,5 +122,69 @@ describe("SessionGraphStore", () => {
     expect(await store.listNodes()).toEqual([node]);
     expect(await store.loadHead("head_main")).toEqual(heads[0]);
     expect(await store.listHeads()).toEqual(heads);
+  });
+
+  it("会跳过损坏的 node/head JSON，而不是打断列表读取", async () => {
+    const root = await makeTempDir("qagent-session-graph-corrupt-");
+    const store = new SessionGraphStore(root);
+    const state: SessionRepoState = {
+      version: 2,
+      activeWorkingHeadId: "head_main",
+      defaultBranchName: "main",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const node: SessionNode = {
+      id: "node_main",
+      parentNodeIds: [],
+      kind: "root",
+      snapshot: buildSnapshot("session_demo", "head_main"),
+      abstractAssets: [],
+      snapshotHash: "hash_main",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const head: SessionWorkingHead = {
+      id: "head_main",
+      name: "main",
+      currentNodeId: "node_main",
+      sessionId: "session_demo",
+      attachment: {
+        mode: "branch",
+        name: "main",
+        nodeId: "node_main",
+      },
+      runtimeState: {
+        shellCwd: "/tmp/project",
+        status: "idle",
+      },
+      assetState: {},
+      status: "idle",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    await store.initializeRepo({
+      state,
+      branches: [],
+      tags: [],
+      commits: [],
+      nodes: [node],
+      heads: [head],
+    });
+    await writeFile(
+      path.join(root, "__repo", "nodes", "node_bad.json"),
+      "{",
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "__repo", "heads", "head_bad.json"),
+      "{",
+      "utf8",
+    );
+
+    expect(await store.loadNode("node_bad")).toBeUndefined();
+    expect(await store.loadHead("head_bad")).toBeUndefined();
+    expect(await store.listNodes()).toEqual([node]);
+    expect(await store.listHeads()).toEqual([head]);
   });
 });
