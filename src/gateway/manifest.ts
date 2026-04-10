@@ -1,8 +1,8 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
 
-import { readJsonIfExists, writeJson } from "../utils/index.js";
 import type { GatewayManifest } from "./types.js";
+import { readJsonIfExists, writeJson } from "../utils/index.js";
 
 export function getGatewayManifestPath(sessionRoot: string): string {
   return path.join(sessionRoot, "gateway-manifest.json");

@@ -278,4 +278,16 @@ describe("App", () => {
     expect(controller.requestExit).toHaveBeenCalledTimes(1);
   });
 
+  it("空闲态 Ctrl+C 会走与 /exit 相同的本地退出路径", async () => {
+    const controller = new FakeController();
+    const view = render(<App controller={controller as never} />);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    view.stdin.write("\x03");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(controller.interruptAgent).not.toHaveBeenCalled();
+    expect(controller.requestExit).toHaveBeenCalledTimes(1);
+  });
+
 });

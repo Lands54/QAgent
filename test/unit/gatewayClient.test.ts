@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { BackendClientController } from "../../src/gateway/gatewayClient.js";
-import { createEmptyState } from "../../src/runtime/index.js";
+import { createEmptyState, type AppState } from "../../src/runtime/index.js";
 
 class TestBackendClientController extends BackendClientController {
-  public constructor(transport: object) {
-    super(transport as never, "client_test", {
+  public constructor(transport: object, state?: AppState) {
+    super(transport as never, "client_test", state ?? {
       ...createEmptyState("/tmp/project"),
       status: {
         mode: "idle",
@@ -18,11 +18,15 @@ class TestBackendClientController extends BackendClientController {
   public async startEventStreamForTest(): Promise<void> {
     await (this as unknown as { startEventStream: () => Promise<void> }).startEventStream();
   }
+
+  public startHeartbeatForTest(): void {
+    (this as unknown as { startHeartbeat: () => void }).startHeartbeat();
+  }
 }
 
 function createTransportStub(input?: {
   submitInput?: () => Promise<{ exitRequested?: boolean }>;
-  openEventStream?: () => Promise<void>;
+  openEventStream?: (signal: AbortSignal) => Promise<void>;
   closeClient?: (signal?: AbortSignal) => Promise<void>;
 }) {
   return {
@@ -33,7 +37,11 @@ function createTransportStub(input?: {
     }),
     closeClient: vi.fn(async (_clientId: string, signal?: AbortSignal) =>
       input?.closeClient?.(signal)),
-    openEventStream: vi.fn(input?.openEventStream ?? (async () => {})),
+    openEventStream: vi.fn(async (
+      _clientId: string,
+      _onEvent: unknown,
+      signal: AbortSignal,
+    ) => input?.openEventStream?.(signal)),
     heartbeatExecutor: vi.fn(async () => {}),
   };
 }
@@ -98,5 +106,38 @@ describe("BackendClientController", () => {
 
     await expect(controller.dispose()).resolves.toBeUndefined();
     expect(transport.closeClient).toHaveBeenCalledWith("client_test", expect.any(AbortSignal));
+  });
+
+  it("requestExit 会立即中止事件流并停止 heartbeat", async () => {
+    vi.useFakeTimers();
+    let eventStreamSignal: AbortSignal | undefined;
+    const transport = createTransportStub({
+      openEventStream: async (signal) => {
+        eventStreamSignal = signal;
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+    });
+    const controller = new TestBackendClientController(transport, {
+      ...createEmptyState("/tmp/project"),
+      activeExecutorId: "executor_test",
+    });
+
+    try {
+      await controller.startEventStreamForTest();
+      controller.startHeartbeatForTest();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(transport.heartbeatExecutor).toHaveBeenCalledTimes(1);
+
+      await controller.requestExit();
+      expect(eventStreamSignal?.aborted).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(transport.heartbeatExecutor).toHaveBeenCalledTimes(1);
+    } finally {
+      await controller.dispose();
+      vi.useRealTimers();
+    }
   });
 });

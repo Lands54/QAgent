@@ -8,9 +8,9 @@ import type {
   GatewayHealthEnvelope,
   GatewayRegisterMessage,
 } from "../types.js";
-import { createId, getBuildInfo } from "../utils/index.js";
 import type { GatewayHost } from "./gatewayHost.js";
 import type { GatewaySseEvent } from "./types.js";
+import { createId, getBuildInfo } from "../utils/index.js";
 
 function toWebSocketUrl(baseUrl: string): string {
   if (baseUrl.startsWith("https://")) {

@@ -519,6 +519,7 @@ export async function serveGateway(cliOptions: CliOptions): Promise<void> {
         `pid: ${status.manifest.pid}`,
         `url: ${status.manifest.baseUrl}`,
         `cwd: ${status.manifest.cwd}`,
+        `log: ${status.health.logPath ?? status.manifest.logPath ?? "N/A"}`,
         "如需重启，请先运行：qagent gateway stop",
       ].join("\n") + "\n");
       return;
@@ -535,8 +536,9 @@ export async function serveGateway(cliOptions: CliOptions): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const { baseUrl } = await server.listen();
+  const { baseUrl, logPath } = await server.listen();
   process.stdout.write(`gateway listening on ${baseUrl}\n`);
+  process.stdout.write(`gateway log: ${logPath}\n`);
 
   const stop = async (signal: string) => {
     process.stdout.write(`stopping gateway (${signal})\n`);
@@ -576,6 +578,7 @@ export class BackendClientController implements AppControllerLike {
   private exitResolver?: () => void;
   private heartbeatTimer?: NodeJS.Timeout;
   private exiting = false;
+  private disposed = false;
 
   protected constructor(
     private readonly transport: BackendTransport,
@@ -624,7 +627,16 @@ export class BackendClientController implements AppControllerLike {
   }
 
   public async requestExit(): Promise<void> {
+    if (this.exiting) {
+      this.exitResolver?.();
+      return;
+    }
     this.exiting = true;
+    this.abortController.abort();
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
     this.state = {
       ...this.state,
       shouldExit: true,
@@ -638,11 +650,11 @@ export class BackendClientController implements AppControllerLike {
   }
 
   public async dispose(): Promise<void> {
-    this.exiting = true;
-    this.abortController.abort();
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
+    if (this.disposed) {
+      return;
     }
+    this.disposed = true;
+    await this.requestExit();
     await this.closeClientBestEffort();
   }
 

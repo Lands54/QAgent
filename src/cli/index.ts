@@ -91,6 +91,7 @@ export async function runCli(argv: string[]): Promise<void> {
           `pid: ${status.manifest.pid}`,
           `url: ${status.manifest.baseUrl}`,
           `cwd: ${status.manifest.cwd}`,
+          `log: ${status.health?.logPath ?? status.manifest.logPath ?? "N/A"}`,
         ].join("\n") + "\n",
       );
       process.exitCode = status.health ? 0 : 1;
@@ -144,7 +145,10 @@ export async function runCli(argv: string[]): Promise<void> {
       if (invocation.cliOptions.initialPrompt) {
         await controller.submitInput(invocation.cliOptions.initialPrompt);
       }
-      await controller.waitForExit();
+      await Promise.race([
+        controller.waitForExit(),
+        app.waitUntilExit(),
+      ]);
     } finally {
       app.unmount();
       await controller.dispose();

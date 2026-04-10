@@ -1,5 +1,22 @@
 import { EventEmitter } from "node:events";
 
+import { ClientSessionService } from "./clientSessionService.js";
+import {
+  commandRequestLogFields,
+  GatewayLogger,
+  gatewayErrorFields,
+  getGatewayLogPath,
+} from "./gatewayLogger.js";
+import type {
+  GatewayCommandEnvelope,
+  GatewayCommandResult,
+  GatewayExecutorLease,
+  GatewayOpenClientRequest,
+  GatewayOpenClientResponse,
+  GatewaySseEvent,
+  GatewayStateResponse,
+} from "./types.js";
+import { CommandService } from "../command/index.js";
 import {
   defaultBaseUrlForProvider,
   loadRuntimeConfig,
@@ -29,17 +46,6 @@ import type {
   RuntimeEvent,
 } from "../types.js";
 import { createId } from "../utils/index.js";
-import { CommandService } from "../command/index.js";
-import { ClientSessionService } from "./clientSessionService.js";
-import type {
-  GatewayClientSession,
-  GatewayCommandEnvelope,
-  GatewayCommandResult,
-  GatewayOpenClientRequest,
-  GatewayOpenClientResponse,
-  GatewaySseEvent,
-  GatewayStateResponse,
-} from "./types.js";
 
 type GatewayEventListener = (event: GatewaySseEvent) => void;
 
@@ -52,7 +58,13 @@ export class GatewayHost {
   public static async create(cliOptions: CliOptions): Promise<GatewayHost> {
     const config = await loadRuntimeConfig(cliOptions);
     const host = new GatewayHost(config);
-    await host.initialize();
+    try {
+      await host.initialize();
+    } catch (error) {
+      host.logger.error("host.initialize.error", gatewayErrorFields(error));
+      await host.logger.flush();
+      throw error;
+    }
     return host;
   }
 
@@ -67,9 +79,11 @@ export class GatewayHost {
   private readonly stateByClient = new Map<string, AppState>();
   private readonly commandContextsByExecutor = new Map<string, CommandContext>();
   private readonly slashBusByClient = new Map<string, SlashCommandBus>();
+  private readonly logger: GatewayLogger;
   private modelClient: ModelClient;
 
   private constructor(private readonly config: RuntimeConfig) {
+    this.logger = new GatewayLogger(getGatewayLogPath(config.resolvedPaths.projectAgentDir));
     this.sessionService = new SessionService(config.resolvedPaths.sessionRoot, [
       createMemorySessionAssetProvider({
         projectMemoryDir: config.resolvedPaths.projectMemoryDir,
@@ -106,6 +120,10 @@ export class GatewayHost {
     return this.config;
   }
 
+  public getLogger(): GatewayLogger {
+    return this.logger;
+  }
+
   public getLeaseCount(): number {
     return this.clientSessions.getLeaseCount();
   }
@@ -121,6 +139,13 @@ export class GatewayHost {
     this.ensureClientExecutor(clientId);
     const state = await this.buildState(clientId);
     this.emitStateSnapshot(clientId, state);
+    const client = this.clientSessions.requireClient(clientId);
+    this.logger.info("client.open", {
+      clientId,
+      clientLabel: input.clientLabel,
+      activeExecutorId: client.activeExecutorId,
+      activeWorklineId: client.activeWorklineId,
+    });
     return {
       clientId,
       state,
@@ -128,9 +153,16 @@ export class GatewayHost {
   }
 
   public closeClient(clientId: string): void {
+    const client = this.clientSessions.getClient(clientId);
     this.clientSessions.closeClient(clientId);
     this.stateByClient.delete(clientId);
     this.slashBusByClient.delete(clientId);
+    this.logger.info("client.close", {
+      clientId,
+      existed: Boolean(client),
+      activeExecutorId: client?.activeExecutorId,
+      activeWorklineId: client?.activeWorklineId,
+    });
   }
 
   public async getState(clientId: string): Promise<GatewayStateResponse> {
@@ -149,10 +181,15 @@ export class GatewayHost {
       ?? client.activeWorklineId
       ?? this.pickAttachableWorklineId(clientId);
     const runtime = this.agentManager.getRuntimeByWorklineId(targetWorklineId);
-    this.clientSessions.attachExecutor({
+    const lease = this.clientSessions.attachExecutor({
       clientId,
       executorId: runtime.agentId,
       worklineId: runtime.headId,
+    });
+    this.logger.info("executor.attach", {
+      clientId,
+      executorId: lease.executorId,
+      worklineId: lease.worklineId,
     });
     return {
       executorId: runtime.agentId,
@@ -165,11 +202,25 @@ export class GatewayHost {
   }
 
   public releaseExecutor(executorId: string, clientId?: string): void {
+    const lease = this.clientSessions.getLeaseByExecutorId(executorId);
     this.clientSessions.releaseExecutor(executorId, clientId);
+    this.logger.info("executor.release", {
+      clientId: clientId ?? lease?.clientId,
+      executorId,
+      existed: Boolean(lease),
+      worklineId: lease?.worklineId,
+    });
   }
 
-  public sweepExpiredLeases(ttlMs: number): void {
-    this.clientSessions.sweepExpiredLeases(ttlMs);
+  public sweepExpiredLeases(ttlMs: number): GatewayExecutorLease[] {
+    const expired = this.clientSessions.sweepExpiredLeases(ttlMs);
+    if (expired.length > 0) {
+      this.logger.warn("lease.sweep.expired", {
+        expiredCount: expired.length,
+        ttlMs,
+      });
+    }
+    return expired;
   }
 
   public async submitInput(
@@ -183,39 +234,60 @@ export class GatewayHost {
     if (!trimmed) {
       return { handled: true };
     }
+    this.logger.info("input.received", {
+      clientId,
+      inputLength: trimmed.length,
+    });
     const client = this.clientSessions.requireClient(clientId);
     const runtime = this.ensureClientRuntime(clientId);
-    const slashBus = this.getSlashBus(clientId);
-    const slashResult = await slashBus.executeDetailed(trimmed);
-    if (slashResult.handled) {
-      if (slashResult.request && slashResult.result) {
-        await this.emitCommandLifecycleEvents(
-          clientId,
-          createId("cmd"),
-          slashResult.request,
-          slashResult.result,
+    try {
+      const slashBus = this.getSlashBus(clientId);
+      const slashResult = await slashBus.executeDetailed(trimmed);
+      if (slashResult.handled) {
+        if (slashResult.request && slashResult.result) {
+          await this.emitCommandLifecycleEvents(
+            clientId,
+            createId("cmd"),
+            slashResult.request,
+            slashResult.result,
+          );
+        }
+        await this.agentManager.recordSlashCommandOnActiveAgent(
+          trimmed,
+          slashResult.messages,
+          client.activeExecutorId,
         );
+        if (slashResult.clearUi) {
+          await this.agentManager.clearActiveAgentUi(client.activeExecutorId);
+        }
+        this.logger.info("input.completed", {
+          clientId,
+          handled: true,
+          exitRequested: slashResult.exitRequested,
+        });
+        return {
+          handled: true,
+          exitRequested: slashResult.exitRequested,
+        };
       }
-      await this.agentManager.recordSlashCommandOnActiveAgent(
-        trimmed,
-        slashResult.messages,
-        client.activeExecutorId,
-      );
-      if (slashResult.clearUi) {
-        await this.agentManager.clearActiveAgentUi(client.activeExecutorId);
-      }
-      return {
-        handled: true,
-        exitRequested: slashResult.exitRequested,
-      };
-    }
 
-    await this.agentManager.submitInputToAgent(runtime.agentId, trimmed, {
-      approvalMode: "interactive",
-    });
-    return {
-      handled: false,
-    };
+      await this.agentManager.submitInputToAgent(runtime.agentId, trimmed, {
+        approvalMode: "interactive",
+      });
+      this.logger.info("input.completed", {
+        clientId,
+        handled: false,
+      });
+      return {
+        handled: false,
+      };
+    } catch (error) {
+      this.logger.error("input.error", {
+        clientId,
+        ...gatewayErrorFields(error),
+      });
+      throw error;
+    }
   }
 
   public async executeCommand(
@@ -235,6 +307,12 @@ export class GatewayHost {
       commandId: envelope.commandId,
     });
 
+    this.logger.info("command.started", {
+      clientId: envelope.clientId,
+      commandId: envelope.commandId,
+      executorId: targetExecutorId,
+      ...commandRequestLogFields(envelope.request),
+    });
     try {
       const result = await this.createCommandService(envelope.clientId)
         .execute(envelope.request);
@@ -245,10 +323,28 @@ export class GatewayHost {
         envelope.request,
         result,
       );
+      this.logger.info("command.completed", {
+        clientId: envelope.clientId,
+        code: result.code,
+        commandId: envelope.commandId,
+        executorId: targetExecutorId,
+        exitCode: result.exitCode,
+        status: result.status,
+        ...commandRequestLogFields(envelope.request),
+      });
       return {
         commandId: envelope.commandId,
         result,
       };
+    } catch (error) {
+      this.logger.error("command.error", {
+        clientId: envelope.clientId,
+        commandId: envelope.commandId,
+        executorId: targetExecutorId,
+        ...commandRequestLogFields(envelope.request),
+        ...gatewayErrorFields(error),
+      });
+      throw error;
     } finally {
       this.commandContextsByExecutor.delete(targetExecutorId);
     }
@@ -259,6 +355,11 @@ export class GatewayHost {
   }
 
   private async initialize(): Promise<void> {
+    this.logger.info("host.initialize.started", {
+      cwd: this.config.cwd,
+      sessionRoot: this.config.resolvedPaths.sessionRoot,
+      workspaceId: this.config.gateway.workspaceId ?? "local",
+    });
     await this.skillRegistry.refresh();
     await this.agentManager.initialize({
       cwd: this.config.cwd,
@@ -271,6 +372,11 @@ export class GatewayHost {
     });
     this.agentManager.subscribeRuntimeEvents((event) => {
       this.forwardRuntimeEvent(event);
+    });
+    this.logger.info("host.initialize.completed", {
+      cwd: this.config.cwd,
+      sessionRoot: this.config.resolvedPaths.sessionRoot,
+      workspaceId: this.config.gateway.workspaceId ?? "local",
     });
   }
 

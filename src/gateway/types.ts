@@ -1,6 +1,6 @@
 import type { AppState } from "../runtime/index.js";
-import type { CliOptions } from "../types.js";
 import type {
+  CliOptions,
   CommandRequest,
   CommandResult,
   RuntimeEvent,
@@ -13,6 +13,7 @@ export interface GatewayManifest {
   cwd: string;
   sessionRoot: string;
   workspaceId: string;
+  logPath?: string;
   version: string;
   buildSha: string;
   startedAt: string;
@@ -69,6 +70,7 @@ export interface GatewayHealthResponse {
   cwd: string;
   sessionRoot: string;
   workspaceId: string;
+  logPath?: string;
   clientCount: number;
   leaseCount: number;
   version: string;

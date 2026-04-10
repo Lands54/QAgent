@@ -99,8 +99,9 @@ export function App({ controller }: AppProps) {
   }, [exit, state.shouldExit]);
 
   useInput((value, key) => {
+    const isCtrlC = value === "\x03" || (key.ctrl && value.toLowerCase() === "c");
     if (state.pendingApproval) {
-      if (key.ctrl && value.toLowerCase() === "c") {
+      if (isCtrlC) {
         runControllerAction(controller.interruptAgent(), "取消审批流程失败");
         return;
       }
@@ -165,11 +166,11 @@ export function App({ controller }: AppProps) {
       return;
     }
 
-    if (key.ctrl && value.toLowerCase() === "c") {
+    if (isCtrlC) {
       if (state.status.mode === "running" || state.status.mode === "awaiting-approval") {
         runControllerAction(controller.interruptAgent(), "中断执行失败");
       } else {
-        runControllerAction(controller.requestExit(), "退出失败");
+        requestLocalExit();
       }
     }
   });
@@ -216,10 +217,16 @@ export function App({ controller }: AppProps) {
       return true;
     }
     if (trimmed === "/exit") {
-      runControllerAction(controller.requestExit(), "退出失败");
+      requestLocalExit();
       return true;
     }
     return false;
+  }
+
+  function requestLocalExit(): void {
+    const exitAction = controller.requestExit();
+    exit();
+    runControllerAction(exitAction, "退出失败");
   }
 
   function appendLocalMessage(role: UIMessage["role"], content: string): void {

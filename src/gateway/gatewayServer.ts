@@ -1,14 +1,21 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
-import { createId, getBuildInfo } from "../utils/index.js";
-import { clearGatewayManifest, writeGatewayManifest } from "./manifest.js";
 import { GatewayEdgeBridgeClient } from "./edgeBridgeClient.js";
 import { GatewayHost } from "./gatewayHost.js";
+import {
+  commandRequestLogFields,
+  gatewayErrorFields,
+  type GatewayLogger,
+  type GatewayLogFields,
+} from "./gatewayLogger.js";
+import { clearGatewayManifest, writeGatewayManifest } from "./manifest.js";
 import type {
   GatewayCommandEnvelope,
   GatewayHealthResponse,
   GatewaySseEvent,
 } from "./types.js";
+import type { CliOptions } from "../types.js";
+import { createId, getBuildInfo } from "../utils/index.js";
 
 interface SseClient {
   clientId?: string;
@@ -39,8 +46,22 @@ function writeSse(response: ServerResponse, event: GatewaySseEvent): void {
   response.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+function isExecutorHeartbeatPath(pathname: string): boolean {
+  return /^\/api\/executors\/[^/]+\/heartbeat$/u.test(pathname);
+}
+
+function shouldSkipHttpLog(method: string, pathname: string, statusCode: number): boolean {
+  if (statusCode >= 400) {
+    return false;
+  }
+  return (
+    (method === "GET" && pathname === "/api/health")
+    || (method === "POST" && isExecutorHeartbeatPath(pathname))
+  );
+}
+
 export class GatewayServer {
-  public static async create(cliOptions: import("../types.js").CliOptions): Promise<GatewayServer> {
+  public static async create(cliOptions: CliOptions): Promise<GatewayServer> {
     const host = await GatewayHost.create(cliOptions);
     return new GatewayServer(host);
   }
@@ -54,11 +75,16 @@ export class GatewayServer {
   });
   private stopResolver?: () => void;
   private edgeBridge?: GatewayEdgeBridgeClient;
-  private readonly heartbeatSweepTimer = setInterval(() => {
-    this.host.sweepExpiredLeases(20_000);
-  }, 5_000);
+  private readonly heartbeatSweepTimer: NodeJS.Timeout;
+  private readonly logger: GatewayLogger;
+  private stopping = false;
 
   private constructor(private readonly host: GatewayHost) {
+    this.logger = host.getLogger();
+    this.heartbeatSweepTimer = setInterval(() => {
+      this.host.sweepExpiredLeases(20_000);
+    }, 5_000);
+    this.heartbeatSweepTimer.unref?.();
     this.host.subscribe((event) => {
       for (const client of this.sseClients) {
         if (client.scope === "workspace") {
@@ -79,6 +105,7 @@ export class GatewayServer {
   public async listen(): Promise<{
     port: number;
     baseUrl: string;
+    logPath: string;
   }> {
     await new Promise<void>((resolve) => {
       this.server.listen(0, "127.0.0.1", () => resolve());
@@ -91,6 +118,7 @@ export class GatewayServer {
     const baseUrl = `http://127.0.0.1:${port}`;
     const buildInfo = getBuildInfo();
     const workspaceId = this.host.getConfig().gateway.workspaceId ?? "local";
+    const logPath = this.logger.getLogPath();
     await writeGatewayManifest(this.host.getConfig().resolvedPaths.sessionRoot, {
       pid: process.pid,
       port,
@@ -98,10 +126,19 @@ export class GatewayServer {
       cwd: this.host.getConfig().cwd,
       sessionRoot: this.host.getConfig().resolvedPaths.sessionRoot,
       workspaceId,
+      logPath,
       version: buildInfo.version,
       buildSha: buildInfo.buildSha,
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+    });
+    this.logger.info("gateway.listen", {
+      baseUrl,
+      cwd: this.host.getConfig().cwd,
+      logPath,
+      port,
+      sessionRoot: this.host.getConfig().resolvedPaths.sessionRoot,
+      workspaceId,
     });
     const gatewayConfig = this.host.getConfig().gateway;
     const hasRemoteConfig = Boolean(
@@ -117,21 +154,37 @@ export class GatewayServer {
       ) {
         throw new Error("gateway 远程注册配置不完整，需要 workspaceId、edgeBaseUrl、apiToken。");
       }
-      this.edgeBridge = new GatewayEdgeBridgeClient({
-        host: this.host,
-        edgeBaseUrl: gatewayConfig.edgeBaseUrl,
-        workspaceId: gatewayConfig.workspaceId,
-        apiToken: gatewayConfig.apiToken,
-        localBaseUrl: baseUrl,
-        requestStop: (reason) => {
-          void this.stop(reason);
-        },
-      });
-      await this.edgeBridge.start();
+      try {
+        this.logger.info("edge_bridge.starting", {
+          edgeBaseUrl: gatewayConfig.edgeBaseUrl,
+          workspaceId: gatewayConfig.workspaceId,
+        });
+        this.edgeBridge = new GatewayEdgeBridgeClient({
+          host: this.host,
+          edgeBaseUrl: gatewayConfig.edgeBaseUrl,
+          workspaceId: gatewayConfig.workspaceId,
+          apiToken: gatewayConfig.apiToken,
+          localBaseUrl: baseUrl,
+          requestStop: (reason) => {
+            void this.stop(reason);
+          },
+        });
+        await this.edgeBridge.start();
+        this.logger.info("edge_bridge.started", {
+          workspaceId: gatewayConfig.workspaceId,
+        });
+      } catch (error) {
+        this.logger.error("edge_bridge.start.error", {
+          workspaceId: gatewayConfig.workspaceId,
+          ...gatewayErrorFields(error),
+        });
+        throw error;
+      }
     }
     return {
       port,
       baseUrl,
+      logPath,
     };
   }
 
@@ -140,32 +193,66 @@ export class GatewayServer {
   }
 
   public async stop(reason = "manual-stop"): Promise<void> {
-    await this.edgeBridge?.notifyStopping(reason);
-    await this.edgeBridge?.dispose();
-    this.edgeBridge = undefined;
-    for (const client of this.sseClients) {
-      writeSse(client.response, {
-        id: createId("gw"),
-        type: "gateway.stopping",
-        createdAt: new Date().toISOString(),
-        payload: { reason },
-      });
-      client.response.end();
+    if (this.stopping) {
+      await this.stopped;
+      return;
     }
-    this.sseClients.clear();
-    clearInterval(this.heartbeatSweepTimer);
-    await this.host.dispose();
-    await clearGatewayManifest(this.host.getConfig().resolvedPaths.sessionRoot);
-    await new Promise<void>((resolve, reject) => {
-      this.server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
+    this.stopping = true;
+    this.logger.info("gateway.stop.started", {
+      reason,
+      sseClientCount: this.sseClients.size,
     });
-    this.stopResolver?.();
+    try {
+      try {
+        await this.edgeBridge?.notifyStopping(reason);
+      } catch (error) {
+        this.logger.error("edge_bridge.notify_stopping.error", {
+          reason,
+          ...gatewayErrorFields(error),
+        });
+      }
+      try {
+        await this.edgeBridge?.dispose();
+      } catch (error) {
+        this.logger.error("edge_bridge.dispose.error", {
+          reason,
+          ...gatewayErrorFields(error),
+        });
+      }
+      this.edgeBridge = undefined;
+      for (const client of this.sseClients) {
+        writeSse(client.response, {
+          id: createId("gw"),
+          type: "gateway.stopping",
+          createdAt: new Date().toISOString(),
+          payload: { reason },
+        });
+        client.response.end();
+      }
+      this.sseClients.clear();
+      clearInterval(this.heartbeatSweepTimer);
+      await this.host.dispose();
+      await clearGatewayManifest(this.host.getConfig().resolvedPaths.sessionRoot);
+      await new Promise<void>((resolve, reject) => {
+        this.server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+      this.logger.info("gateway.stop.completed", { reason });
+    } catch (error) {
+      this.logger.error("gateway.stop.error", {
+        reason,
+        ...gatewayErrorFields(error),
+      });
+      throw error;
+    } finally {
+      this.stopResolver?.();
+      await this.logger.flush();
+    }
   }
 
   private async handleRequest(
@@ -173,6 +260,23 @@ export class GatewayServer {
     response: ServerResponse,
   ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const method = request.method ?? "UNKNOWN";
+    const startedAt = Date.now();
+    const requestLogFields: GatewayLogFields = {
+      method,
+      path: url.pathname,
+    };
+    let suppressHttpLog = false;
+    response.on("finish", () => {
+      if (suppressHttpLog || shouldSkipHttpLog(method, url.pathname, response.statusCode)) {
+        return;
+      }
+      this.logger.info("http.request", {
+        ...requestLogFields,
+        durationMs: Date.now() - startedAt,
+        statusCode: response.statusCode,
+      });
+    });
     try {
       if (request.method === "GET" && url.pathname === "/api/health") {
         const buildInfo = getBuildInfo();
@@ -182,6 +286,7 @@ export class GatewayServer {
           cwd: this.host.getConfig().cwd,
           sessionRoot: this.host.getConfig().resolvedPaths.sessionRoot,
           workspaceId: this.host.getConfig().gateway.workspaceId ?? "local",
+          logPath: this.logger.getLogPath(),
           clientCount: this.host.getClientCount(),
           leaseCount: this.host.getLeaseCount(),
           version: buildInfo.version,
@@ -196,12 +301,21 @@ export class GatewayServer {
           clientId?: string;
           clientLabel: "cli" | "tui" | "api";
         };
-        json(response, 200, await this.host.openClient(body));
+        Object.assign(requestLogFields, {
+          clientId: body.clientId,
+          clientLabel: body.clientLabel,
+        });
+        const opened = await this.host.openClient(body);
+        Object.assign(requestLogFields, {
+          clientId: opened.clientId,
+        });
+        json(response, 200, opened);
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/api/state") {
         const clientId = url.searchParams.get("clientId");
+        Object.assign(requestLogFields, { clientId });
         if (!clientId) {
           json(response, 400, { error: "缺少 clientId。" });
           return;
@@ -211,6 +325,7 @@ export class GatewayServer {
       }
 
       if (request.method === "GET" && url.pathname === "/api/events") {
+        suppressHttpLog = true;
         const clientId = url.searchParams.get("clientId") ?? undefined;
         const scope =
           url.searchParams.get("scope") === "workspace" ? "workspace" : "client";
@@ -225,9 +340,21 @@ export class GatewayServer {
           scope,
           response,
         };
+        const sseStartedAt = Date.now();
         this.sseClients.add(client);
+        this.logger.info("sse.connect", {
+          activeSseClients: this.sseClients.size,
+          clientId,
+          scope,
+        });
         request.on("close", () => {
           this.sseClients.delete(client);
+          this.logger.info("sse.disconnect", {
+            activeSseClients: this.sseClients.size,
+            clientId,
+            durationMs: Date.now() - sseStartedAt,
+            scope,
+          });
         });
         return;
       }
@@ -237,13 +364,33 @@ export class GatewayServer {
           clientId: string;
           input: string;
         };
-        json(response, 200, await this.host.submitInput(body.clientId, body.input));
+        Object.assign(requestLogFields, {
+          clientId: body.clientId,
+          inputLength: body.input.trim().length,
+        });
+        const result = await this.host.submitInput(body.clientId, body.input);
+        Object.assign(requestLogFields, {
+          exitRequested: result.exitRequested,
+          handled: result.handled,
+        });
+        json(response, 200, result);
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/commands") {
         const body = await readJson(request) as GatewayCommandEnvelope;
-        json(response, 200, await this.host.executeCommand(body));
+        Object.assign(requestLogFields, {
+          clientId: body.clientId,
+          commandId: body.commandId,
+          executorId: body.executorId,
+          ...commandRequestLogFields(body.request),
+        });
+        const result = await this.host.executeCommand(body);
+        Object.assign(requestLogFields, {
+          commandResultCode: result.result.code,
+          commandStatus: result.result.status,
+        });
+        json(response, 200, result);
         return;
       }
 
@@ -252,7 +399,16 @@ export class GatewayServer {
           clientId: string;
           worklineId?: string;
         };
-        json(response, 200, this.host.openExecutor(body.clientId, body.worklineId));
+        Object.assign(requestLogFields, {
+          clientId: body.clientId,
+          worklineId: body.worklineId,
+        });
+        const result = this.host.openExecutor(body.clientId, body.worklineId);
+        Object.assign(requestLogFields, {
+          executorId: result.executorId,
+          worklineId: result.worklineId,
+        });
+        json(response, 200, result);
         return;
       }
 
@@ -267,6 +423,10 @@ export class GatewayServer {
           return;
         }
         const body = await readJson(request) as { clientId: string };
+        Object.assign(requestLogFields, {
+          clientId: body.clientId,
+          executorId,
+        });
         this.host.heartbeatExecutor(executorId, body.clientId);
         json(response, 200, { ok: true });
         return;
@@ -281,6 +441,10 @@ export class GatewayServer {
           json(response, 400, { error: "缺少 executorId。" });
           return;
         }
+        Object.assign(requestLogFields, {
+          clientId: url.searchParams.get("clientId") ?? undefined,
+          executorId,
+        });
         this.host.releaseExecutor(executorId, url.searchParams.get("clientId") ?? undefined);
         json(response, 200, { ok: true });
         return;
@@ -295,12 +459,14 @@ export class GatewayServer {
           json(response, 400, { error: "缺少 clientId。" });
           return;
         }
+        Object.assign(requestLogFields, { clientId });
         this.host.closeClient(clientId);
         json(response, 200, { ok: true });
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/admin/stop") {
+        this.logger.info("admin.stop", { reason: "admin-stop" });
         json(response, 200, { ok: true });
         void this.stop("admin-stop");
         return;
@@ -308,6 +474,7 @@ export class GatewayServer {
 
       json(response, 404, { error: "未找到接口。" });
     } catch (error) {
+      Object.assign(requestLogFields, gatewayErrorFields(error));
       json(response, 500, {
         error: error instanceof Error ? error.message : String(error),
       });
