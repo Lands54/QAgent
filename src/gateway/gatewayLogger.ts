@@ -17,9 +17,23 @@ export function getGatewayLogPath(projectAgentDir: string): string {
 
 export function gatewayErrorFields(error: unknown): GatewayLogFields {
   if (error instanceof Error) {
+    const cause = "cause" in error
+      ? (error as Error & { cause?: unknown }).cause
+      : undefined;
     return {
       errorName: error.name,
       errorMessage: error.message,
+      errorStack: error.stack,
+      causeName: cause instanceof Error ? cause.name : undefined,
+      causeMessage: cause instanceof Error
+        ? cause.message
+        : typeof cause === "string"
+          ? cause
+          : undefined,
+      causeCode:
+        cause && typeof cause === "object" && "code" in cause
+          ? String((cause as { code?: unknown }).code ?? "")
+          : undefined,
     };
   }
   return {

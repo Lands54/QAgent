@@ -12,6 +12,9 @@ function buildBus() {
     keptGroups: 1,
     removedGroups: 3,
   }));
+  const resetModelContext = vi.fn(async () => ({
+    resetEntryCount: 2,
+  }));
 
   const bus = new SlashCommandBus({
     getSessionId: () => "session_demo",
@@ -93,6 +96,7 @@ function buildBus() {
     listSessionGraphLog: vi.fn(async () => []),
     listSessionLog: vi.fn(async () => []),
     compactSession,
+    resetModelContext,
     commitSession: vi.fn(async () => {
       throw new Error("not used");
     }),
@@ -150,6 +154,7 @@ function buildBus() {
     bus,
     setAutoCompactHookEnabled,
     compactSession,
+    resetModelContext,
   };
 }
 
@@ -174,5 +179,16 @@ describe("SlashCommandBus compact commands", () => {
     expect(result.messages[0]?.content).toContain("before=1800 after=420");
     expect(result.messages[0]?.content).toContain("压缩分组=3");
     expect(result.messages[0]?.content).toContain("保留分组=1");
+  });
+
+  it("支持 /session reset-context 并只重置模型上下文", async () => {
+    const { bus, resetModelContext } = buildBus();
+
+    const result = await bus.execute("/session reset-context");
+
+    expect(resetModelContext).toHaveBeenCalledTimes(1);
+    expect(result.handled).toBe(true);
+    expect(result.messages[0]?.content).toContain("已重置当前 working snapshot 的模型上下文");
+    expect(result.messages[0]?.content).toContain("UI 历史与既有节点保持不变");
   });
 });

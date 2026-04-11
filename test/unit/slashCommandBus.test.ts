@@ -560,6 +560,9 @@ function buildBus(
       keptGroups: 1,
       removedGroups: 3,
     })),
+    resetModelContext: vi.fn(async () => ({
+      resetEntryCount: 0,
+    })),
     clearHelperAgents: vi.fn(async () => ({
       cleared: 0,
       skippedRunning: 0,

@@ -421,7 +421,8 @@ export type CommandRequest =
         | "compact"
         | "commit"
         | "log"
-        | "graph-log";
+        | "graph-log"
+        | "reset-context";
       message?: string;
       limit?: number;
     }
@@ -560,6 +561,13 @@ export type CommandCompletedRuntimeEvent = RuntimeEventBase<
   }
 >;
 
+export type RuntimeErrorRuntimeEvent = RuntimeEventBase<
+  "runtime.error",
+  {
+    message: string;
+  }
+>;
+
 export type RuntimeEvent =
   | StatusChangedRuntimeEvent
   | AssistantDeltaRuntimeEvent
@@ -570,7 +578,8 @@ export type RuntimeEvent =
   | ApprovalResolvedRuntimeEvent
   | SessionChangedRuntimeEvent
   | WorklineChangedRuntimeEvent
-  | CommandCompletedRuntimeEvent;
+  | CommandCompletedRuntimeEvent
+  | RuntimeErrorRuntimeEvent;
 
 export interface InstructionLayer {
   id: string;
@@ -727,6 +736,10 @@ export interface ConversationLastUserPromptSetPayload {
 
 export type ConversationUiClearedPayload = Record<string, never>;
 
+export interface ConversationModelContextResetPayload {
+  resetEntryIds: string[];
+}
+
 export interface RuntimeUiContextSetPayload {
   enabled: boolean;
 }
@@ -767,6 +780,11 @@ export type ConversationUiClearedEvent = SessionEventBase<
   ConversationUiClearedPayload
 >;
 
+export type ConversationModelContextResetEvent = SessionEventBase<
+  "conversation.model_context.reset",
+  ConversationModelContextResetPayload
+>;
+
 export type RuntimeUiContextSetEvent = SessionEventBase<
   "runtime.ui_context.set",
   RuntimeUiContextSetPayload
@@ -787,6 +805,7 @@ export type SessionEvent =
   | ConversationEntryAppendedEvent
   | ConversationLastUserPromptSetEvent
   | ConversationUiClearedEvent
+  | ConversationModelContextResetEvent
   | RuntimeUiContextSetEvent
   | AgentStatusSetEvent
   | ConversationCompactedEvent;

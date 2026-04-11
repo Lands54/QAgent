@@ -143,6 +143,7 @@ export class AppController {
       listSessionGraphLog: async (limit) => this.agentManager.listSessionGraphLog(limit),
       listSessionLog: async (limit) => this.agentManager.listSessionLog(limit),
       compactSession: async () => this.agentManager.compactSession(),
+      resetModelContext: async () => this.agentManager.resetActiveAgentModelContext(),
       commitSession: async (message) => this.agentManager.commitSession(message),
       clearHelperAgents: async () => this.agentManager.clearHelperAgents(),
       clearLegacyAgents: async () => this.agentManager.clearLegacyAgents(),
@@ -191,9 +192,16 @@ export class AppController {
       if (slashResult.request && slashResult.result) {
         this.emitCommandLifecycleEvents(slashResult.request, slashResult.result);
       }
+      const shouldKeepCommandOutOfModelContext =
+        slashResult.request?.domain === "session"
+        && slashResult.request.action === "reset-context";
       await this.agentManager.recordSlashCommandOnActiveAgent(
         trimmed,
         slashResult.messages,
+        undefined,
+        {
+          includeInModelContext: !shouldKeepCommandOutOfModelContext,
+        },
       );
       if (slashResult.clearUi) {
         await this.agentManager.clearActiveAgentUi();

@@ -337,6 +337,41 @@ export function replaceConversationEntries(
   );
 }
 
+export function resetConversationModelContext(
+  snapshot: SessionSnapshot,
+  uiContextEnabled: boolean,
+): {
+  snapshot: SessionSnapshot;
+  resetEntryIds: string[];
+} {
+  const resetEntryIds: string[] = [];
+  const conversationEntries = snapshot.conversationEntries.map((entry) => {
+    if (!entry.model && !entry.modelMirror) {
+      return entry;
+    }
+    resetEntryIds.push(entry.id);
+    return {
+      ...entry,
+      model: undefined,
+      modelMirror: undefined,
+    };
+  });
+
+  return {
+    snapshot: projectSnapshotConversationEntries(
+      {
+        ...snapshot,
+        conversationEntries,
+        lastUserPrompt: undefined,
+        lastRunSummary: undefined,
+        updatedAt: new Date().toISOString(),
+      },
+      uiContextEnabled,
+    ),
+    resetEntryIds,
+  };
+}
+
 export function createConversationEntry(input: {
   kind: ConversationEntryKind;
   createdAt?: string;

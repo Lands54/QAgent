@@ -106,6 +106,7 @@ qagent --provider openrouter --model openai/gpt-4.1-mini
 - `/skills show <name|id>`
 - `/session status`
 - `/session compact`
+- `/session reset-context`
 - `/session list`
 - `/session log [--limit=N]`
 - `/session branch <name>`

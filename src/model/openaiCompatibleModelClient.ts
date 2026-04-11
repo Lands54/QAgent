@@ -146,6 +146,49 @@ function emitWholeText(text: string, hooks?: ModelStreamHooks): void {
   hooks?.onTextComplete?.(text);
 }
 
+function causeDetail(error: unknown): string | undefined {
+  if (!(error instanceof Error) || !("cause" in error)) {
+    return undefined;
+  }
+  const cause = (error as Error & { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    return `${cause.name}: ${cause.message}`;
+  }
+  if (typeof cause === "string") {
+    return cause;
+  }
+  if (cause && typeof cause === "object") {
+    const fields = ["code", "syscall", "hostname", "host", "port", "address"];
+    const details = fields
+      .map((field) => {
+        const value = (cause as Record<string, unknown>)[field];
+        return value === undefined ? undefined : `${field}=${String(value)}`;
+      })
+      .filter(Boolean);
+    return details.length > 0 ? details.join(" ") : JSON.stringify(cause);
+  }
+  return undefined;
+}
+
+function formatModelTransportError(
+  config: RuntimeConfig["model"],
+  endpoint: string,
+  error: unknown,
+): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause = causeDetail(error);
+  return [
+    "模型请求失败：网络或传输层错误。",
+    `provider=${config.provider}`,
+    `model=${config.model}`,
+    `endpoint=${endpoint}`,
+    `error=${message}`,
+    cause ? `cause=${cause}` : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export class OpenAICompatibleModelClient implements ModelClient {
   public constructor(private readonly config: RuntimeConfig["model"]) {}
 
@@ -155,9 +198,10 @@ export class OpenAICompatibleModelClient implements ModelClient {
     signal?: AbortSignal,
   ): Promise<ModelTurnResult> {
     const requestSignal = createModelRequestSignal(signal, this.config.requestTimeoutMs);
+    const endpoint = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
     try {
       const response = await fetch(
-        `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`,
+        endpoint,
         {
           method: "POST",
           headers: buildModelHeaders(this.config),
@@ -304,6 +348,20 @@ export class OpenAICompatibleModelClient implements ModelClient {
         toolCalls: finalizeToolCalls(toolBuffers),
         finishReason,
       };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw error;
+      }
+      if (
+        error instanceof Error
+        && (
+          error.message.startsWith("模型请求失败：HTTP")
+          || error.message.startsWith("模型返回")
+        )
+      ) {
+        throw error;
+      }
+      throw new Error(formatModelTransportError(this.config, endpoint, error));
     } finally {
       requestSignal.cleanup();
     }

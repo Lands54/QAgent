@@ -259,6 +259,9 @@ function createDeps(
       keptGroups: 0,
       removedGroups: 0,
     }),
+    resetModelContext: async () => ({
+      resetEntryCount: 0,
+    }),
     commitSession: async () => ({
       id: "commit_1",
       message: "msg",

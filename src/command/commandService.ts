@@ -109,6 +109,9 @@ export interface CommandServiceDependencies {
     keptGroups: number;
     removedGroups: number;
   }>;
+  resetModelContext: () => Promise<{
+    resetEntryCount: number;
+  }>;
   commitSession: (message: string) => Promise<{
     id: string;
     message: string;
@@ -787,6 +790,20 @@ export class CommandService {
                   `summaryExecutor=${result.agentId ?? "N/A"}`,
                 ].join("\n")
               : "当前上下文不足以 compact，已跳过。",
+          ),
+        ],
+        result,
+      );
+    }
+    if (request.action === "reset-context") {
+      const result = await this.deps.resetModelContext();
+      return success(
+        "session.model_context_reset",
+        [
+          info(
+            result.resetEntryCount > 0
+              ? `已重置当前 working snapshot 的模型上下文，清理 ${result.resetEntryCount} 条投影来源；UI 历史与既有节点保持不变。`
+              : "当前 working snapshot 没有可清理的模型上下文；UI 历史与既有节点保持不变。",
           ),
         ],
         result,

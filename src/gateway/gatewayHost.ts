@@ -252,10 +252,16 @@ export class GatewayHost {
             slashResult.result,
           );
         }
+        const shouldKeepCommandOutOfModelContext =
+          slashResult.request?.domain === "session"
+          && slashResult.request.action === "reset-context";
         await this.agentManager.recordSlashCommandOnActiveAgent(
           trimmed,
           slashResult.messages,
           client.activeExecutorId,
+          {
+            includeInModelContext: !shouldKeepCommandOutOfModelContext,
+          },
         );
         if (slashResult.clearUi) {
           await this.agentManager.clearActiveAgentUi(client.activeExecutorId);
@@ -491,6 +497,16 @@ export class GatewayHost {
   }
 
   private forwardRuntimeEvent(event: RuntimeEvent): void {
+    if (event.type === "runtime.error") {
+      this.logger.error("runtime.error", {
+        executorId: event.executorId,
+        worklineId: event.worklineId,
+        agentId: event.agentId,
+        headId: event.headId,
+        sessionId: event.sessionId,
+        errorMessage: event.payload.message,
+      });
+    }
     const commandContext = this.commandContextsByExecutor.get(event.executorId);
     const targets = new Set<string>();
     if (commandContext) {
@@ -682,6 +698,11 @@ export class GatewayHost {
       listSessionLog: async (limit) => this.agentManager.listSessionLog(limit),
       compactSession: async () => {
         return this.agentManager.compactSession(this.ensureClientRuntime(clientId).agentId);
+      },
+      resetModelContext: async () => {
+        return this.agentManager.resetActiveAgentModelContext(
+          this.ensureClientRuntime(clientId).agentId,
+        );
       },
       commitSession: async (message) => {
         return this.agentManager.commitSession(

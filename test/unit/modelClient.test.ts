@@ -72,4 +72,39 @@ describe("buildModelHeaders", () => {
       tools: [],
     })).rejects.toThrow("模型请求超时");
   });
+
+  it("模型 fetch 失败时会带上请求定位信息", async () => {
+    const config: RuntimeConfig["model"] = {
+      provider: "openrouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "openrouter-key",
+      model: "openai/gpt-4.1-mini",
+      temperature: 0.2,
+    };
+    const cause = Object.assign(new Error("connect ECONNREFUSED"), {
+      code: "ECONNREFUSED",
+      address: "127.0.0.1",
+      port: 443,
+    });
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new TypeError("fetch failed", { cause }),
+    );
+
+    const client = new OpenAICompatibleModelClient(config);
+
+    await expect(client.runTurn({
+      systemPrompt: "test",
+      messages: [],
+      tools: [],
+    })).rejects.toThrow(
+      [
+        "模型请求失败：网络或传输层错误。",
+        "provider=openrouter",
+        "model=openai/gpt-4.1-mini",
+        "endpoint=https://openrouter.ai/api/v1/chat/completions",
+        "error=fetch failed",
+        "cause=Error: connect ECONNREFUSED",
+      ].join("\n"),
+    );
+  });
 });

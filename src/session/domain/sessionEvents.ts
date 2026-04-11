@@ -6,6 +6,8 @@ import type {
   ConversationEntry,
   ConversationEntryAppendedEvent,
   ConversationLastUserPromptSetEvent,
+  ConversationModelContextResetEvent,
+  ConversationModelContextResetPayload,
   ConversationUiClearedEvent,
   RuntimeUiContextSetEvent,
   SessionCreatedEvent,
@@ -81,6 +83,18 @@ export function createConversationUiClearedEvent(
     ...buildEventEnvelope(input),
     type: "conversation.ui.cleared",
     payload: {},
+  };
+}
+
+export function createConversationModelContextResetEvent(
+  input: SessionEventContext & ConversationModelContextResetPayload,
+): ConversationModelContextResetEvent {
+  return {
+    ...buildEventEnvelope(input),
+    type: "conversation.model_context.reset",
+    payload: {
+      resetEntryIds: [...input.resetEntryIds],
+    },
   };
 }
 

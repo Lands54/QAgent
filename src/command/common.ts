@@ -89,6 +89,7 @@ export function buildSlashHelpText(): string {
     "/executor resume [executorId|name]",
     "/session commit -m \"<message>\"",
     "/session compact",
+    "/session reset-context",
     "/session log [--limit=N]",
     "/session graph log [--limit=N]",
     "/approval status",
@@ -414,6 +415,9 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
   if (domain === "session") {
     if (subcommand === "compact") {
       return { request: { domain: "session", action: "compact" } };
+    }
+    if (subcommand === "reset-context") {
+      return { request: { domain: "session", action: "reset-context" } };
     }
     if (subcommand === "commit") {
       return {

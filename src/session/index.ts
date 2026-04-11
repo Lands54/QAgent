@@ -19,12 +19,14 @@ export {
   normalizeSessionSnapshot,
   projectSnapshotConversationEntries,
   replaceConversationEntries,
+  resetConversationModelContext,
 } from "./domain/sessionDomain.js";
 export {
   createAgentStatusSetEvent,
   createConversationCompactedEvent,
   createConversationEntryAppendedEvent,
   createConversationLastUserPromptSetEvent,
+  createConversationModelContextResetEvent,
   createConversationUiClearedEvent,
   createRuntimeUiContextSetEvent,
   createSessionCreatedEvent,

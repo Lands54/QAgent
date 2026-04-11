@@ -9,10 +9,12 @@ import {
   createConversationEntry,
   createConversationEntryAppendedEvent,
   createConversationLastUserPromptSetEvent,
+  createConversationModelContextResetEvent,
   createConversationUiClearedEvent,
   createRuntimeUiContextSetEvent,
   projectSnapshotConversationEntries,
   replaceConversationEntries,
+  resetConversationModelContext,
   type SessionService,
 } from "../session/index.js";
 import {
@@ -462,8 +464,12 @@ export class HeadAgentRuntime {
   public async recordSlashCommand(
     command: string,
     messages: ReadonlyArray<UIMessage>,
+    input?: {
+      includeInModelContext?: boolean;
+    },
   ): Promise<void> {
     const now = new Date().toISOString();
+    const includeInModelContext = input?.includeInModelContext ?? true;
     await this.appendConversationEntryInternal(
       createConversationEntry({
         kind: "ui-command",
@@ -474,16 +480,20 @@ export class HeadAgentRuntime {
           content: command,
           createdAt: now,
         },
-        modelMirror: {
-          id: createId("llm"),
-          role: "user",
-          content: `[UI命令] ${command}`,
-          createdAt: now,
-        },
+        modelMirror: includeInModelContext
+          ? {
+              id: createId("llm"),
+              role: "user",
+              content: `[UI命令] ${command}`,
+              createdAt: now,
+            }
+          : undefined,
       }),
     );
     for (const message of messages) {
-      await this.appendUiOnlyMessage(message);
+      await this.appendUiOnlyMessage(message, {
+        includeInModelContext,
+      });
     }
   }
 
@@ -614,6 +624,28 @@ export class HeadAgentRuntime {
     );
     await this.persistSnapshot();
     this.options.callbacks.onStateChanged(this);
+  }
+
+  public async resetModelContext(): Promise<{
+    resetEntryCount: number;
+  }> {
+    const result = resetConversationModelContext(
+      this.options.snapshot,
+      this.isUiContextEnabled(),
+    );
+    this.options.snapshot = result.snapshot;
+    await this.persistEvent(
+      createConversationModelContextResetEvent({
+        workingHeadId: this.headId,
+        sessionId: this.sessionId,
+        resetEntryIds: result.resetEntryIds,
+      }),
+    );
+    await this.persistSnapshot();
+    this.options.callbacks.onStateChanged(this);
+    return {
+      resetEntryCount: result.resetEntryIds.length,
+    };
   }
 
   public async appendUiMessages(
@@ -749,6 +781,9 @@ export class HeadAgentRuntime {
           role: "error",
           content: message,
           createdAt: new Date().toISOString(),
+        });
+        this.emitRuntimeEvent("runtime.error", {
+          message,
         });
       },
       setStatus: async (mode, detail) => {
@@ -1121,18 +1156,22 @@ export class HeadAgentRuntime {
       kind?: ConversationEntryKind;
       mirrorRole?: Exclude<LlmMessage["role"], "tool">;
       mirrorPrefix?: string;
+      includeInModelContext?: boolean;
     },
   ): Promise<void> {
+    const includeInModelContext = input?.includeInModelContext ?? true;
     await this.appendConversationEntryInternal(
       createConversationEntry({
         kind:
           input?.kind ?? mapUiMessageToConversationKind(message, "ui-result"),
         createdAt: message.createdAt,
         ui: message,
-        modelMirror: buildUiMirrorMessage(message, {
-          role: input?.mirrorRole,
-          prefix: input?.mirrorPrefix,
-        }),
+        modelMirror: includeInModelContext
+          ? buildUiMirrorMessage(message, {
+              role: input?.mirrorRole,
+              prefix: input?.mirrorPrefix,
+            })
+          : undefined,
       }),
     );
   }

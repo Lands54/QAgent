@@ -671,13 +671,24 @@ export class AgentManager {
     await this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId)).clearUiMessages();
   }
 
+  public async resetActiveAgentModelContext(
+    agentId = this.registry.getActiveAgentId(),
+  ): Promise<{
+    resetEntryCount: number;
+  }> {
+    return this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId)).resetModelContext();
+  }
+
   public async recordSlashCommandOnActiveAgent(
     command: string,
     messages: ReadonlyArray<UIMessage>,
     agentId = this.registry.getActiveAgentId(),
+    input?: {
+      includeInModelContext?: boolean;
+    },
   ): Promise<void> {
     await this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId))
-      .recordSlashCommand(command, messages);
+      .recordSlashCommand(command, messages, input);
   }
 
   public async appendUiMessagesToActiveAgent(
