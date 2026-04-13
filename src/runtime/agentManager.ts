@@ -38,11 +38,12 @@ import {
 } from "./application/agentLifecycleService.js";
 import { AgentNavigationService } from "./application/agentNavigationService.js";
 import { AgentRegistry } from "./application/agentRegistry.js";
-import { HookPipeline } from "./application/hookPipeline.js";
+import { HookPipeline, type PostRunJob } from "./application/hookPipeline.js";
 import {
   CompactSessionService,
   type CompactSessionResult,
 } from "./compactSessionService.js";
+import { createId } from "../utils/index.js";
 
 type Listener = () => void;
 type RuntimeEventListener = (event: RuntimeEvent) => void;
@@ -63,10 +64,14 @@ export class AgentManager {
   private readonly hookPipeline: HookPipeline;
   private readonly lastAutoMemoryForkSourceHashByAgent = new Map<string, string>();
   private readonly autoCompactFailureCountByAgent = new Map<string, number>();
+  private readonly pendingPostRunJobKeys = new Set<string>();
+  private readonly postRunJobs: PostRunJob[] = [];
   private fetchMemoryHookEnabled = true;
   private saveMemoryHookEnabled = true;
   private autoCompactHookEnabled = true;
   private helperAgentAutoCleanupEnabled = true;
+  private drainingPostRunJobs = false;
+  private disposed = false;
 
   public constructor(
     private config: RuntimeConfig,
@@ -714,6 +719,9 @@ export class AgentManager {
   }
 
   public async dispose(): Promise<void> {
+    this.disposed = true;
+    this.postRunJobs.length = 0;
+    this.pendingPostRunJobKeys.clear();
     await this.lifecycle.disposeAll();
     await this.sessionService.dispose();
   }
@@ -1089,7 +1097,7 @@ export class AgentManager {
       return;
     }
 
-    await this.hookPipeline.handleRuntimeCompleted(runtime);
+    this.enqueuePostRunJobs(runtime);
 
     if (runtime.kind === "task" && entry.mergeIntoAgentId && entry.mergePending) {
       const targetRuntime = this.registry.requireRuntime(entry.mergeIntoAgentId);
@@ -1128,6 +1136,98 @@ export class AgentManager {
 
   private emitRuntimeEvent(event: RuntimeEvent): void {
     this.events.emit("runtime-event", event);
+  }
+
+  private enqueuePostRunJobs(runtime: HeadAgentRuntime): void {
+    for (const job of this.hookPipeline.collectPostRunJobs(runtime)) {
+      const key = this.getPostRunJobKey(job);
+      if (this.pendingPostRunJobKeys.has(key)) {
+        continue;
+      }
+      this.pendingPostRunJobKeys.add(key);
+      this.postRunJobs.push(job);
+    }
+
+    if (this.drainingPostRunJobs || this.postRunJobs.length === 0) {
+      return;
+    }
+
+    this.drainingPostRunJobs = true;
+    void this.drainPostRunJobs();
+  }
+
+  private async drainPostRunJobs(): Promise<void> {
+    try {
+      while (!this.disposed && this.postRunJobs.length > 0) {
+        const job = this.postRunJobs.shift();
+        if (!job) {
+          continue;
+        }
+
+        try {
+          await this.hookPipeline.runPostRunJob(job);
+        } catch (error) {
+          await this.handlePostRunJobFailure(job, error);
+        } finally {
+          this.pendingPostRunJobKeys.delete(this.getPostRunJobKey(job));
+        }
+      }
+    } finally {
+      this.drainingPostRunJobs = false;
+      if (!this.disposed && this.postRunJobs.length > 0) {
+        this.drainingPostRunJobs = true;
+        void this.drainPostRunJobs();
+      }
+    }
+  }
+
+  private async handlePostRunJobFailure(
+    job: PostRunJob,
+    error: unknown,
+  ): Promise<void> {
+    if (job.kind !== "auto-memory-fork") {
+      return;
+    }
+
+    const runtime = this.registry.getEntry(job.agentId)?.runtime;
+    const message = error instanceof Error
+      ? error.message
+      : String(error);
+
+    if (!runtime || this.disposed) {
+      return;
+    }
+
+    await runtime.appendUiMessages([
+      {
+        id: createId("ui"),
+        role: "error",
+        content: `自动 memory fork 失败：${message}`,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    this.emitRuntimeEvent({
+      id: createId("event"),
+      type: "runtime.warning",
+      createdAt: new Date().toISOString(),
+      sessionId: runtime.sessionId,
+      worklineId: runtime.headId,
+      executorId: runtime.agentId,
+      headId: runtime.headId,
+      agentId: runtime.agentId,
+      payload: {
+        message: `自动 memory fork 失败：${message}`,
+        source: "post-run.auto-memory-fork",
+      },
+    });
+    this.emitChange();
+  }
+
+  private getPostRunJobKey(job: PostRunJob): string {
+    if (job.kind === "auto-memory-fork") {
+      return `${job.kind}:${job.agentId}:${job.sourceHash}`;
+    }
+    return `${job.kind}:${job.agentId}`;
   }
 
   private findRuntimeForPendingApproval(input?: {

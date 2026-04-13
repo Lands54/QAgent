@@ -1,3 +1,6 @@
+import { rm } from "node:fs/promises";
+import path from "node:path";
+
 import type {
   AgentKind,
   ApprovalMode,
@@ -226,61 +229,66 @@ export class SessionService {
       updatedAt: now,
     };
     let snapshot!: SessionSnapshot;
-    await this.runRepoMutation(
-      async () => {
-        snapshot = await this.sessionStore.initializeHeadSession({
-          workingHeadId: head.id,
-          sessionId: head.sessionId,
-          cwd: input.cwd,
-          shellCwd: input.shellCwd,
-          approvalMode: input.approvalMode,
-        });
-        const seededAssetState = await this.runForkProviders(head, snapshot);
-        head.assetState = seededAssetState;
-        const rootNode = this.buildNode({
-          kind: "root",
-          parentNodeIds: [],
-          snapshot,
-          assetState: seededAssetState,
-        });
-        head.currentNodeId = rootNode.id;
-        head.attachment = {
-          mode: "branch",
-          name: DEFAULT_BRANCH_NAME,
-          nodeId: rootNode.id,
-        };
+    try {
+      await this.runRepoMutation(
+        async () => {
+          snapshot = await this.sessionStore.initializeHeadSession({
+            workingHeadId: head.id,
+            sessionId: head.sessionId,
+            cwd: input.cwd,
+            shellCwd: input.shellCwd,
+            approvalMode: input.approvalMode,
+          });
+          const seededAssetState = await this.runForkProviders(head, snapshot);
+          head.assetState = seededAssetState;
+          const rootNode = this.buildNode({
+            kind: "root",
+            parentNodeIds: [],
+            snapshot,
+            assetState: seededAssetState,
+          });
+          head.currentNodeId = rootNode.id;
+          head.attachment = {
+            mode: "branch",
+            name: DEFAULT_BRANCH_NAME,
+            nodeId: rootNode.id,
+          };
 
-        const mainBranch: SessionBranchRef = {
-          name: DEFAULT_BRANCH_NAME,
-          headNodeId: rootNode.id,
-          createdAt: now,
-          updatedAt: now,
-        };
-        this.repoState = {
-          version: 2,
-          activeWorkingHeadId: head.id,
-          defaultBranchName: DEFAULT_BRANCH_NAME,
-          createdAt: now,
-          updatedAt: now,
-        };
-        this.branches = [mainBranch];
-        this.tags = [];
-        this.commits = [];
-        this.heads = [head];
-        await this.graphStore.initializeRepo({
-          state: this.repoState,
-          branches: this.branches,
-          tags: this.tags,
-          commits: this.commits,
-          nodes: [rootNode],
-          heads: [head],
-        });
-      },
-      {
-        headIds: [headId],
-        reloadRepo: false,
-      },
-    );
+          const mainBranch: SessionBranchRef = {
+            name: DEFAULT_BRANCH_NAME,
+            headNodeId: rootNode.id,
+            createdAt: now,
+            updatedAt: now,
+          };
+          this.repoState = {
+            version: 2,
+            activeWorkingHeadId: head.id,
+            defaultBranchName: DEFAULT_BRANCH_NAME,
+            createdAt: now,
+            updatedAt: now,
+          };
+          this.branches = [mainBranch];
+          this.tags = [];
+          this.commits = [];
+          this.heads = [head];
+          await this.graphStore.initializeRepo({
+            state: this.repoState,
+            branches: this.branches,
+            tags: this.tags,
+            commits: this.commits,
+            nodes: [rootNode],
+            heads: [head],
+          });
+        },
+        {
+          headIds: [headId],
+          reloadRepo: false,
+        },
+      );
+    } catch (error) {
+      await this.rollbackInitializationFailure(headId);
+      throw error;
+    }
 
     return {
       snapshot,
@@ -1082,29 +1090,35 @@ export class SessionService {
       createdAt: now,
       updatedAt: now,
     };
+    const previousActiveWorkingHeadId = this.requireRepoState().activeWorkingHeadId;
     const snapshot = cloneSnapshotForHead(sourceSnapshot, head);
     await this.sessionStore.saveSnapshot(snapshot);
-    head.assetState = await this.runForkProviders(head, snapshot, sourceHead);
-    if (options.acquireWriterLease && head.attachment.mode === "branch") {
-      await this.assertWriterLeaseAvailable(head.id, head.attachment.name);
-      head.writerLease = {
-        branchName: head.attachment.name,
-        acquiredAt: now,
-      };
-    }
-    this.heads.push(head);
-    await this.graphStore.saveHead(head);
-    if (options.activate) {
-      this.requireRepoState().activeWorkingHeadId = head.id;
-      await this.saveRepoMetadata();
-    }
+    try {
+      head.assetState = await this.runForkProviders(head, snapshot, sourceHead);
+      if (options.acquireWriterLease && head.attachment.mode === "branch") {
+        await this.assertWriterLeaseAvailable(head.id, head.attachment.name);
+        head.writerLease = {
+          branchName: head.attachment.name,
+          acquiredAt: now,
+        };
+      }
+      this.heads.push(head);
+      await this.graphStore.saveHead(head);
+      if (options.activate) {
+        this.requireRepoState().activeWorkingHeadId = head.id;
+        await this.saveRepoMetadata();
+      }
 
-    return {
-      snapshot,
-      ref: await this.getHeadStatus(head.id, snapshot),
-      head,
-      message: `已创建 working head ${name}。`,
-    };
+      return {
+        snapshot,
+        ref: await this.getHeadStatus(head.id, snapshot),
+        head,
+        message: `已创建 working head ${name}。`,
+      };
+    } catch (error) {
+      await this.rollbackForkHeadFailure(headId, previousActiveWorkingHeadId);
+      throw error;
+    }
   }
 
   private async mergeResolvedSourceIntoHead(
@@ -1583,5 +1597,49 @@ export class SessionService {
       this.graphStore.saveBranches(this.branches),
       this.graphStore.saveTags(this.tags),
     ]);
+  }
+
+  private async rollbackInitializationFailure(headId: string): Promise<void> {
+    this.repoState = undefined;
+    this.branches = [];
+    this.tags = [];
+    this.commits = [];
+    this.heads = [];
+    this.lastLoadInfoMessage = undefined;
+
+    await Promise.all([
+      rm(path.join(this.sessionRoot, "__repo"), {
+        recursive: true,
+        force: true,
+      }),
+      rm(path.join(this.sessionRoot, "__heads", headId), {
+        recursive: true,
+        force: true,
+      }),
+    ]);
+  }
+
+  private async rollbackForkHeadFailure(
+    headId: string,
+    previousActiveWorkingHeadId: string,
+  ): Promise<void> {
+    this.heads = this.heads.filter((head) => head.id !== headId);
+    if (this.repoState) {
+      this.repoState.activeWorkingHeadId = previousActiveWorkingHeadId;
+    }
+
+    await Promise.all([
+      rm(path.join(this.sessionRoot, "__heads", headId), {
+        recursive: true,
+        force: true,
+      }),
+      rm(path.join(this.sessionRoot, "__repo", "heads", `${headId}.json`), {
+        force: true,
+      }),
+    ]);
+
+    if (this.repoState) {
+      await this.saveRepoMetadata();
+    }
   }
 }

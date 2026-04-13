@@ -14,12 +14,15 @@ export interface ShellExecutionResult {
 interface ExecuteOptions {
   timeoutMs: number;
   signal?: AbortSignal;
+  onStdoutChunk?: (chunk: string) => void;
+  onStderrChunk?: (chunk: string) => void;
 }
 
 interface PendingExecution {
   markerId: string;
   stdout: string;
   stderr: string;
+  streamedStdoutLength: number;
   startedAt: string;
   startedAtMs: number;
   resolve: (result: ShellExecutionResult) => void;
@@ -27,6 +30,8 @@ interface PendingExecution {
   timeout?: NodeJS.Timeout;
   cleanupSignal?: () => void;
   termination?: "timeout" | "cancelled";
+  onStdoutChunk?: (chunk: string) => void;
+  onStderrChunk?: (chunk: string) => void;
 }
 
 interface ShellSessionAdapter {
@@ -113,6 +118,27 @@ function parseMarkerOutput(
   };
 }
 
+function getMarkerStart(markerId: string): string {
+  return `\n__QAGENT_EXIT__${markerId}__\t`;
+}
+
+function getVisibleStdoutForStreaming(stdout: string, markerId: string): string {
+  const markerStart = getMarkerStart(markerId);
+  const markerIndex = stdout.indexOf(markerStart);
+  if (markerIndex !== -1) {
+    return stdout.slice(0, markerIndex);
+  }
+
+  const maxHiddenLength = Math.min(stdout.length, markerStart.length - 1);
+  for (let hiddenLength = maxHiddenLength; hiddenLength > 0; hiddenLength -= 1) {
+    if (stdout.endsWith(markerStart.slice(0, hiddenLength))) {
+      return stdout.slice(0, -hiddenLength);
+    }
+  }
+
+  return stdout;
+}
+
 export class PersistentShellSession {
   private readonly adapter: ShellSessionAdapter;
   private shell?: ChildProcessWithoutNullStreams;
@@ -153,10 +179,13 @@ export class PersistentShellSession {
         markerId,
         stdout: "",
         stderr: "",
+        streamedStdoutLength: 0,
         startedAt,
         startedAtMs: Date.now(),
         resolve,
         reject,
+        onStdoutChunk: options.onStdoutChunk,
+        onStderrChunk: options.onStderrChunk,
       };
 
       if (options.timeoutMs > 0) {
@@ -269,6 +298,18 @@ export class PersistentShellSession {
     }
 
     this.pending.stdout += chunk;
+    const visibleStdout = getVisibleStdoutForStreaming(
+      this.pending.stdout,
+      this.pending.markerId,
+    );
+    if (visibleStdout.length > this.pending.streamedStdoutLength) {
+      const delta = visibleStdout.slice(this.pending.streamedStdoutLength);
+      this.pending.streamedStdoutLength = visibleStdout.length;
+      if (delta.length > 0) {
+        this.pending.onStdoutChunk?.(delta);
+      }
+    }
+
     const parsed = parseMarkerOutput(this.pending.stdout, this.pending.markerId);
     if (!parsed) {
       return;
@@ -297,6 +338,9 @@ export class PersistentShellSession {
     }
 
     this.pending.stderr += chunk;
+    if (chunk.length > 0) {
+      this.pending.onStderrChunk?.(chunk);
+    }
   }
 
   private handleShellExit(code: number | null, signal: NodeJS.Signals | null): void {

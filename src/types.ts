@@ -518,6 +518,18 @@ export type ToolFinishedRuntimeEvent = RuntimeEventBase<
   }
 >;
 
+export type ToolOutputDeltaRuntimeEvent = RuntimeEventBase<
+  "tool.output.delta",
+  {
+    callId: string;
+    command: string;
+    stream: "stdout" | "stderr";
+    chunk: string;
+    cwd: string;
+    startedAt: string;
+  }
+>;
+
 export type ApprovalRequiredRuntimeEvent = RuntimeEventBase<
   "approval.required",
   {
@@ -561,6 +573,14 @@ export type CommandCompletedRuntimeEvent = RuntimeEventBase<
   }
 >;
 
+export type RuntimeWarningRuntimeEvent = RuntimeEventBase<
+  "runtime.warning",
+  {
+    message: string;
+    source: "post-run.auto-memory-fork" | "state.refresh";
+  }
+>;
+
 export type RuntimeErrorRuntimeEvent = RuntimeEventBase<
   "runtime.error",
   {
@@ -573,12 +593,14 @@ export type RuntimeEvent =
   | AssistantDeltaRuntimeEvent
   | AssistantCompletedRuntimeEvent
   | ToolStartedRuntimeEvent
+  | ToolOutputDeltaRuntimeEvent
   | ToolFinishedRuntimeEvent
   | ApprovalRequiredRuntimeEvent
   | ApprovalResolvedRuntimeEvent
   | SessionChangedRuntimeEvent
   | WorklineChangedRuntimeEvent
   | CommandCompletedRuntimeEvent
+  | RuntimeWarningRuntimeEvent
   | RuntimeErrorRuntimeEvent;
 
 export interface InstructionLayer {

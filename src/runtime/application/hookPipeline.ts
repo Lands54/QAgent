@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type {
+  LlmMessage,
   RuntimeConfig,
   SessionSnapshot,
   SkillManifest,
@@ -32,6 +33,16 @@ function computeAutoMemoryForkSourceHash(
     )
     .digest("hex");
 }
+
+export interface PostRunAutoMemoryForkJob {
+  kind: "auto-memory-fork";
+  agentId: string;
+  sourceHash: string;
+  lastUserPrompt?: string;
+  modelMessages: ReadonlyArray<LlmMessage>;
+}
+
+export type PostRunJob = PostRunAutoMemoryForkJob;
 
 interface HookPipelineCoordinator {
   getRuntime(agentId: string): HeadAgentRuntime;
@@ -123,49 +134,55 @@ export class HookPipeline {
     }
   }
 
-  public async handleRuntimeCompleted(runtime: HeadAgentRuntime): Promise<void> {
+  public collectPostRunJobs(runtime: HeadAgentRuntime): PostRunJob[] {
     if (
-      this.input.getSaveMemoryHookEnabled()
-      && runtime.kind === "interactive"
-      && runtime.autoMemoryFork
+      !this.input.getSaveMemoryHookEnabled()
+      || runtime.kind !== "interactive"
+      || !runtime.autoMemoryFork
     ) {
-      await this.runAutoMemoryForkIfNeeded(runtime.agentId);
+      return [];
     }
-  }
 
-  private async runAutoMemoryForkIfNeeded(agentId: string): Promise<void> {
-    const runtime = this.input.coordinator.getRuntime(agentId);
     const snapshot = runtime.getSnapshot();
     const sourceHash = computeAutoMemoryForkSourceHash(snapshot);
     if (
       !sourceHash
-      || sourceHash === this.input.lastAutoMemoryForkSourceHashByAgent.get(agentId)
+      || sourceHash === this.input.lastAutoMemoryForkSourceHashByAgent.get(runtime.agentId)
     ) {
-      return;
+      return [];
     }
 
-    const service = new AutoMemoryForkService(this.input.coordinator);
-    try {
-      await service.run({
-        sourceAgentId: agentId,
-        targetAgentId: agentId,
-        targetSnapshot: snapshot,
-        availableSkills: this.input.getAvailableSkills(),
-        lastUserPrompt: snapshot.lastUserPrompt,
-        modelMessages: snapshot.modelMessages,
-      });
-      this.input.lastAutoMemoryForkSourceHashByAgent.set(agentId, sourceHash);
-      await runtime.refreshSessionState();
-    } catch (error) {
-      await runtime.appendUiMessages([
-        {
-          id: createId("ui"),
-          role: "error",
-          content: `自动 memory fork 失败：${(error as Error).message}`,
-          createdAt: new Date().toISOString(),
-        },
-      ]);
+    return [{
+      kind: "auto-memory-fork",
+      agentId: runtime.agentId,
+      sourceHash,
+      lastUserPrompt: snapshot.lastUserPrompt,
+      modelMessages: [...snapshot.modelMessages],
+    }];
+  }
+
+  public async runPostRunJob(job: PostRunJob): Promise<void> {
+    if (job.kind === "auto-memory-fork") {
+      await this.runAutoMemoryForkJob(job);
     }
+  }
+
+  private async runAutoMemoryForkJob(job: PostRunAutoMemoryForkJob): Promise<void> {
+    const runtime = this.input.coordinator.getRuntime(job.agentId);
+    const service = new AutoMemoryForkService(this.input.coordinator);
+    await service.run({
+      sourceAgentId: job.agentId,
+      targetAgentId: job.agentId,
+      targetSnapshot: runtime.getSnapshot(),
+      availableSkills: this.input.getAvailableSkills(),
+      lastUserPrompt: job.lastUserPrompt,
+      modelMessages: job.modelMessages,
+    });
+    this.input.lastAutoMemoryForkSourceHashByAgent.set(
+      job.agentId,
+      job.sourceHash,
+    );
+    await runtime.refreshSessionState();
     this.input.emitChange();
   }
 }

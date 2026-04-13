@@ -273,9 +273,12 @@ export class CommandService {
     if (!request.prompt.trim()) {
       return validationError("run.prompt_required", "用法：run <prompt>");
     }
+    const approvalHandlingMode = this.deps.getApprovalMode() === "never"
+      ? undefined
+      : "checkpoint";
     const result = await this.deps.runPrompt(request.prompt, {
       agentId: request.agentId,
-      approvalMode: "checkpoint",
+      approvalMode: approvalHandlingMode,
       modelInputAppendix: request.modelInputAppendix,
     });
     if (result.settled === "approval_required" && result.checkpoint) {

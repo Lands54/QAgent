@@ -19,6 +19,8 @@ import type {
   ModelTurnRequest,
   ModelTurnResult,
   RuntimeConfig,
+  RuntimeEvent,
+  SessionAssetProvider,
   SkillManifest,
   ToolCall,
   ToolResult,
@@ -31,6 +33,26 @@ import {
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function waitForCondition(
+  check: () => boolean,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    if (check()) {
+      return;
+    }
+    await sleep(10);
+  }
+  throw new Error("等待条件超时。");
 }
 
 function buildTempRuntimeConfig(projectDir: string): RuntimeConfig {
@@ -819,9 +841,177 @@ describe("AgentRunner", () => {
 
     await agentManager.submitInputToActiveAgent("帮我完成这个任务");
 
+    await waitForCondition(() => {
+      return capturedRequests.some((request) => {
+        return request.systemPrompt.includes("自动 memory fork 子任务");
+      });
+    });
+    await waitForCondition(() => {
+      return !agentManager.listAgents().some((agent) => agent.name.startsWith("auto-memory-"));
+    });
+
     expect(capturedRequests.some((request) => request.systemPrompt.includes("自动 memory fork 子任务"))).toBe(true);
     expect(
       agentManager.listAgents().some((agent) => agent.name.startsWith("auto-memory-")),
     ).toBe(false);
+  });
+
+  it("auto memory fork 会异步执行，不阻塞主任务完成", async () => {
+    const projectDir = await makeTempDir("qagent-auto-memory-async-");
+    const config = buildTempRuntimeConfig(projectDir);
+    let releaseAutoMemory!: () => void;
+    const autoMemoryBlocked = new Promise<void>((resolve) => {
+      releaseAutoMemory = resolve;
+    });
+    const capturedRequests: ModelTurnRequest[] = [];
+
+    class AsyncAutoMemoryModelClient implements ModelClient {
+      public async runTurn(request: ModelTurnRequest): Promise<ModelTurnResult> {
+        capturedRequests.push(request);
+        if (request.systemPrompt.includes("自动 memory fork 子任务")) {
+          await autoMemoryBlocked;
+          return {
+            assistantText: "没有新增记忆，本轮只做了检查。",
+            toolCalls: [],
+            finishReason: "stop",
+          };
+        }
+        return {
+          assistantText: "主任务已完成",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      }
+    }
+
+    const sessionService = new SessionService(config.resolvedPaths.sessionRoot, [
+      createMemorySessionAssetProvider({
+        projectMemoryDir: config.resolvedPaths.projectMemoryDir,
+        globalMemoryDir: config.resolvedPaths.globalMemoryDir,
+      }),
+    ]);
+    const agentManager = new AgentManager(
+      config,
+      new AsyncAutoMemoryModelClient(),
+      new PromptAssembler(),
+      sessionService,
+      new ApprovalPolicy("always"),
+      () => [],
+    );
+    await agentManager.initialize({
+      cwd: projectDir,
+      shellCwd: projectDir,
+      approvalMode: "always",
+    });
+    agentManager.setFetchMemoryHookEnabled(false);
+
+    try {
+      const settled = await Promise.race([
+        agentManager.submitInputToActiveAgent("帮我完成这个任务").then(() => "completed"),
+        sleep(100).then(() => "timeout"),
+      ]);
+
+      expect(settled).toBe("completed");
+      await waitForCondition(() => {
+        return capturedRequests.some((request) => {
+          return request.systemPrompt.includes("自动 memory fork 子任务");
+        });
+      });
+    } finally {
+      releaseAutoMemory();
+      await waitForCondition(() => {
+        return !agentManager.listAgents().some((agent) => agent.name.startsWith("auto-memory-"));
+      });
+      await agentManager.dispose();
+    }
+  });
+
+  it("auto memory fork 失败时会发出 runtime.warning，且不影响主任务完成", async () => {
+    const projectDir = await makeTempDir("qagent-auto-memory-warning-");
+    const config = buildTempRuntimeConfig(projectDir);
+    const events: RuntimeEvent[] = [];
+
+    class FailingAutoMemoryModelClient implements ModelClient {
+      public async runTurn(_request: ModelTurnRequest): Promise<ModelTurnResult> {
+        return {
+          assistantText: "主任务已完成",
+          toolCalls: [],
+          finishReason: "stop",
+        };
+      }
+    }
+
+    const failingProvider: SessionAssetProvider = {
+      kind: "auto-memory-failing-provider",
+      async fork(input) {
+        if (input.head.name.startsWith("auto-memory-")) {
+          throw new Error("memory helper boom");
+        }
+        return {};
+      },
+      async checkpoint(input) {
+        return input.state;
+      },
+      async merge(input) {
+        return {
+          targetState: input.targetState,
+        };
+      },
+    };
+
+    const sessionService = new SessionService(config.resolvedPaths.sessionRoot, [
+      createMemorySessionAssetProvider({
+        projectMemoryDir: config.resolvedPaths.projectMemoryDir,
+        globalMemoryDir: config.resolvedPaths.globalMemoryDir,
+      }),
+      failingProvider,
+    ]);
+    const agentManager = new AgentManager(
+      config,
+      new FailingAutoMemoryModelClient(),
+      new PromptAssembler(),
+      sessionService,
+      new ApprovalPolicy("always"),
+      () => [],
+    );
+    agentManager.subscribeRuntimeEvents((event) => {
+      events.push(event);
+    });
+    await agentManager.initialize({
+      cwd: projectDir,
+      shellCwd: projectDir,
+      approvalMode: "always",
+    });
+    agentManager.setFetchMemoryHookEnabled(false);
+
+    try {
+      await expect(
+        agentManager.submitInputToActiveAgent("帮我完成这个任务"),
+      ).resolves.toBeUndefined();
+
+      await waitForCondition(() => {
+        return events.some((event) => {
+          return (
+            event.type === "runtime.warning"
+            && event.payload.source === "post-run.auto-memory-fork"
+          );
+        });
+      });
+
+      expect(events.some((event) => {
+        return (
+          event.type === "runtime.warning"
+          && event.payload.source === "post-run.auto-memory-fork"
+          && event.payload.message.includes("memory helper boom")
+        );
+      })).toBe(true);
+      expect(
+        agentManager.getActiveRuntime().getSnapshot().uiMessages.some((message) => {
+          return message.role === "error" && message.content.includes("自动 memory fork 失败");
+        }),
+      ).toBe(true);
+    } finally {
+      await agentManager.dispose();
+    }
   });
 });

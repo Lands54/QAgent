@@ -323,12 +323,22 @@ export class GatewayHost {
       const result = await this.createCommandService(envelope.clientId)
         .execute(envelope.request);
       await this.syncClientContextAfterCommand(envelope.clientId, envelope.request, result);
-      await this.emitCommandLifecycleEvents(
-        envelope.clientId,
-        envelope.commandId,
-        envelope.request,
-        result,
-      );
+      try {
+        await this.emitCommandLifecycleEvents(
+          envelope.clientId,
+          envelope.commandId,
+          envelope.request,
+          result,
+        );
+      } catch (error) {
+        this.logger.error("command.lifecycle_events.error", {
+          clientId: envelope.clientId,
+          commandId: envelope.commandId,
+          executorId: targetExecutorId,
+          ...commandRequestLogFields(envelope.request),
+          ...gatewayErrorFields(error),
+        });
+      }
       this.logger.info("command.completed", {
         clientId: envelope.clientId,
         code: result.code,
@@ -448,7 +458,29 @@ export class GatewayHost {
       ...executor,
       active: executor.executorId === runtime.agentId,
     }));
-    const bookmarks = (await this.agentManager.listBookmarks(runtime.agentId)).bookmarks;
+    let bookmarks: AppState["bookmarks"] = [];
+    try {
+      bookmarks = (await this.agentManager.listBookmarks(runtime.agentId)).bookmarks;
+    } catch (error) {
+      this.logger.warn("state.refresh.partial_error", {
+        clientId,
+        executorId: runtime.agentId,
+        worklineId: runtime.headId,
+        component: "bookmarks",
+        ...gatewayErrorFields(error),
+      });
+      this.forwardRuntimeEvent(this.buildRuntimeEvent(
+        runtime,
+        "runtime.warning",
+        {
+          message: `状态刷新期间无法加载书签，已降级为空列表：${error instanceof Error ? error.message : String(error)}`,
+          source: "state.refresh",
+        },
+        {
+          clientId,
+        },
+      ));
+    }
     const state = this.appStateAssembler.build({
       cwd: this.config.cwd,
       previousState: this.getCachedState(clientId),
@@ -505,6 +537,17 @@ export class GatewayHost {
         headId: event.headId,
         sessionId: event.sessionId,
         errorMessage: event.payload.message,
+      });
+    }
+    if (event.type === "runtime.warning") {
+      this.logger.warn("runtime.warning", {
+        executorId: event.executorId,
+        worklineId: event.worklineId,
+        agentId: event.agentId,
+        headId: event.headId,
+        sessionId: event.sessionId,
+        warningSource: event.payload.source,
+        warningMessage: event.payload.message,
       });
     }
     const commandContext = this.commandContextsByExecutor.get(event.executorId);
@@ -763,46 +806,82 @@ export class GatewayHost {
     request: CommandRequest,
     result: CommandResult,
   ): Promise<void> {
-    const state = await this.buildState(clientId);
-    const buildBaseEvent = (
-      type: RuntimeEvent["type"],
-      payload: RuntimeEvent["payload"],
-    ): RuntimeEvent => ({
-      id: createId("event"),
-      type,
-      createdAt: new Date().toISOString(),
-      commandId,
-      clientId,
-      sessionId: state.sessionId,
-      worklineId: state.activeWorklineId,
-      executorId: state.activeExecutorId,
-      headId: state.activeWorkingHeadId,
-      agentId: state.activeAgentId,
-      payload,
-    } as RuntimeEvent);
+    const runtime = this.ensureClientRuntime(clientId);
 
     if (result.status === "success") {
       if (request.domain === "bookmark") {
         const ref = (result.payload as { ref?: AppState["sessionRef"] } | undefined)?.ref;
-        this.forwardRuntimeEvent(buildBaseEvent("session.changed", {
-          action: request.action,
-          ref,
-        }));
+        this.forwardRuntimeEvent(this.buildRuntimeEvent(
+          runtime,
+          "session.changed",
+          {
+            action: request.action,
+            ref,
+          },
+          {
+            clientId,
+            commandId,
+          },
+        ));
       }
       if (request.domain === "work") {
         const workline = (result.payload as { workline?: AppState["worklines"][number] } | undefined)?.workline;
-        this.forwardRuntimeEvent(buildBaseEvent("workline.changed", {
-          action: request.action,
-          workline,
-        }));
+        this.forwardRuntimeEvent(this.buildRuntimeEvent(
+          runtime,
+          "workline.changed",
+          {
+            action: request.action,
+            workline,
+          },
+          {
+            clientId,
+            commandId,
+          },
+        ));
       }
     }
-    this.forwardRuntimeEvent(buildBaseEvent("command.completed", {
-      domain: request.domain,
-      status: result.status,
-      code: result.code,
-      result,
-    }));
+    this.forwardRuntimeEvent(this.buildRuntimeEvent(
+      runtime,
+      "command.completed",
+      {
+        domain: request.domain,
+        status: result.status,
+        code: result.code,
+        result,
+      },
+      {
+        clientId,
+        commandId,
+      },
+    ));
+  }
+
+  private buildRuntimeEvent<TType extends RuntimeEvent["type"]>(
+    runtime: {
+      agentId: string;
+      headId: string;
+      sessionId: string;
+    },
+    type: TType,
+    payload: Extract<RuntimeEvent, { type: TType }>["payload"],
+    input?: {
+      clientId?: string;
+      commandId?: string;
+    },
+  ): Extract<RuntimeEvent, { type: TType }> {
+    return {
+      id: createId("event"),
+      type,
+      createdAt: new Date().toISOString(),
+      commandId: input?.commandId,
+      clientId: input?.clientId,
+      sessionId: runtime.sessionId,
+      worklineId: runtime.headId,
+      executorId: runtime.agentId,
+      headId: runtime.headId,
+      agentId: runtime.agentId,
+      payload,
+    } as Extract<RuntimeEvent, { type: TType }>;
   }
 
   private getModelStatus(): {

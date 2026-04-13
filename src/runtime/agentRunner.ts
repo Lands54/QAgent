@@ -47,6 +47,11 @@ interface AgentRunnerDependencies {
   }>;
   commitToolResult: (result: ToolResult) => Promise<void>;
   onToolStart?: (toolCall: ToolCall) => Promise<void>;
+  onToolOutput?: (input: {
+    toolCall: ToolCall;
+    stream: "stdout" | "stderr";
+    chunk: string;
+  }) => void;
   emitInfo: (message: string) => Promise<void>;
   emitError: (message: string) => Promise<void>;
   setStatus: (
@@ -259,6 +264,20 @@ export class AgentRunner {
     return this.deps.toolRegistry.execute(toolCall, {
       timeoutMs: this.deps.config.runtime.shellCommandTimeoutMs,
       signal: this.abortController?.signal,
+      onStdoutChunk: (chunk) => {
+        this.deps.onToolOutput?.({
+          toolCall,
+          stream: "stdout",
+          chunk,
+        });
+      },
+      onStderrChunk: (chunk) => {
+        this.deps.onToolOutput?.({
+          toolCall,
+          stream: "stderr",
+          chunk,
+        });
+      },
     });
   }
 }

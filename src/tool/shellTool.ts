@@ -75,6 +75,8 @@ export class ShellTool {
     options: {
       timeoutMs: number;
       signal?: AbortSignal;
+      onStdoutChunk?: (chunk: string) => void;
+      onStderrChunk?: (chunk: string) => void;
     },
   ): Promise<ToolResult> {
     const rejectionReason = detectInteractiveCommand(toolCall.input.command);

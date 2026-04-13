@@ -25,6 +25,8 @@ export class ToolRegistry {
     options: {
       timeoutMs: number;
       signal?: AbortSignal;
+      onStdoutChunk?: (chunk: string) => void;
+      onStderrChunk?: (chunk: string) => void;
     },
   ): Promise<ToolResult> {
     if (this.options.allowShell === false) {
