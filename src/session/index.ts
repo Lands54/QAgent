@@ -1,5 +1,9 @@
 export { SessionGraphStore } from "./sessionGraphStore.js";
-export { SessionLockBusyError, SessionLockService } from "./sessionLockService.js";
+export {
+  SessionLockBusyError,
+  SessionLockService,
+  SessionLockWaitTimeoutError,
+} from "./sessionLockService.js";
 export { SessionService } from "./sessionService.js";
 export type {
   SessionCommitResult,

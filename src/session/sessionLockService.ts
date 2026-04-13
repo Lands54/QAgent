@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { createId, ensureDir, readJsonIfExists, writeJson } from "../utils/index.js";
@@ -6,6 +6,8 @@ import { createId, ensureDir, readJsonIfExists, writeJson } from "../utils/index
 const DEFAULT_HEARTBEAT_MS = 5_000;
 const DEFAULT_TTL_MS = 20_000;
 const DEFAULT_POLL_MS = 50;
+const DEFAULT_WAIT_TIMEOUT_MS = 15_000;
+const ORPHANED_LOCK_GRACE_MS = 1_000;
 
 interface SessionLockMetadata {
   leaseId: string;
@@ -26,6 +28,7 @@ interface AcquireSessionLockInput {
   heartbeatMs: number;
   ttlMs: number;
   pollMs: number;
+  waitTimeoutMs?: number;
 }
 
 export interface SessionServiceLockOptions {
@@ -35,6 +38,7 @@ export interface SessionServiceLockOptions {
   mutationHeartbeatMs?: number;
   mutationTtlMs?: number;
   mutationPollMs?: number;
+  mutationWaitTimeoutMs?: number;
   onHeartbeatError?: (
     error: unknown,
     metadata: Readonly<SessionLockMetadata>,
@@ -56,6 +60,18 @@ export class SessionLockBusyError extends Error {
   }
 }
 
+export class SessionLockWaitTimeoutError extends Error {
+  public constructor(
+    public readonly lockName: string,
+    public readonly waitMs: number,
+    public readonly metadata?: Readonly<SessionLockMetadata>,
+    public readonly orphanedLockAgeMs?: number,
+  ) {
+    super(buildWaitTimeoutMessage(lockName, waitMs, metadata, orphanedLockAgeMs));
+    this.name = "SessionLockWaitTimeoutError";
+  }
+}
+
 function buildBusyMessage(
   lockName: string,
   metadata: Readonly<SessionLockMetadata>,
@@ -68,6 +84,31 @@ function buildBusyMessage(
     `startedAt=${metadata.startedAt}`,
     `lastHeartbeatAt=${metadata.lastHeartbeatAt}`,
   ].join(" ");
+}
+
+function buildWaitTimeoutMessage(
+  lockName: string,
+  waitMs: number,
+  metadata?: Readonly<SessionLockMetadata>,
+  orphanedLockAgeMs?: number,
+): string {
+  const parts = [
+    `等待 session lock ${lockName} 超时。`,
+    `waitMs=${waitMs}`,
+  ];
+  if (metadata) {
+    const headInfo = metadata.headId ? ` head=${metadata.headId}` : "";
+    parts.push(
+      `owner=${metadata.ownerKind}${headInfo}`,
+      `pid=${metadata.pid}`,
+      `startedAt=${metadata.startedAt}`,
+      `lastHeartbeatAt=${metadata.lastHeartbeatAt}`,
+    );
+  }
+  if (orphanedLockAgeMs !== undefined) {
+    parts.push(`orphanedLockAgeMs=${Math.round(orphanedLockAgeMs)}`);
+  }
+  return parts.join(" ");
 }
 
 function nowIso(): string {
@@ -113,6 +154,7 @@ export class SessionLockService {
       heartbeatMs: this.options.mutationHeartbeatMs ?? DEFAULT_HEARTBEAT_MS,
       ttlMs: this.options.mutationTtlMs ?? DEFAULT_TTL_MS,
       pollMs: this.options.mutationPollMs ?? DEFAULT_POLL_MS,
+      waitTimeoutMs: this.options.mutationWaitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS,
     });
   }
 
@@ -125,6 +167,7 @@ export class SessionLockService {
       heartbeatMs: this.options.mutationHeartbeatMs ?? DEFAULT_HEARTBEAT_MS,
       ttlMs: this.options.mutationTtlMs ?? DEFAULT_TTL_MS,
       pollMs: this.options.mutationPollMs ?? DEFAULT_POLL_MS,
+      waitTimeoutMs: this.options.mutationWaitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS,
     });
   }
 
@@ -146,6 +189,7 @@ export class SessionLockService {
       startedAt: nowIso(),
       lastHeartbeatAt: nowIso(),
     };
+    const waitStartedAt = Date.now();
 
     while (true) {
       try {
@@ -159,6 +203,12 @@ export class SessionLockService {
 
         const existing = await this.readMetadata(lockDir);
         if (!existing) {
+          const ageMs = await this.getLockDirAgeMs(lockDir);
+          if (ageMs !== undefined && ageMs >= ORPHANED_LOCK_GRACE_MS) {
+            await this.removeLockDir(lockDir);
+            continue;
+          }
+          this.throwIfWaitTimedOut(input, waitStartedAt, undefined, ageMs);
           await sleep(input.pollMs);
           continue;
         }
@@ -166,6 +216,7 @@ export class SessionLockService {
           if (!input.wait) {
             throw new SessionLockBusyError(input.lockName, existing);
           }
+          this.throwIfWaitTimedOut(input, waitStartedAt, existing);
           await sleep(input.pollMs);
           continue;
         }
@@ -265,5 +316,38 @@ export class SessionLockService {
     ttlMs: number,
   ): boolean {
     return Date.now() - Date.parse(metadata.lastHeartbeatAt) > ttlMs;
+  }
+
+  private throwIfWaitTimedOut(
+    input: AcquireSessionLockInput,
+    waitStartedAt: number,
+    metadata?: Readonly<SessionLockMetadata>,
+    orphanedLockAgeMs?: number,
+  ): void {
+    if (!input.wait || input.waitTimeoutMs === undefined) {
+      return;
+    }
+    const waitMs = Date.now() - waitStartedAt;
+    if (waitMs < input.waitTimeoutMs) {
+      return;
+    }
+    throw new SessionLockWaitTimeoutError(
+      input.lockName,
+      waitMs,
+      metadata,
+      orphanedLockAgeMs,
+    );
+  }
+
+  private async getLockDirAgeMs(lockDir: string): Promise<number | undefined> {
+    try {
+      const info = await stat(lockDir);
+      return Date.now() - info.mtimeMs;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return undefined;
+      }
+      throw error;
+    }
   }
 }

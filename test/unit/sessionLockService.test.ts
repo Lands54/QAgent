@@ -1,9 +1,12 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { SessionLockService } from "../../src/session/index.js";
+import {
+  SessionLockService,
+  SessionLockWaitTimeoutError,
+} from "../../src/session/index.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -94,5 +97,64 @@ describe("SessionLockService", () => {
 
     await writeFile(metadataPath, JSON.stringify(handle.metadata), "utf8");
     await handle.release();
+  });
+
+  it("空锁目录达到宽限期后会被自动清理并重新获取", async () => {
+    const root = await makeTempDir("qagent-session-lock-orphaned-");
+    const lockDir = path.join(root, "__locks", "repo-mutation");
+    await mkdir(lockDir, { recursive: true });
+    const staleDate = new Date(Date.now() - 2_000);
+    await utimes(lockDir, staleDate, staleDate);
+    const service = new SessionLockService(root, {
+      ownerKind: "orphan-recovery",
+      processLeaseHeartbeatMs: 20,
+      processLeaseTtlMs: 200,
+      mutationHeartbeatMs: 20,
+      mutationTtlMs: 200,
+      mutationPollMs: 10,
+    });
+
+    const handle = await service.acquireRepoMutationLock();
+
+    expect(handle.metadata.lockName).toBe("repo-mutation");
+    await handle.release();
+    await service.dispose();
+  });
+
+  it("等待型锁超过超时时间会抛出带诊断信息的错误", async () => {
+    const root = await makeTempDir("qagent-session-lock-timeout-");
+    const first = new SessionLockService(root, {
+      ownerKind: "holder",
+      processLeaseHeartbeatMs: 20,
+      processLeaseTtlMs: 200,
+      mutationHeartbeatMs: 20,
+      mutationTtlMs: 200,
+      mutationPollMs: 10,
+      mutationWaitTimeoutMs: 60,
+    });
+    const second = new SessionLockService(root, {
+      ownerKind: "waiter",
+      processLeaseHeartbeatMs: 20,
+      processLeaseTtlMs: 200,
+      mutationHeartbeatMs: 20,
+      mutationTtlMs: 200,
+      mutationPollMs: 10,
+      mutationWaitTimeoutMs: 60,
+    });
+
+    const handle = await first.acquireRepoMutationLock();
+
+    await expect(second.acquireRepoMutationLock()).rejects.toMatchObject({
+      name: "SessionLockWaitTimeoutError",
+      lockName: "repo-mutation",
+      metadata: expect.objectContaining({
+        ownerKind: "holder",
+        lockName: "repo-mutation",
+      }),
+    } satisfies Partial<SessionLockWaitTimeoutError>);
+
+    await handle.release();
+    await first.dispose();
+    await second.dispose();
   });
 });
