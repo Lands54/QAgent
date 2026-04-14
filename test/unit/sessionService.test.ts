@@ -1,11 +1,11 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { SessionGraphStore, SessionService } from "../../src/session/index.js";
-import type { LlmMessage, SessionSnapshot } from "../../src/types.js";
-import { createId, writeJson } from "../../src/utils/index.js";
+import type { LlmMessage, SessionAssetProvider, SessionSnapshot } from "../../src/types.js";
+import { createId, pathExists, writeJson } from "../../src/utils/index.js";
 
 async function makeTempDir(prefix: string) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -51,6 +51,91 @@ describe("SessionService", () => {
 
     const nodes = await graphStore.listNodes();
     expect(nodes[0]?.abstractAssets[0]?.tags).toContain("digest");
+  });
+
+  it("初始化失败时会回滚半成品 session repo", async () => {
+    const root = await makeTempDir("qagent-session-init-rollback-");
+    const failingProvider: SessionAssetProvider = {
+      kind: "failing-provider",
+      async fork() {
+        throw new Error("fork boom");
+      },
+      async checkpoint(input) {
+        return input.state;
+      },
+      async merge(input) {
+        return {
+          targetState: input.targetState,
+        };
+      },
+    };
+    const service = new SessionService(root, [failingProvider]);
+    const graphStore = new SessionGraphStore(root);
+
+    await expect(service.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    })).rejects.toThrow("fork boom");
+
+    expect(await graphStore.repoExists()).toBe(false);
+    expect(await pathExists(path.join(root, "__repo"))).toBe(false);
+
+    const headEntries = await readdir(path.join(root, "__heads"), {
+      withFileTypes: true,
+    }).catch(() => []);
+    expect(headEntries.filter((entry) => entry.isDirectory())).toHaveLength(0);
+  });
+
+  it("forkHead 失败时会回滚 helper head 的 snapshot 与 metadata", async () => {
+    const root = await makeTempDir("qagent-session-fork-rollback-");
+    let shouldFailFork = false;
+    const provider: SessionAssetProvider = {
+      kind: "fork-rollback-provider",
+      async fork() {
+        if (shouldFailFork) {
+          throw new Error("fork helper boom");
+        }
+        return {};
+      },
+      async checkpoint(input) {
+        return input.state;
+      },
+      async merge(input) {
+        return {
+          targetState: input.targetState,
+        };
+      },
+    };
+    const service = new SessionService(root, [provider]);
+    const graphStore = new SessionGraphStore(root);
+    const initialized = await service.initialize({
+      cwd: "/tmp/project",
+      shellCwd: "/tmp/project",
+      approvalMode: "always",
+    });
+    shouldFailFork = true;
+
+    await expect(service.forkHead("helper-worker", {
+      sourceHeadId: initialized.head.id,
+      activate: false,
+    })).rejects.toThrow("fork helper boom");
+
+    const headEntries = await readdir(path.join(root, "__heads"), {
+      withFileTypes: true,
+    });
+    expect(headEntries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)).toEqual([
+      initialized.head.id,
+    ]);
+    const repoHeadEntries = await readdir(path.join(root, "__repo", "heads"), {
+      withFileTypes: true,
+    });
+    expect(repoHeadEntries.filter((entry) => entry.isFile()).map((entry) => entry.name)).toEqual([
+      `${initialized.head.id}.json`,
+    ]);
+    expect((await service.listHeads(initialized.snapshot)).heads).toHaveLength(1);
+    expect((await service.getActiveHead()).id).toBe(initialized.head.id);
+    expect(await graphStore.repoExists()).toBe(true);
   });
 
   it("checkout tag 后首次继续对话会自动创建新分支", async () => {

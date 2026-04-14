@@ -576,6 +576,7 @@ export class BackendClientController implements AppControllerLike {
       opened.state ?? initialState,
     );
     await controller.startEventStream();
+    await controller.syncCliOverrides(input.cliOptions);
     controller.startHeartbeat();
     return controller;
   }
@@ -703,6 +704,27 @@ export class BackendClientController implements AppControllerLike {
         action: offset >= 0 ? "next" : "prev",
       });
     });
+  }
+
+  private async syncCliOverrides(cliOptions: CliOptions): Promise<void> {
+    if (cliOptions.provider) {
+      await this.transport.executeCommand(this.clientId, {
+        domain: "model",
+        action: "provider",
+        provider: cliOptions.provider,
+        model: "",
+        apiKey: "",
+      });
+    }
+    if (cliOptions.model) {
+      await this.transport.executeCommand(this.clientId, {
+        domain: "model",
+        action: "name",
+        provider: undefined,
+        model: cliOptions.model,
+        apiKey: "",
+      });
+    }
   }
 
   private async startEventStream(): Promise<void> {

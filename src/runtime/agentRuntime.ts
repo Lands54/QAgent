@@ -767,6 +767,16 @@ export class HeadAgentRuntime {
           toolCall,
         });
       },
+      onToolOutput: ({ toolCall, stream, chunk }) => {
+        this.emitRuntimeEvent("tool.output.delta", {
+          callId: toolCall.id,
+          command: toolCall.input.command,
+          stream,
+          chunk,
+          cwd: this.getShellCwd(),
+          startedAt: toolCall.createdAt,
+        });
+      },
       emitInfo: async (message) => {
         await this.appendUiOnlyMessage({
           id: createId("ui"),
@@ -1315,6 +1325,26 @@ export class HeadAgentRuntime {
     });
     return this.toolRegistry.execute(toolCall, {
       timeoutMs: this.buildRuntimeConfig().runtime.shellCommandTimeoutMs,
+      onStdoutChunk: (chunk) => {
+        this.emitRuntimeEvent("tool.output.delta", {
+          callId: toolCall.id,
+          command: toolCall.input.command,
+          stream: "stdout",
+          chunk,
+          cwd: this.getShellCwd(),
+          startedAt: toolCall.createdAt,
+        });
+      },
+      onStderrChunk: (chunk) => {
+        this.emitRuntimeEvent("tool.output.delta", {
+          callId: toolCall.id,
+          command: toolCall.input.command,
+          stream: "stderr",
+          chunk,
+          cwd: this.getShellCwd(),
+          startedAt: toolCall.createdAt,
+        });
+      },
     });
   }
 }

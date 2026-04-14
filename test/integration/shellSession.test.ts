@@ -122,4 +122,53 @@ describe("PersistentShellSession", () => {
     expect(await readFile(target, "utf8")).toContain("请默认使用中文回复。");
     expect(await readFile(target, "utf8")).toContain("记录长期偏好。");
   });
+
+  it("stdout 增量不会泄露内部退出 marker 或伪造换行", async () => {
+    if (!posixShell) {
+      return;
+    }
+
+    const root = await makeTempDir("qagent-shell-stream-");
+    const session = new PersistentShellSession(posixShell.executable, root);
+    sessions.push(session);
+    const chunks: string[] = [];
+
+    const result = await session.execute(
+      "printf 'hello'; sleep 0.05; printf 'world'",
+      {
+        timeoutMs: 10_000,
+        onStdoutChunk(chunk) {
+          chunks.push(chunk);
+        },
+      },
+    );
+
+    expect(chunks.join("")).toBe("helloworld");
+    expect(chunks.join("")).not.toContain("__QAGENT_EXIT__");
+    expect(result.stdout).toBe("helloworld");
+  });
+
+  it("stderr 会按增量回调透出", async () => {
+    if (!posixShell) {
+      return;
+    }
+
+    const root = await makeTempDir("qagent-shell-stderr-");
+    const session = new PersistentShellSession(posixShell.executable, root);
+    sessions.push(session);
+    const stderrChunks: string[] = [];
+
+    const result = await session.execute(
+      "printf 'warn-line' >&2",
+      {
+        timeoutMs: 10_000,
+        onStderrChunk(chunk) {
+          stderrChunks.push(chunk);
+        },
+      },
+    );
+
+    expect(stderrChunks.join("")).toContain("warn-line");
+    expect(result.stderr).toContain("warn-line");
+  });
 });
