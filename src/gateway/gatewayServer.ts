@@ -28,6 +28,8 @@ interface SseClient {
   response: ServerResponse;
 }
 
+const SSE_KEEPALIVE_MS = 15_000;
+
 function json(response: ServerResponse, statusCode: number, payload: unknown): void {
   response.statusCode = statusCode;
   response.setHeader("content-type", "application/json; charset=utf-8");
@@ -38,6 +40,10 @@ function writeSse(response: ServerResponse, event: GatewaySseEvent): void {
   response.write(`id: ${event.id}\n`);
   response.write(`event: ${event.type}\n`);
   response.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+function writeSseComment(response: ServerResponse, comment: string): void {
+  response.write(`: ${comment}\n\n`);
 }
 
 function isExecutorHeartbeatPath(pathname: string): boolean {
@@ -333,7 +339,7 @@ export class GatewayServer {
           "cache-control": "no-cache, no-transform",
           connection: "keep-alive",
         });
-        response.write(": connected\n\n");
+        writeSseComment(response, "connected");
         const client: SseClient = {
           clientId,
           scope,
@@ -341,12 +347,17 @@ export class GatewayServer {
         };
         const sseStartedAt = Date.now();
         this.sseClients.add(client);
+        const keepaliveTimer = setInterval(() => {
+          writeSseComment(response, "keepalive");
+        }, SSE_KEEPALIVE_MS);
+        keepaliveTimer.unref?.();
         this.logger.info("sse.connect", {
           activeSseClients: this.sseClients.size,
           clientId,
           scope,
         });
         request.on("close", () => {
+          clearInterval(keepaliveTimer);
           this.sseClients.delete(client);
           this.logger.info("sse.disconnect", {
             activeSseClients: this.sseClients.size,

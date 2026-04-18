@@ -98,7 +98,7 @@ export class AgentNavigationService {
   public async switchWorklineRelative(offset: number): Promise<AgentViewState> {
     const worklines = this.getNavigableWorklines();
     if (worklines.length === 0) {
-      throw new Error("当前没有可切换的工作线。");
+      throw new Error("当前没有可切换的工位。");
     }
     const currentHeadId = this.input.registry.getActiveRuntime().headId;
     const currentIndex = worklines.findIndex((workline) => {

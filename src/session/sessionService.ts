@@ -26,7 +26,19 @@ import type {
   ToolMode,
 } from "../types.js";
 import { AssetOverlayService } from "./application/assetOverlayService.js";
+import { SessionCheckoutService } from "./application/sessionCheckoutService.js";
+import { SessionGraphQueryService } from "./application/sessionGraphQueryService.js";
+import { SessionHeadsService } from "./application/sessionHeadsService.js";
+import { SessionMutationOrchestrator } from "./application/sessionMutationOrchestrator.js";
 import { SessionRepoMigrationService } from "./application/sessionRepoMigrationService.js";
+import { SessionRefsService } from "./application/sessionRefsService.js";
+import type {
+  SessionCheckoutResult,
+  SessionCommitResult,
+  SessionHeadForkResult,
+  SessionHeadSwitchResult,
+  SessionMutationResult,
+} from "./application/sessionServiceTypes.js";
 import {
   buildNodeDigestAsset,
   createDigestSessionAssetProvider,
@@ -67,27 +79,13 @@ export interface SessionInitializationResult {
   infoMessage?: string;
 }
 
-export interface SessionMutationResult {
-  ref: SessionRefInfo;
-  head: SessionWorkingHead;
-  message: string;
-}
-
-export interface SessionCheckoutResult extends SessionMutationResult {
-  snapshot: SessionSnapshot;
-}
-
-export interface SessionHeadForkResult extends SessionMutationResult {
-  snapshot: SessionSnapshot;
-}
-
-export interface SessionHeadSwitchResult extends SessionMutationResult {
-  snapshot: SessionSnapshot;
-}
-
-export interface SessionCommitResult extends SessionMutationResult {
-  commit: SessionCommitRecord;
-}
+export type {
+  SessionCheckoutResult,
+  SessionCommitResult,
+  SessionHeadForkResult,
+  SessionHeadSwitchResult,
+  SessionMutationResult,
+} from "./application/sessionServiceTypes.js";
 
 export type SessionServiceOptions = SessionServiceLockOptions;
 
@@ -114,6 +112,11 @@ export class SessionService {
   private readonly assetProviders: SessionAssetProvider[];
   private readonly assetOverlayService: AssetOverlayService;
   private readonly repoMigrationService: SessionRepoMigrationService;
+  private readonly graphQueryService: SessionGraphQueryService;
+  private readonly refsService: SessionRefsService;
+  private readonly headsService: SessionHeadsService;
+  private readonly checkoutService: SessionCheckoutService;
+  private readonly mutationOrchestrator: SessionMutationOrchestrator;
   private repoState?: SessionRepoState;
   private branches: SessionBranchRef[] = [];
   private tags: SessionTagRef[] = [];
@@ -161,6 +164,95 @@ export class SessionService {
         return this.assetOverlayService.runForkProviders(head, snapshot, sourceHead);
       },
       buildNode: (input) => this.buildNode(input),
+    });
+    this.graphQueryService = new SessionGraphQueryService({
+      graphStore: this.graphStore,
+      ensureRepoLoaded: async () => this.ensureRepoLoaded(),
+      requireRepoState: () => this.requireRepoState(),
+      requireHead: async (headId) => this.requireHead(headId),
+      requireNode: async (nodeId) => this.requireNode(nodeId),
+      loadWorkingSnapshot: async (headId) => this.loadWorkingSnapshot(headId),
+      getHeads: () => this.heads,
+      getBranches: () => this.branches,
+      getTags: () => this.tags,
+      getCommits: () => this.commits,
+    });
+    this.refsService = new SessionRefsService({
+      graphStore: this.graphStore,
+      sessionStore: this.sessionStore,
+      runRepoMutation: async (action, input) => this.runRepoMutation(action, input),
+      runHeadMutation: async (headId, action) => this.runHeadMutation(headId, action),
+      ensureSnapshotNode: async (headId, snapshot, input) => {
+        return this.ensureSnapshotNode(headId, snapshot, input);
+      },
+      requireHead: async (headId) => this.requireHead(headId),
+      getHead: async (headId) => this.getHead(headId),
+      getHeadStatus: async (headId, snapshot) => this.getHeadStatus(headId, snapshot),
+      assertValidRefName: (name, kind) => this.assertValidRefName(name, kind),
+      assertRefNameAvailable: (name) => this.assertRefNameAvailable(name),
+      assertWriterLeaseAvailable: async (headId, branchName) => {
+        await this.assertWriterLeaseAvailable(headId, branchName);
+      },
+      getBranches: () => this.branches,
+      getTags: () => this.tags,
+    });
+    this.headsService = new SessionHeadsService({
+      graphStore: this.graphStore,
+      runRepoMutation: async (action, input) => this.runRepoMutation(action, input),
+      requireRepoState: () => this.requireRepoState(),
+      getActiveHead: async () => this.getActiveHead(),
+      requireHead: async (headId) => this.requireHead(headId),
+      saveRepoMetadata: async () => this.saveRepoMetadata(),
+      loadWorkingSnapshot: async (headId) => this.loadWorkingSnapshot(headId),
+      ensureSnapshotNode: async (headId, snapshot, input) => {
+        return this.ensureSnapshotNode(headId, snapshot, input);
+      },
+      getHeadStatus: async (headId, snapshot) => this.getHeadStatus(headId, snapshot),
+    });
+    this.checkoutService = new SessionCheckoutService({
+      runRepoMutation: async (action, input) => this.runRepoMutation(action, input),
+      ensureSnapshotNode: async (headId, snapshot, input) => {
+        return this.ensureSnapshotNode(headId, snapshot, input);
+      },
+      requireHead: async (headId) => this.requireHead(headId),
+      getActiveHead: async () => this.getActiveHead(),
+      loadWorkingSnapshot: async (headId) => this.loadWorkingSnapshot(headId),
+      sessionStore: this.sessionStore,
+      graphStore: this.graphStore,
+      getHeadStatus: async (headId, snapshot) => this.getHeadStatus(headId, snapshot),
+      resolveRef: async (ref) => this.resolveRef(ref),
+      assertWriterLeaseAvailable: async (headId, branchName) => {
+        await this.assertWriterLeaseAvailable(headId, branchName);
+      },
+      saveRepoMetadata: async () => this.saveRepoMetadata(),
+      requireRepoState: () => this.requireRepoState(),
+      assertValidRefName: (name, kind) => this.assertValidRefName(name, kind),
+      assertRefNameAvailable: (name) => this.assertRefNameAvailable(name),
+      forkHeadInternal: async (name, options, headId) => this.forkHeadInternal(name, options, headId),
+      ensureUniqueBranchName: async (baseName) => this.ensureUniqueBranchName(baseName),
+      getBranches: () => this.branches,
+    });
+    this.mutationOrchestrator = new SessionMutationOrchestrator({
+      runRepoMutation: async (action, input) => this.runRepoMutation(action, input),
+      ensureSnapshotNode: async (headId, snapshot, input) => {
+        return this.ensureSnapshotNode(headId, snapshot, input);
+      },
+      requireHead: async (headId) => this.requireHead(headId),
+      requireNode: async (nodeId) => this.requireNode(nodeId),
+      loadWorkingSnapshot: async (headId) => this.loadWorkingSnapshot(headId),
+      getHeadStatus: async (headId, snapshot) => this.getHeadStatus(headId, snapshot),
+      saveRepoMetadata: async () => this.saveRepoMetadata(),
+      resolveRef: async (ref) => this.resolveRef(ref),
+      buildSyntheticSourceHead: (node, name) => this.buildSyntheticSourceHead(node, name),
+      findAttachedHeadForRef: (ref, nodeId) => this.findAttachedHeadForRef(ref, nodeId),
+      mergeResolvedSourceIntoHead: async (targetHead, sourceHead, assets) => {
+        return this.mergeResolvedSourceIntoHead(targetHead, sourceHead, assets);
+      },
+      getCommits: () => this.commits,
+      graphStore: this.graphStore,
+      getAssetProviders: () => this.assetProviders,
+      sessionRoot: this.sessionRoot,
+      updateBranchHead: (branchName, headNodeId) => this.updateBranchHead(branchName, headNodeId),
     });
   }
 
@@ -327,423 +419,130 @@ export class SessionService {
   public async getPendingApprovalCheckpoint(
     headId?: string,
   ): Promise<PendingApprovalCheckpoint | undefined> {
-    const head = await this.getHead(headId);
-    return this.sessionStore.loadPendingApprovalCheckpoint(head.id);
+    return this.refsService.getPendingApprovalCheckpoint(headId);
   }
 
   public async savePendingApprovalCheckpoint(
     checkpoint: PendingApprovalCheckpoint,
   ): Promise<void> {
-    await this.runRepoMutation(async () => {
-      await this.sessionStore.savePendingApprovalCheckpoint(
-        checkpoint.headId,
-        checkpoint,
-      );
-      const head = await this.requireHead(checkpoint.headId);
-      head.runtimeState.status = "awaiting-approval";
-      head.status = "awaiting-approval";
-      head.updatedAt = new Date().toISOString();
-      await this.graphStore.saveHead(head);
-    }, {
-      headIds: [checkpoint.headId],
-    });
+    await this.refsService.savePendingApprovalCheckpoint(checkpoint);
   }
 
   public async clearPendingApprovalCheckpoint(headId: string): Promise<void> {
-    await this.runHeadMutation(headId, async () => {
-      await this.sessionStore.clearPendingApprovalCheckpoint(headId);
-    });
+    await this.refsService.clearPendingApprovalCheckpoint(headId);
   }
 
   public async flushCheckpointIfDirty(
     snapshot: SessionSnapshot,
   ): Promise<boolean> {
-    return this.runRepoMutation(async () => {
-      const node = await this.ensureSnapshotNode(snapshot.workingHeadId, snapshot, {
-        force: false,
-        kind: "checkpoint",
-      });
-      return Boolean(node);
-    }, {
-      headIds: [snapshot.workingHeadId],
-    });
+    return this.mutationOrchestrator.flushCheckpointIfDirty(snapshot);
   }
 
   public async flushCheckpointOnExit(
     snapshot: SessionSnapshot,
   ): Promise<boolean> {
-    return this.flushCheckpointIfDirty(snapshot);
+    return this.mutationOrchestrator.flushCheckpointOnExit(snapshot);
   }
 
   public async flushCompactSnapshot(
     snapshot: SessionSnapshot,
   ): Promise<boolean> {
-    return this.runRepoMutation(async () => {
-      const node = await this.ensureSnapshotNode(snapshot.workingHeadId, snapshot, {
-        force: false,
-        kind: "compact",
-      });
-      return Boolean(node);
-    }, {
-      headIds: [snapshot.workingHeadId],
-    });
+    return this.mutationOrchestrator.flushCompactSnapshot(snapshot);
   }
 
   public async getActiveHead(): Promise<SessionWorkingHead> {
-    await this.ensureRepoLoaded();
-    return this.requireHead(this.requireRepoState().activeWorkingHeadId);
+    return this.graphQueryService.getActiveHead();
   }
 
   public async getHead(headId?: string): Promise<SessionWorkingHead> {
-    await this.ensureRepoLoaded();
-    return this.requireHead(headId ?? this.requireRepoState().activeWorkingHeadId);
+    return this.graphQueryService.getHead(headId);
   }
 
   public async getHeadSnapshot(headId?: string): Promise<SessionSnapshot> {
-    const head = await this.getHead(headId);
-    return this.loadWorkingSnapshot(head.id);
+    return this.graphQueryService.getHeadSnapshot(headId);
   }
 
   public async getHeadStatus(
     headId?: string,
     snapshot?: SessionSnapshot,
   ): Promise<SessionRefInfo> {
-    const head = await this.getHead(headId);
-    const headSnapshot =
-      snapshot && snapshot.workingHeadId === head.id
-        ? cloneSnapshotForHead(snapshot, head)
-        : await this.loadWorkingSnapshot(head.id);
-    const node = await this.requireNode(head.currentNodeId);
-
-    return {
-      mode: attachmentModeToRefMode(head.attachment.mode),
-      name: head.attachment.name,
-      label: attachmentLabel(head.attachment),
-      headNodeId: head.currentNodeId,
-      workingHeadId: head.id,
-      workingHeadName: head.name,
-      sessionId: head.sessionId,
-      writerLeaseBranch: head.writerLease?.branchName,
-      active: head.id === this.requireRepoState().activeWorkingHeadId,
-      dirty: snapshotHash(headSnapshot) !== node.snapshotHash,
-    };
+    return this.graphQueryService.getHeadStatus(headId, snapshot);
   }
 
   public async getStatus(snapshot?: SessionSnapshot): Promise<SessionRefInfo> {
-    await this.ensureRepoLoaded();
-    const headId = snapshot?.workingHeadId ?? this.requireRepoState().activeWorkingHeadId;
-    return this.getHeadStatus(headId, snapshot);
+    return this.graphQueryService.getStatus(snapshot);
   }
 
   public async listHeads(snapshot?: SessionSnapshot): Promise<SessionHeadListView> {
-    await this.ensureRepoLoaded();
-    const items = await Promise.all(
-      this.heads
-        .filter((head) => head.status !== "closed")
-        .map(async (head): Promise<SessionHeadListItem> => {
-          const ref = await this.getHeadStatus(
-            head.id,
-            snapshot?.workingHeadId === head.id ? snapshot : undefined,
-          );
-          return {
-            id: head.id,
-            name: head.name,
-            sessionId: head.sessionId,
-            attachmentLabel: ref.label,
-            currentNodeId: head.currentNodeId,
-            writerLeaseBranch: head.writerLease?.branchName,
-            active: ref.active,
-            status: head.status,
-            dirty: ref.dirty,
-            createdAt: head.createdAt,
-            updatedAt: head.updatedAt,
-          };
-        }),
-    );
-
-    return {
-      heads: items.sort((left, right) => left.name.localeCompare(right.name)),
-    };
+    return this.graphQueryService.listHeads(snapshot);
   }
 
   public async listRefs(snapshot?: SessionSnapshot): Promise<SessionListView> {
-    const status = await this.getStatus(snapshot);
-
-    return {
-      branches: this.branches.map((branch) => ({
-        name: branch.name,
-        targetNodeId: branch.headNodeId,
-        current: status.mode === "branch" && status.name === branch.name,
-        createdAt: branch.createdAt,
-        updatedAt: branch.updatedAt,
-      })),
-      tags: this.tags.map((tag) => ({
-        name: tag.name,
-        targetNodeId: tag.targetNodeId,
-        current: status.mode === "detached-tag" && status.name === tag.name,
-        createdAt: tag.createdAt,
-      })),
-    };
+    return this.graphQueryService.listRefs(snapshot);
   }
 
   public async listCommits(
     limit = 20,
     snapshot?: SessionSnapshot,
   ): Promise<SessionCommitListView> {
-    await this.ensureRepoLoaded();
-    const status = await this.getStatus(snapshot);
-
-    return {
-      commits: [...this.commits]
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-        .slice(0, limit)
-        .map((commit) => ({
-          ...commit,
-          current: commit.nodeId === status.headNodeId,
-        })),
-    };
+    return this.graphQueryService.listCommits(limit, snapshot);
   }
 
   public async graphLog(limit = 20): Promise<SessionLogEntry[]> {
-    await this.ensureRepoLoaded();
-    const nodes = await this.graphStore.listNodes();
-    const refsByNode = new Map<string, string[]>();
-
-    for (const branch of this.branches) {
-      const refs = refsByNode.get(branch.headNodeId) ?? [];
-      refs.push(`branch:${branch.name}`);
-      refsByNode.set(branch.headNodeId, refs);
-    }
-
-    for (const tag of this.tags) {
-      const refs = refsByNode.get(tag.targetNodeId) ?? [];
-      refs.push(`tag:${tag.name}`);
-      refsByNode.set(tag.targetNodeId, refs);
-    }
-
-    for (const head of this.heads) {
-      if (head.status === "closed") {
-        continue;
-      }
-      const refs = refsByNode.get(head.currentNodeId) ?? [];
-      refs.push(`head:${head.name}`);
-      refsByNode.set(head.currentNodeId, refs);
-    }
-
-    return [...nodes]
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, limit)
-      .map((node) => ({
-        id: node.id,
-        kind: node.kind,
-        parentNodeIds: node.parentNodeIds,
-        refs: refsByNode.get(node.id) ?? [],
-        summaryTitle: node.abstractAssets[0]?.title,
-        createdAt: node.createdAt,
-      }));
+    return this.graphQueryService.graphLog(limit);
   }
 
   public async log(limit = 20): Promise<SessionLogEntry[]> {
-    return this.graphLog(limit);
+    return this.graphQueryService.log(limit);
   }
 
   public async createCommit(
     message: string,
     snapshot: SessionSnapshot,
   ): Promise<SessionCommitResult> {
-    const trimmedMessage = message.trim();
-    if (!trimmedMessage) {
-      throw new Error("commit message 不能为空。");
-    }
-
-    return this.runRepoMutation(async () => {
-      const checkpointNode = await this.ensureSnapshotNode(
-        snapshot.workingHeadId,
-        snapshot,
-        {
-          force: false,
-          kind: "checkpoint",
-        },
-      );
-      const head = await this.requireHead(snapshot.workingHeadId);
-      const commit: SessionCommitRecord = {
-        id: createId("commit"),
-        message: trimmedMessage,
-        nodeId: checkpointNode?.id ?? head.currentNodeId,
-        headId: head.id,
-        sessionId: head.sessionId,
-        createdAt: new Date().toISOString(),
-      };
-      this.commits.push(commit);
-      await this.graphStore.saveCommits(this.commits);
-      await this.saveRepoMetadata();
-
-      return {
-        commit,
-        ref: await this.getHeadStatus(head.id, snapshot),
-        head,
-        message: `已创建 commit ${commit.id}。`,
-      };
-    }, {
-      headIds: [snapshot.workingHeadId],
-    });
+    return this.mutationOrchestrator.createCommit(message, snapshot);
   }
 
   public async createBranch(
     name: string,
     snapshot: SessionSnapshot,
   ): Promise<SessionMutationResult> {
-    return this.runRepoMutation(async () => {
-      this.assertValidRefName(name, "branch");
-      this.assertRefNameAvailable(name);
-      await this.ensureSnapshotNode(snapshot.workingHeadId, snapshot, {
-        force: false,
-        kind: "checkpoint",
-      });
-
-      this.branches.push({
-        name,
-        headNodeId: (await this.requireHead(snapshot.workingHeadId)).currentNodeId,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-      await this.graphStore.saveBranches(this.branches);
-
-      const head = await this.requireHead(snapshot.workingHeadId);
-      return {
-        ref: await this.getHeadStatus(head.id, snapshot),
-        head,
-        message: `已创建分支 ${name}，当前未切换。`,
-      };
-    }, {
-      headIds: [snapshot.workingHeadId],
-    });
+    return this.refsService.createBranch(name, snapshot);
   }
 
   public async forkBranch(
     name: string,
     snapshot: SessionSnapshot,
   ): Promise<SessionHeadForkResult> {
-    const nextHeadId = createId("head");
-    return this.runRepoMutation(async () => {
-      this.assertValidRefName(name, "branch");
-      this.assertRefNameAvailable(name);
-      await this.ensureSnapshotNode(snapshot.workingHeadId, snapshot, {
-        force: false,
-        kind: "checkpoint",
-      });
-
-      const sourceHead = await this.requireHead(snapshot.workingHeadId);
-      this.branches.push({
-        name,
-        headNodeId: sourceHead.currentNodeId,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-      await this.graphStore.saveBranches(this.branches);
-
-      return this.forkHeadInternal(
-        name,
-        {
-          sourceHeadId: sourceHead.id,
-          activate: true,
-          attachment: {
-            mode: "branch",
-            name,
-            nodeId: sourceHead.currentNodeId,
-          },
-          acquireWriterLease: true,
-          runtimeState: {
-            agentKind: "interactive",
-            autoMemoryFork: true,
-            retainOnCompletion: true,
-            uiContextEnabled: false,
-          },
-        },
-        nextHeadId,
-      );
-    }, {
-      headIds: [snapshot.workingHeadId, nextHeadId],
-    });
+    return this.checkoutService.forkBranch(name, snapshot);
   }
 
   public async createTag(
     name: string,
     snapshot: SessionSnapshot,
   ): Promise<SessionMutationResult> {
-    return this.runRepoMutation(async () => {
-      this.assertValidRefName(name, "tag");
-      this.assertRefNameAvailable(name);
-      await this.ensureSnapshotNode(snapshot.workingHeadId, snapshot, {
-        force: false,
-        kind: "checkpoint",
-      });
-
-      const head = await this.requireHead(snapshot.workingHeadId);
-      this.tags.push({
-        name,
-        targetNodeId: head.currentNodeId,
-        createdAt: new Date().toISOString(),
-      });
-      await this.graphStore.saveTags(this.tags);
-
-      return {
-        ref: await this.getHeadStatus(head.id, snapshot),
-        head,
-        message: `已创建 tag ${name} -> ${head.currentNodeId}。`,
-      };
-    }, {
-      headIds: [snapshot.workingHeadId],
-    });
+    return this.refsService.createTag(name, snapshot);
   }
 
   public async switchHead(
     headId: string,
     currentSnapshot?: SessionSnapshot,
   ): Promise<SessionHeadSwitchResult> {
-    return this.runRepoMutation(async () => {
-      const previousHead = await this.getActiveHead();
-      if (currentSnapshot && previousHead.id === currentSnapshot.workingHeadId) {
-        await this.ensureSnapshotNode(previousHead.id, currentSnapshot, {
-          force: false,
-          kind: "checkpoint",
-        });
-      }
-
-      const nextHead = await this.requireHead(headId);
-      if (nextHead.status === "closed") {
-        throw new Error(`working head 已关闭：${nextHead.name}`);
-      }
-
-      this.requireRepoState().activeWorkingHeadId = nextHead.id;
-      await this.saveRepoMetadata();
-      const snapshot = await this.loadWorkingSnapshot(nextHead.id);
-      return {
-        snapshot,
-        ref: await this.getHeadStatus(nextHead.id, snapshot),
-        head: nextHead,
-        message: `已切换到 working head ${nextHead.name}。`,
-      };
-    }, {
-      headIds: currentSnapshot ? [currentSnapshot.workingHeadId] : [],
-    });
+    return this.headsService.switchHead(headId, currentSnapshot);
   }
 
   public async forkHead(
     name: string,
     options: ForkHeadOptions = {},
   ): Promise<SessionHeadForkResult> {
-    const headId = createId("head");
-    return this.runRepoMutation(() => this.forkHeadInternal(name, options, headId), {
-      headIds: [headId],
-    });
+    return this.checkoutService.forkHead(name, options);
   }
 
   public async checkout(
     ref: string,
     snapshot: SessionSnapshot,
   ): Promise<SessionCheckoutResult> {
-    return this.checkoutRefOnHead(snapshot.workingHeadId, ref, snapshot);
+    return this.checkoutService.checkout(ref, snapshot);
   }
 
   public async checkoutRefOnHead(
@@ -751,70 +550,7 @@ export class SessionService {
     ref: string,
     snapshot?: SessionSnapshot,
   ): Promise<SessionCheckoutResult> {
-    return this.runRepoMutation(async () => {
-      if (snapshot && snapshot.workingHeadId === headId) {
-        await this.ensureSnapshotNode(headId, snapshot, {
-          force: false,
-          kind: "checkpoint",
-        });
-      }
-
-      const head = await this.requireHead(headId);
-      const resolved = await this.resolveRef(ref);
-      if (resolved.kind === "branch") {
-        await this.assertWriterLeaseAvailable(head.id, resolved.ref.name);
-      }
-
-      const nextAttachment: SessionHeadAttachment =
-        resolved.kind === "branch"
-          ? {
-              mode: "branch",
-              name: resolved.ref.name,
-              nodeId: resolved.node.id,
-            }
-          : resolved.kind === "tag"
-            ? {
-                mode: "tag",
-                name: resolved.ref.name,
-                nodeId: resolved.node.id,
-              }
-            : {
-                mode: "detached-node",
-                name: resolved.node.id,
-                nodeId: resolved.node.id,
-              };
-
-      const restoredSnapshot = cloneSnapshotForHead(resolved.node.snapshot, head);
-      await this.sessionStore.saveSnapshot(restoredSnapshot);
-      head.currentNodeId = resolved.node.id;
-      head.attachment = nextAttachment;
-      head.runtimeState.shellCwd = restoredSnapshot.shellCwd;
-      head.runtimeState.status = "idle";
-      head.status = "idle";
-      if (resolved.kind === "branch") {
-        head.writerLease = {
-          branchName: resolved.ref.name,
-          acquiredAt: new Date().toISOString(),
-        };
-      } else {
-        head.writerLease = undefined;
-      }
-      head.updatedAt = new Date().toISOString();
-      await this.graphStore.saveHead(head);
-
-      return {
-        snapshot: restoredSnapshot,
-        ref: await this.getHeadStatus(head.id, restoredSnapshot),
-        head,
-        message: [
-          `已切换到 ${attachmentLabel(nextAttachment)}。`,
-          `working head: ${head.name}`,
-          "工作区未自动回退。",
-        ].join("\n"),
-      };
-    }, {
-      headIds: [headId],
-    });
+    return this.checkoutService.checkoutRefOnHead(headId, ref, snapshot);
   }
 
   public async attachHead(
@@ -822,155 +558,48 @@ export class SessionService {
     ref: string,
     snapshot?: SessionSnapshot,
   ): Promise<SessionCheckoutResult> {
-    return this.checkoutRefOnHead(headId, ref, snapshot);
+    return this.checkoutService.attachHead(headId, ref, snapshot);
   }
 
   public async detachHead(headId: string): Promise<SessionMutationResult> {
-    return this.runRepoMutation(async () => {
-      const head = await this.requireHead(headId);
-      head.attachment = {
-        mode: "detached-node",
-        name: head.currentNodeId,
-        nodeId: head.currentNodeId,
-      };
-      head.writerLease = undefined;
-      head.updatedAt = new Date().toISOString();
-      await this.graphStore.saveHead(head);
-      return {
-        ref: await this.getHeadStatus(head.id),
-        head,
-        message: `已将 working head ${head.name} 置为 detached。`,
-      };
-    });
+    return this.headsService.detachHead(headId);
   }
 
   public async closeHead(headId: string): Promise<SessionMutationResult> {
-    return this.runRepoMutation(async () => {
-      const head = await this.requireHead(headId);
-      if (head.id === this.requireRepoState().activeWorkingHeadId) {
-        throw new Error("当前 active working head 不能直接关闭。");
-      }
-
-      head.status = "closed";
-      head.writerLease = undefined;
-      head.updatedAt = new Date().toISOString();
-      await this.graphStore.saveHead(head);
-      return {
-        ref: await this.getHeadStatus(this.requireRepoState().activeWorkingHeadId),
-        head,
-        message: `已关闭 working head ${head.name}。`,
-      };
-    });
+    return this.headsService.closeHead(headId);
   }
 
   public async acquireWriterLease(
     headId: string,
     branchName: string,
   ): Promise<SessionMutationResult> {
-    return this.runRepoMutation(async () => {
-      await this.assertWriterLeaseAvailable(headId, branchName);
-      const head = await this.requireHead(headId);
-      head.writerLease = {
-        branchName,
-        acquiredAt: new Date().toISOString(),
-      };
-      head.updatedAt = new Date().toISOString();
-      await this.graphStore.saveHead(head);
-      return {
-        ref: await this.getHeadStatus(head.id),
-        head,
-        message: `已为 ${head.name} 获取分支 ${branchName} 的 writer lease。`,
-      };
-    });
+    return this.refsService.acquireWriterLease(headId, branchName);
   }
 
   public async releaseWriterLease(
     headId: string,
   ): Promise<SessionMutationResult> {
-    return this.runRepoMutation(async () => {
-      const head = await this.requireHead(headId);
-      head.writerLease = undefined;
-      head.updatedAt = new Date().toISOString();
-      await this.graphStore.saveHead(head);
-      return {
-        ref: await this.getHeadStatus(head.id),
-        head,
-        message: `已释放 ${head.name} 的 writer lease。`,
-      };
-    });
+    return this.refsService.releaseWriterLease(headId);
   }
 
   public async updateHeadRuntimeState(
     headId: string,
     patch: Partial<SessionWorkingHead["runtimeState"]>,
   ): Promise<SessionWorkingHead> {
-    return this.runRepoMutation(async () => {
-      const head = await this.requireHead(headId);
-      head.runtimeState = {
-        ...head.runtimeState,
-        ...patch,
-      };
-      head.updatedAt = new Date().toISOString();
-      await this.graphStore.saveHead(head);
-      return head;
-    });
+    return this.headsService.updateHeadRuntimeState(headId, patch);
   }
 
   public async prepareForUserInput(
     snapshot: SessionSnapshot,
   ): Promise<SessionMutationResult | undefined> {
-    return this.prepareHeadForUserInput(snapshot.workingHeadId, snapshot);
+    return this.checkoutService.prepareForUserInput(snapshot);
   }
 
   public async prepareHeadForUserInput(
     headId: string,
     snapshot?: SessionSnapshot,
   ): Promise<SessionMutationResult | undefined> {
-    return this.runRepoMutation(async () => {
-      const head = await this.requireHead(headId);
-      if (head.attachment.mode !== "tag") {
-        return undefined;
-      }
-      const tagName = head.attachment.name;
-
-      if (snapshot && snapshot.workingHeadId === head.id) {
-        await this.ensureSnapshotNode(head.id, snapshot, {
-          force: true,
-          kind: "checkpoint",
-        });
-      }
-      const refreshedHead = await this.requireHead(head.id);
-      const branchName = await this.ensureUniqueBranchName(
-        `from-tag-${tagName}-${formatUtcTimestamp()}`,
-      );
-      const now = new Date().toISOString();
-      this.branches.push({
-        name: branchName,
-        headNodeId: refreshedHead.currentNodeId,
-        createdAt: now,
-        updatedAt: now,
-      });
-      refreshedHead.attachment = {
-        mode: "branch",
-        name: branchName,
-        nodeId: refreshedHead.currentNodeId,
-      };
-      refreshedHead.writerLease = {
-        branchName,
-        acquiredAt: now,
-      };
-      refreshedHead.updatedAt = now;
-      await this.saveRepoMetadata();
-      await this.graphStore.saveHead(refreshedHead);
-
-      return {
-        ref: await this.getHeadStatus(refreshedHead.id),
-        head: refreshedHead,
-        message: `已从 tag ${tagName} 自动创建并切换到分支 ${branchName}。`,
-      };
-    }, {
-      headIds: [headId],
-    });
+    return this.checkoutService.prepareHeadForUserInput(headId, snapshot);
   }
 
   public async merge(
@@ -978,7 +607,7 @@ export class SessionService {
     snapshot: SessionSnapshot,
     assets: string[] = ["digest", "memory"],
   ): Promise<SessionMutationResult> {
-    return this.mergeRefIntoHead(snapshot.workingHeadId, sourceRef, assets, snapshot);
+    return this.mutationOrchestrator.merge(sourceRef, snapshot, assets);
   }
 
   public async mergeHeadIntoHead(
@@ -987,24 +616,12 @@ export class SessionService {
     assets: string[] = ["digest", "memory"],
     targetSnapshot?: SessionSnapshot,
   ): Promise<SessionMutationResult> {
-    return this.runRepoMutation(async () => {
-      if (targetSnapshot && targetSnapshot.workingHeadId === targetHeadId) {
-        await this.ensureSnapshotNode(targetHeadId, targetSnapshot, {
-          force: false,
-          kind: "checkpoint",
-        });
-      }
-
-      const targetHead = await this.requireHead(targetHeadId);
-      const sourceHead = await this.requireHead(sourceHeadId);
-      if (targetHead.id === sourceHead.id) {
-        throw new Error("sourceHead 与 targetHead 相同，无法 merge。");
-      }
-
-      return this.mergeResolvedSourceIntoHead(targetHead, sourceHead, assets);
-    }, {
-      headIds: targetSnapshot ? [targetHeadId] : [],
-    });
+    return this.mutationOrchestrator.mergeHeadIntoHead(
+      targetHeadId,
+      sourceHeadId,
+      assets,
+      targetSnapshot,
+    );
   }
 
   public async mergeRefIntoHead(
@@ -1013,30 +630,12 @@ export class SessionService {
     assets: string[] = ["digest", "memory"],
     targetSnapshot?: SessionSnapshot,
   ): Promise<SessionMutationResult> {
-    return this.runRepoMutation(async () => {
-      if (targetSnapshot && targetSnapshot.workingHeadId === targetHeadId) {
-        await this.ensureSnapshotNode(targetHeadId, targetSnapshot, {
-          force: false,
-          kind: "checkpoint",
-        });
-      }
-
-      const targetHead = await this.requireHead(targetHeadId);
-      const resolved = await this.resolveRef(sourceRef);
-      if (resolved.node.id === targetHead.currentNodeId) {
-        throw new Error("sourceRef 与当前 head 相同，无法 merge。");
-      }
-
-      const sourceHead =
-        resolved.kind === "node"
-          ? this.buildSyntheticSourceHead(resolved.node)
-          : this.findAttachedHeadForRef(sourceRef, resolved.node.id)
-            ?? this.buildSyntheticSourceHead(resolved.node, sourceRef);
-
-      return this.mergeResolvedSourceIntoHead(targetHead, sourceHead, assets);
-    }, {
-      headIds: targetSnapshot ? [targetHeadId] : [],
-    });
+    return this.mutationOrchestrator.mergeRefIntoHead(
+      targetHeadId,
+      sourceRef,
+      assets,
+      targetSnapshot,
+    );
   }
 
   private async forkHeadInternal(

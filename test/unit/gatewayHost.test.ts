@@ -238,10 +238,14 @@ describe("GatewayHost", () => {
   it("buildState 在书签刷新失败时会降级为空书签并发出 warning", async () => {
     const loggerWarn = vi.fn();
     const forwardRuntimeEvent = vi.fn();
-    const appStateAssemblerBuild = vi.fn((input: { bookmarks: AppState["bookmarks"] }) => {
+    const appStateRefresherBuild = vi.fn((input: {
+      bookmarks: AppState["bookmarks"];
+      sessionGraphEntries: AppState["sessionGraphEntries"];
+    }) => {
       return {
         ...createEmptyState("/tmp/project"),
         bookmarks: input.bookmarks,
+        sessionGraphEntries: input.sessionGraphEntries,
       };
     });
     const host = Object.create(GatewayHost.prototype) as {
@@ -262,6 +266,7 @@ describe("GatewayHost", () => {
         listWorklines(): { worklines: [] };
         listExecutors(): { executors: [] };
         listBookmarks(agentId: string): Promise<{ bookmarks: AppState["bookmarks"] }>;
+        listSessionGraphLog(limit?: number): Promise<AppState["sessionGraphEntries"]>;
       };
       approvalPolicy: {
         getMode(): "never";
@@ -269,8 +274,17 @@ describe("GatewayHost", () => {
       skillRegistry: {
         getAll(): [];
       };
-      appStateAssembler: {
-        build(input: unknown): AppState;
+      appStateRefresher: {
+        loadSupplementalState(input: {
+          onPartialFailure?: (failure: {
+            component: "bookmarks" | "sessionGraph";
+            error: unknown;
+          }) => void | Promise<void>;
+        }): Promise<{
+          bookmarks: AppState["bookmarks"];
+          sessionGraphEntries: AppState["sessionGraphEntries"];
+        }>;
+        buildState(input: unknown): AppState;
       };
       stateByClient: Map<string, AppState>;
       config: {
@@ -285,6 +299,7 @@ describe("GatewayHost", () => {
       forwardRuntimeEvent(event: unknown): void;
       getCachedState(clientId: string): AppState;
       buildRuntimeEvent: GatewayHost["buildRuntimeEvent"];
+      reportPartialStateRefreshError: GatewayHost["reportPartialStateRefreshError"];
     };
 
     Object.assign(host, {
@@ -306,6 +321,7 @@ describe("GatewayHost", () => {
         listBookmarks: async () => {
           throw new Error("refs broken");
         },
+        listSessionGraphLog: async () => [],
       },
       approvalPolicy: {
         getMode: () => "never",
@@ -313,8 +329,18 @@ describe("GatewayHost", () => {
       skillRegistry: {
         getAll: () => [],
       },
-      appStateAssembler: {
-        build: appStateAssemblerBuild,
+      appStateRefresher: {
+        loadSupplementalState: vi.fn(async ({ onPartialFailure }) => {
+          await onPartialFailure?.({
+            component: "bookmarks",
+            error: new Error("refs broken"),
+          });
+          return {
+            bookmarks: [],
+            sessionGraphEntries: [],
+          };
+        }),
+        buildState: appStateRefresherBuild,
       },
       stateByClient: new Map(),
       config: {
@@ -333,13 +359,17 @@ describe("GatewayHost", () => {
       buildRuntimeEvent: (GatewayHost.prototype as unknown as {
         buildRuntimeEvent: GatewayHost["buildRuntimeEvent"];
       }).buildRuntimeEvent,
+      reportPartialStateRefreshError: (GatewayHost.prototype as unknown as {
+        reportPartialStateRefreshError: GatewayHost["reportPartialStateRefreshError"];
+      }).reportPartialStateRefreshError,
     });
 
     const state = await host.buildState("client_1");
 
     expect(state.bookmarks).toEqual([]);
-    expect(appStateAssemblerBuild).toHaveBeenCalledWith(expect.objectContaining({
+    expect(appStateRefresherBuild).toHaveBeenCalledWith(expect.objectContaining({
       bookmarks: [],
+      sessionGraphEntries: [],
     }));
     expect(loggerWarn).toHaveBeenCalledWith(
       "state.refresh.partial_error",

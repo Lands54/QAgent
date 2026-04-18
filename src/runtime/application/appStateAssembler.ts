@@ -3,6 +3,7 @@ import type {
   ApprovalMode,
   BookmarkView,
   ExecutorView,
+  SessionLogEntry,
   SkillManifest,
   WorklineView,
 } from "../../types.js";
@@ -10,7 +11,7 @@ import type { HeadAgentRuntime } from "../agentRuntime.js";
 import { createEmptyState, type AgentStatus, type AppState } from "../appState.js";
 import { ContextBudgetService } from "../domain/contextBudgetService.js";
 
-interface BuildAppStateInput {
+export interface BuildAppStateInput {
   cwd: string;
   previousState: AppState;
   activeRuntime: HeadAgentRuntime;
@@ -22,6 +23,7 @@ interface BuildAppStateInput {
   worklines: WorklineView[];
   executors: ExecutorView[];
   bookmarks: BookmarkView[];
+  sessionGraphEntries: SessionLogEntry[];
   infoMessage?: string;
   autoCompactThresholdTokens: number;
 }
@@ -76,6 +78,7 @@ export class AppStateAssembler {
       worklines: input.worklines,
       executors: input.executors,
       bookmarks: input.bookmarks,
+      sessionGraphEntries: input.sessionGraphEntries,
       activeAgentId: input.activeView.id,
       activeAgentKind: input.activeView.kind,
       activeWorkingHeadId: input.activeRuntime.headId,

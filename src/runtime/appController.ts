@@ -26,7 +26,7 @@ import type {
   UIMessage,
 } from "../types.js";
 import { createId } from "../utils/index.js";
-import { AppStateAssembler } from "./application/appStateAssembler.js";
+import { AppStateRefresher } from "./application/appStateRefresher.js";
 import {
   createEmptyState,
   type AppState,
@@ -35,6 +35,8 @@ import { SlashCommandBus } from "./slashCommandBus.js";
 
 type Listener = (state: AppState) => void;
 type RuntimeEventListener = (event: RuntimeEvent) => void;
+
+const SESSION_GRAPH_PREVIEW_LIMIT = 18;
 
 export class AppController {
   public static async create(cliOptions: CliOptions): Promise<AppController> {
@@ -50,13 +52,14 @@ export class AppController {
   private readonly approvalPolicy: ApprovalPolicy;
   private readonly promptAssembler = new PromptAssembler();
   private readonly agentManager: AgentManager;
-  private readonly appStateAssembler = new AppStateAssembler();
+  private readonly appStateRefresher = new AppStateRefresher();
   private modelClient: ModelClient;
   private state: AppState;
   private slashBus?: SlashCommandBus;
   private readonly commandService: CommandService;
   private exitResolver?: () => void;
   private readonly exitPromise: Promise<void>;
+  private supplementalStateRefreshToken = 0;
 
   private constructor(private readonly config: RuntimeConfig) {
     this.state = createEmptyState(config.cwd);
@@ -333,6 +336,7 @@ export class AppController {
     this.slashBus = new SlashCommandBus(this.commandService);
 
     this.refreshState(initialized.infoMessage);
+    await this.refreshSupplementalState();
   }
 
   private getSlashBus(): SlashCommandBus {
@@ -397,29 +401,80 @@ export class AppController {
   }
 
   private refreshState(infoMessage?: string): void {
-    const activeRuntime = this.agentManager.getActiveRuntime();
-    const activeView = activeRuntime.getViewState();
-    const pendingApprovals = Object.fromEntries(
-      this.agentManager
-        .listAgents()
-        .filter((agent) => agent.pendingApproval)
-        .map((agent) => [agent.id, agent.pendingApproval as NonNullable<typeof agent.pendingApproval>]),
-    );
-    this.state = this.appStateAssembler.build({
-      cwd: this.config.cwd,
+    this.state = this.buildAppState({
       previousState: this.state,
-      activeRuntime,
-      activeView,
+      bookmarks: this.state.bookmarks,
+      sessionGraphEntries: this.state.sessionGraphEntries,
+      infoMessage,
+    });
+    this.events.emit("state", this.state);
+    void this.refreshSupplementalState();
+  }
+
+  private buildAppState(input?: {
+    previousState?: AppState;
+    bookmarks?: AppState["bookmarks"];
+    sessionGraphEntries?: AppState["sessionGraphEntries"];
+    infoMessage?: string;
+  }): AppState {
+    return this.appStateRefresher.buildState({
+      cwd: this.config.cwd,
+      previousState: input?.previousState ?? this.state,
+      stateSource: this.agentManager,
       approvalMode: this.approvalPolicy.getMode(),
       availableSkills: this.skillRegistry.getAll(),
-      pendingApprovals,
-      agents: this.agentManager.listAgents(),
-      worklines: this.agentManager.listWorklines().worklines,
-      executors: this.agentManager.listExecutors().executors,
-      bookmarks: [],
-      infoMessage,
+      bookmarks: input?.bookmarks ?? this.state.bookmarks,
+      sessionGraphEntries: input?.sessionGraphEntries ?? this.state.sessionGraphEntries,
+      infoMessage: input?.infoMessage,
       autoCompactThresholdTokens: this.config.runtime.autoCompactThresholdTokens,
     });
+  }
+
+  private async refreshSupplementalState(): Promise<void> {
+    const refreshToken = ++this.supplementalStateRefreshToken;
+    const activeAgentId = this.agentManager.getActiveAgentId();
+    const fallbackState = this.state;
+    const supplemental = await this.appStateRefresher.loadSupplementalState({
+      fallbackState,
+      loadBookmarks: async () => {
+        return (await this.agentManager.listBookmarks(activeAgentId)).bookmarks;
+      },
+      loadSessionGraphEntries: async () => {
+        return this.agentManager.listSessionGraphLog(SESSION_GRAPH_PREVIEW_LIMIT);
+      },
+    });
+
+    if (refreshToken !== this.supplementalStateRefreshToken) {
+      return;
+    }
+    if (this.agentManager.getActiveAgentId() !== activeAgentId) {
+      return;
+    }
+
+    const currentState = this.state;
+    const baseState = this.buildAppState({
+      previousState: currentState,
+      bookmarks: supplemental.bookmarks,
+      sessionGraphEntries: supplemental.sessionGraphEntries,
+    });
+    const shouldPreserveErrorStatus =
+      currentState.status.mode === "error" && baseState.status.mode !== "error";
+    const lastCurrentMessage = currentState.uiMessages.at(-1);
+    const lastNextMessage = baseState.uiMessages.at(-1);
+    const shouldPreserveUiMessages =
+      shouldPreserveErrorStatus
+      && lastCurrentMessage?.role === "error"
+      && lastCurrentMessage.id !== lastNextMessage?.id;
+
+    this.state = shouldPreserveErrorStatus
+      ? {
+          ...baseState,
+          status: currentState.status,
+          uiMessages: shouldPreserveUiMessages
+            ? currentState.uiMessages
+            : baseState.uiMessages,
+        }
+      : baseState;
     this.events.emit("state", this.state);
   }
 

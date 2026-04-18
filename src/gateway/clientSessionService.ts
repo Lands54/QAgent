@@ -99,7 +99,7 @@ export class ClientSessionService {
     const owner = this.leasesByWorkline.get(input.worklineId);
     if (owner && owner.clientId !== input.clientId) {
       throw new Error(
-        `工作线 ${input.worklineId} 当前由 client ${owner.clientId} 占用。`,
+        `工位 ${input.worklineId} 当前由 client ${owner.clientId} 占用。`,
       );
     }
 

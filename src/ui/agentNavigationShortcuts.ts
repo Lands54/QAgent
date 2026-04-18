@@ -20,6 +20,6 @@ export function isNextAgentShortcut(value: string, key: Key): boolean {
 
 export function buildAgentShortcutHint(agentCount?: number): string {
   return agentCount && agentCount > 1
-    ? "工作线: PgUp/PgDn 或 Alt+←/→"
-    : "工作线: 仅当前 1 条";
+    ? "工位: PgUp/PgDn 或 Alt+←/→"
+    : "工位: 仅当前 1 条";
 }

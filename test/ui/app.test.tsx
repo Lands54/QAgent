@@ -57,6 +57,24 @@ class FakeController {
           active: true,
         },
       ],
+      sessionGraphEntries: [
+        {
+          id: "node_main",
+          kind: "root",
+          parentNodeIds: [],
+          refs: ["branch:main", "head:main"],
+          summaryTitle: "初始化会话",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          id: "node_plan",
+          kind: "message",
+          parentNodeIds: ["node_main"],
+          refs: [],
+          summaryTitle: "梳理 DAG 会话视图方案",
+          createdAt: "2026-01-01T00:01:00.000Z",
+        },
+      ],
     };
   }
 
@@ -135,8 +153,11 @@ describe("App", () => {
     expect(view.lastFrame()).toContain("欢迎来到 QAgent");
     expect(view.lastFrame()).toContain("session_demo");
     expect(view.lastFrame()).toContain("bookmark=branch=main");
+    expect(view.lastFrame()).toContain("Session Graph");
+    expect(view.lastFrame()).toContain("梳理 DAG 会话视图方案");
+    expect(view.lastFrame()).toContain("初始化会话");
     expect(view.lastFrame()).toContain("history: ↑/↓");
-    expect(view.lastFrame()).toContain("工作线: 仅当前 1 条");
+    expect(view.lastFrame()).toContain("工位: 仅当前 1 条");
     expect(view.lastFrame()).toContain("complete: Tab");
     expect(view.lastFrame()).toContain("tokens: 2400/120000 (2.0%)");
     expect(view.lastFrame()).toContain("待机模式");

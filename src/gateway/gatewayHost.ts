@@ -28,7 +28,7 @@ import { createMemorySessionAssetProvider } from "../memory/index.js";
 import { createModelClient } from "../model/index.js";
 import {
   AgentManager,
-  AppStateAssembler,
+  AppStateRefresher,
   createEmptyState,
   SlashCommandBus,
   type AppState,
@@ -54,6 +54,8 @@ interface CommandContext {
   commandId: string;
 }
 
+const SESSION_GRAPH_PREVIEW_LIMIT = 18;
+
 export class GatewayHost {
   public static async create(cliOptions: CliOptions): Promise<GatewayHost> {
     const config = await loadRuntimeConfig(cliOptions);
@@ -74,7 +76,7 @@ export class GatewayHost {
   private readonly approvalPolicy: ApprovalPolicy;
   private readonly promptAssembler = new PromptAssembler();
   private readonly agentManager: AgentManager;
-  private readonly appStateAssembler = new AppStateAssembler();
+  private readonly appStateRefresher = new AppStateRefresher();
   private readonly clientSessions = new ClientSessionService();
   private readonly stateByClient = new Map<string, AppState>();
   private readonly commandContextsByExecutor = new Map<string, CommandContext>();
@@ -432,7 +434,7 @@ export class GatewayHost {
       return !lease || lease.clientId === clientId;
     });
     if (!attachable) {
-      throw new Error("当前没有可附着的工作线。");
+      throw new Error("当前没有可附着的工位。");
     }
     return attachable.id;
   }
@@ -443,13 +445,7 @@ export class GatewayHost {
 
   private async buildState(clientId: string, infoMessage?: string): Promise<AppState> {
     const runtime = this.ensureClientRuntime(clientId);
-    const activeView = runtime.getViewState();
-    const pendingApprovals = Object.fromEntries(
-      this.agentManager
-        .listAgents()
-        .filter((agent) => agent.pendingApproval)
-        .map((agent) => [agent.id, agent.pendingApproval as NonNullable<typeof agent.pendingApproval>]),
-    );
+    const previousState = this.getCachedState(clientId);
     const worklines = this.agentManager.listWorklines().worklines.map((workline) => ({
       ...workline,
       active: workline.id === runtime.headId,
@@ -458,46 +454,76 @@ export class GatewayHost {
       ...executor,
       active: executor.executorId === runtime.agentId,
     }));
-    let bookmarks: AppState["bookmarks"] = [];
-    try {
-      bookmarks = (await this.agentManager.listBookmarks(runtime.agentId)).bookmarks;
-    } catch (error) {
-      this.logger.warn("state.refresh.partial_error", {
-        clientId,
-        executorId: runtime.agentId,
-        worklineId: runtime.headId,
-        component: "bookmarks",
-        ...gatewayErrorFields(error),
-      });
-      this.forwardRuntimeEvent(this.buildRuntimeEvent(
-        runtime,
-        "runtime.warning",
-        {
-          message: `状态刷新期间无法加载书签，已降级为空列表：${error instanceof Error ? error.message : String(error)}`,
-          source: "state.refresh",
-        },
-        {
+    const supplemental = await this.appStateRefresher.loadSupplementalState({
+      fallbackState: {
+        bookmarks: [],
+        sessionGraphEntries: [],
+      },
+      loadBookmarks: async () => {
+        return (await this.agentManager.listBookmarks(runtime.agentId)).bookmarks;
+      },
+      loadSessionGraphEntries: async () => {
+        return this.agentManager.listSessionGraphLog(SESSION_GRAPH_PREVIEW_LIMIT);
+      },
+      onPartialFailure: async ({ component, error }) => {
+        this.reportPartialStateRefreshError({
           clientId,
-        },
-      ));
-    }
-    const state = this.appStateAssembler.build({
+          runtime,
+          component,
+          error,
+        });
+      },
+    });
+    const state = this.appStateRefresher.buildState({
       cwd: this.config.cwd,
-      previousState: this.getCachedState(clientId),
+      previousState,
+      stateSource: this.agentManager,
       activeRuntime: runtime,
-      activeView,
       approvalMode: this.approvalPolicy.getMode(),
       availableSkills: this.skillRegistry.getAll(),
-      pendingApprovals,
-      agents: this.agentManager.listAgents(),
       worklines,
       executors,
-      bookmarks,
+      bookmarks: supplemental.bookmarks,
+      sessionGraphEntries: supplemental.sessionGraphEntries,
       infoMessage,
       autoCompactThresholdTokens: this.config.runtime.autoCompactThresholdTokens,
     });
     this.stateByClient.set(clientId, state);
     return state;
+  }
+
+  private reportPartialStateRefreshError(input: {
+    clientId: string;
+    runtime: {
+      agentId: string;
+      headId: string;
+      sessionId: string;
+    };
+    component: "bookmarks" | "sessionGraph";
+    error: unknown;
+  }): void {
+    const degradedMessage = input.component === "bookmarks"
+      ? "状态刷新期间无法加载书签，已降级为空列表"
+      : "状态刷新期间无法加载会话图，已降级为空视图";
+
+    this.logger.warn("state.refresh.partial_error", {
+      clientId: input.clientId,
+      executorId: input.runtime.agentId,
+      worklineId: input.runtime.headId,
+      component: input.component,
+      ...gatewayErrorFields(input.error),
+    });
+    this.forwardRuntimeEvent(this.buildRuntimeEvent(
+      input.runtime,
+      "runtime.warning",
+      {
+        message: `${degradedMessage}：${input.error instanceof Error ? input.error.message : String(input.error)}`,
+        source: "state.refresh",
+      },
+      {
+        clientId: input.clientId,
+      },
+    ));
   }
 
   private async refreshAllClientStates(): Promise<void> {

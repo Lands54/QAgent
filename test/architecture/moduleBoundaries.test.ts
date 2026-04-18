@@ -227,6 +227,24 @@ function detectCycle(graph: Map<string, string[]>): string[] | undefined {
 }
 
 describe("Architecture Boundaries", () => {
+  it("核心巨石文件长度受到护栏保护", async () => {
+    const limits = new Map<string, number>([
+      [path.join(srcRoot, "command", "commandService.ts"), 120],
+      [path.join(srcRoot, "runtime", "agentManager.ts"), 900],
+      [path.join(srcRoot, "runtime", "agentRuntime.ts"), 650],
+      [path.join(srcRoot, "session", "sessionService.ts"), 1300],
+    ]);
+
+    for (const [file, maxLines] of limits.entries()) {
+      const source = await readFile(file, "utf8");
+      const lineCount = source.split("\n").length;
+      expect(
+        lineCount,
+        `${path.relative(workspaceRoot, file)} 当前 ${lineCount} 行，超过护栏 ${maxLines} 行`,
+      ).toBeLessThanOrEqual(maxLines);
+    }
+  });
+
   it("每个顶层模块都提供 facade index.ts", async () => {
     const entries = await readdir(srcRoot, { withFileTypes: true });
     const moduleDirs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
@@ -348,6 +366,42 @@ describe("Architecture Boundaries", () => {
       }
       if (path.relative(srcRoot, file) !== path.join("runtime", "appController.ts")) {
         violations.push(path.relative(workspaceRoot, file));
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("application 层不得反向依赖组合根或门面巨石", async () => {
+    const guardedRoots = new Set([
+      path.join(srcRoot, "runtime", "appController.ts"),
+      path.join(srcRoot, "runtime", "agentManager.ts"),
+      path.join(srcRoot, "command", "commandService.ts"),
+      path.join(srcRoot, "session", "sessionService.ts"),
+    ]);
+    const candidateDirs = [
+      path.join(srcRoot, "runtime", "application"),
+      path.join(srcRoot, "command", "application"),
+      path.join(srcRoot, "session", "application"),
+    ];
+    const violations: string[] = [];
+
+    for (const dir of candidateDirs) {
+      const files = await listSourceFiles(dir);
+      for (const file of files) {
+        const source = await readFile(file, "utf8");
+        const specifiers = parseRelativeImports(source);
+        const imports = await Promise.all(
+          specifiers.map((specifier) => resolveSourceImport(file, specifier)),
+        );
+        for (const target of imports.filter((value): value is string => Boolean(value))) {
+          if (!guardedRoots.has(target)) {
+            continue;
+          }
+          violations.push(
+            `${path.relative(workspaceRoot, file)} 不应反向依赖 ${path.relative(workspaceRoot, target)}`,
+          );
+        }
       }
     }
 

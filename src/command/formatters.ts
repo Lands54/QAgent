@@ -13,7 +13,15 @@ export function formatCommandResultText(result: CommandResult): string {
     payload?.uiMessages ? formatUiMessagesAsText(payload.uiMessages) : "",
   ].filter((section) => section.trim().length > 0);
 
-  return sections.join("\n\n");
+  if (sections.length > 0) {
+    return sections.join("\n\n");
+  }
+
+  if (result.status === "success") {
+    return `命令执行完成，但没有可显示的输出。code=${result.code}`;
+  }
+
+  return `命令已结束，但没有可显示的输出。status=${result.status} code=${result.code}`;
 }
 
 export function formatCommandResultUiMessages(result: CommandResult): UIMessage[] {

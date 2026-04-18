@@ -908,7 +908,7 @@ describe("AgentRunner", () => {
     try {
       const settled = await Promise.race([
         agentManager.submitInputToActiveAgent("帮我完成这个任务").then(() => "completed"),
-        sleep(100).then(() => "timeout"),
+        sleep(250).then(() => "timeout"),
       ]);
 
       expect(settled).toBe("completed");

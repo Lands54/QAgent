@@ -788,16 +788,16 @@ describe("SlashCommandBus", () => {
     expect(showResult.messages[0]?.content).toContain("不需要手动激活");
   });
 
-  it("支持新的 work / bookmark 命令", async () => {
+  it("支持新的 workline / bookmark 命令", async () => {
     const { bus } = buildBus();
 
-    const statusResult = await bus.execute("/work status");
-    const workListResult = await bus.execute("/work list");
+    const statusResult = await bus.execute("/workline status");
+    const workListResult = await bus.execute("/workline list");
     const bookmarkListResult = await bus.execute("/bookmark list");
     const commitResult = await bus.execute('/session commit -m "保存当前方案"');
     const logResult = await bus.execute("/session log --limit=5");
     const graphLogResult = await bus.execute("/session graph log --limit=5");
-    const workCreateResult = await bus.execute("/work new feature-a");
+    const workCreateResult = await bus.execute("/workline new feature-a");
     const switchResult = await bus.execute("/bookmark switch baseline");
 
     expect(statusResult.messages[0]?.content).toContain("bookmark=branch=main");
@@ -819,7 +819,7 @@ describe("SlashCommandBus", () => {
     const checkoutResult = await bus.execute("/session checkout baseline");
 
     expect(listResult.messages[0]?.content).toContain("/bookmark list");
-    expect(forkResult.messages[0]?.content).toContain("/work new");
+    expect(forkResult.messages[0]?.content).toContain("/workline new");
     expect(checkoutResult.messages[0]?.content).toContain("/bookmark switch");
   });
 
@@ -830,8 +830,8 @@ describe("SlashCommandBus", () => {
     const forkResult = await bus.execute("/session head fork worker-a");
     const detachResult = await bus.execute("/session head detach head_worker_a");
 
-    expect(listResult.messages[0]?.content).toContain("/work");
-    expect(forkResult.messages[0]?.content).toContain("/work");
-    expect(detachResult.messages[0]?.content).toContain("/work");
+    expect(listResult.messages[0]?.content).toContain("/workline");
+    expect(forkResult.messages[0]?.content).toContain("/workline");
+    expect(detachResult.messages[0]?.content).toContain("/workline");
   });
 });

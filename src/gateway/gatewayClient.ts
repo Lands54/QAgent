@@ -12,6 +12,12 @@ import type {
   RuntimeConfig,
   RuntimeEvent,
 } from "../types.js";
+import {
+  createId,
+  extractSseEventData,
+  getBuildInfo,
+  takeSseEvents,
+} from "../utils/index.js";
 import { GatewayServer } from "./gatewayServer.js";
 import { clearGatewayManifest, readGatewayManifest } from "./manifest.js";
 import type {
@@ -22,10 +28,11 @@ import type {
   GatewayOpenClientResponse,
   GatewaySseEvent,
 } from "./types.js";
-import { createId, getBuildInfo } from "../utils/index.js";
 
 type Listener = (state: AppState) => void;
 type RuntimeEventListener = (event: RuntimeEvent) => void;
+
+const EVENT_STREAM_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000] as const;
 
 interface BackendTransport {
   openClient(clientLabel: "cli" | "tui" | "api"): Promise<GatewayOpenClientResponse>;
@@ -227,17 +234,25 @@ async function readSseStream(
       break;
     }
     buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split("\n\n");
-    buffer = chunks.pop() ?? "";
-    for (const chunk of chunks) {
-      const dataLine = chunk
-        .split("\n")
-        .find((line) => line.startsWith("data: "));
-      if (!dataLine) {
+    const drained = takeSseEvents(buffer);
+    buffer = drained.remainder;
+    for (const chunk of drained.events) {
+      const data = extractSseEventData(chunk);
+      if (!data) {
         continue;
       }
-      onEvent(JSON.parse(dataLine.slice("data: ".length)) as GatewaySseEvent);
+      onEvent(JSON.parse(data) as GatewaySseEvent);
     }
+  }
+
+  buffer += decoder.decode();
+  const drained = takeSseEvents(buffer, true);
+  for (const chunk of drained.events) {
+    const data = extractSseEventData(chunk);
+    if (!data) {
+      continue;
+    }
+    onEvent(JSON.parse(data) as GatewaySseEvent);
   }
 }
 
@@ -588,6 +603,9 @@ export class BackendClientController implements AppControllerLike {
     this.exitResolver = resolve;
   });
   private heartbeatTimer?: NodeJS.Timeout;
+  private reconnectTimer?: NodeJS.Timeout;
+  private eventStreamLoop?: Promise<void>;
+  private reconnectAttempts = 0;
   private exiting = false;
   private disposed = false;
 
@@ -648,6 +666,10 @@ export class BackendClientController implements AppControllerLike {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
     }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     this.state = {
       ...this.state,
       shouldExit: true,
@@ -666,6 +688,7 @@ export class BackendClientController implements AppControllerLike {
     }
     this.disposed = true;
     await this.requestExit();
+    await this.eventStreamLoop;
     await this.closeClientBestEffort();
   }
 
@@ -688,7 +711,7 @@ export class BackendClientController implements AppControllerLike {
   }
 
   public async switchAgent(agentId: string): Promise<void> {
-    await this.runInteractiveAction("切换工作线", async () => {
+    await this.runInteractiveAction("切换工位", async () => {
       await this.executeCommand({
         domain: "work",
         action: "switch",
@@ -698,7 +721,7 @@ export class BackendClientController implements AppControllerLike {
   }
 
   public async switchAgentRelative(offset: number): Promise<void> {
-    await this.runInteractiveAction("切换工作线", async () => {
+    await this.runInteractiveAction("切换工位", async () => {
       await this.executeCommand({
         domain: "work",
         action: offset >= 0 ? "next" : "prev",
@@ -728,34 +751,74 @@ export class BackendClientController implements AppControllerLike {
   }
 
   private async startEventStream(): Promise<void> {
-    void this.transport.openEventStream(
-      this.clientId,
-      (event) => {
-        if (event.type === "state.snapshot") {
-          this.state = event.payload.state;
-          this.events.emit("state", this.state);
+    if (this.eventStreamLoop) {
+      return;
+    }
+    this.eventStreamLoop = this.runEventStreamLoop();
+  }
+
+  private async runEventStreamLoop(): Promise<void> {
+    while (!this.abortController.signal.aborted && !this.exiting) {
+      const streamStartedAt = Date.now();
+      try {
+        await this.transport.openEventStream(
+          this.clientId,
+          (event) => {
+            this.reconnectAttempts = 0;
+            if (event.type === "state.snapshot") {
+              this.state = event.payload.state;
+              this.events.emit("state", this.state);
+              return;
+            }
+            if (event.type === "runtime.event") {
+              this.events.emit("runtime-event", event.payload.event);
+              return;
+            }
+            if (event.type === "gateway.stopping" || event.type === "gateway.disconnected") {
+              void this.requestExit();
+            }
+          },
+          this.abortController.signal,
+        );
+        if (Date.now() - streamStartedAt >= 1_000) {
+          this.reconnectAttempts = 0;
+        }
+        if (!await this.scheduleEventStreamReconnect(new Error("事件流已关闭。"))) {
           return;
         }
-        if (event.type === "runtime.event") {
-          this.events.emit("runtime-event", event.payload.event);
+      } catch (error) {
+        if (!await this.scheduleEventStreamReconnect(error)) {
           return;
         }
-        if (event.type === "gateway.stopping" || event.type === "gateway.disconnected") {
-          void this.requestExit();
+      }
+    }
+  }
+
+  private async scheduleEventStreamReconnect(error: unknown): Promise<boolean> {
+    if (this.abortController.signal.aborted || this.exiting) {
+      return false;
+    }
+
+    const delayMs = EVENT_STREAM_RETRY_DELAYS_MS[this.reconnectAttempts];
+    if (delayMs === undefined) {
+      this.reportTransportError("监听事件流", error);
+      return false;
+    }
+
+    this.reconnectAttempts += 1;
+    await new Promise<void>((resolve) => {
+      const resolveOnce = () => {
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = undefined;
         }
-      },
-      this.abortController.signal,
-    )
-      .then(() => {
-        if (!this.abortController.signal.aborted && !this.exiting) {
-          this.reportTransportError("监听事件流", new Error("事件流已关闭。"));
-        }
-      })
-      .catch((error) => {
-        if (!this.abortController.signal.aborted && !this.exiting) {
-          this.reportTransportError("监听事件流", error);
-        }
-      });
+        resolve();
+      };
+      this.reconnectTimer = setTimeout(resolveOnce, delayMs);
+      this.reconnectTimer.unref?.();
+      this.abortController.signal.addEventListener("abort", resolveOnce, { once: true });
+    });
+    return !this.abortController.signal.aborted && !this.exiting;
   }
 
   private startHeartbeat(): void {

@@ -7,6 +7,7 @@ import type {
   BookmarkView,
   ExecutorView,
   LlmMessage,
+  SessionLogEntry,
   SessionRefInfo,
   SessionSnapshot,
   SessionWorkingHead,
@@ -31,6 +32,7 @@ export interface AppState {
   worklines: WorklineView[];
   executors: ExecutorView[];
   bookmarks: BookmarkView[];
+  sessionGraphEntries: SessionLogEntry[];
   activeAgentId: string;
   activeAgentKind?: AgentKind;
   activeWorkingHeadId: string;
@@ -67,6 +69,7 @@ export function createEmptyState(cwd: string): AppState {
     worklines: [],
     executors: [],
     bookmarks: [],
+    sessionGraphEntries: [],
     activeAgentId: "",
     activeWorkingHeadId: "",
     sessionId: "",

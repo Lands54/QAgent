@@ -2,9 +2,9 @@ import { EventEmitter } from "node:events";
 
 import type { PromptAssembler } from "../context/index.js";
 import type {
-  SessionService,
   SessionCheckoutResult,
   SessionInitializationResult,
+  SessionService,
 } from "../session/index.js";
 import type { ApprovalPolicy } from "../tool/index.js";
 import type {
@@ -38,12 +38,12 @@ import {
 } from "./application/agentLifecycleService.js";
 import { AgentNavigationService } from "./application/agentNavigationService.js";
 import { AgentRegistry } from "./application/agentRegistry.js";
-import { HookPipeline, type PostRunJob } from "./application/hookPipeline.js";
-import {
-  CompactSessionService,
-  type CompactSessionResult,
-} from "./compactSessionService.js";
-import { createId } from "../utils/index.js";
+import { BookmarkSessionFacade } from "./application/bookmarkSessionFacade.js";
+import { ExecutorService } from "./application/executorService.js";
+import { HookPipeline } from "./application/hookPipeline.js";
+import { RuntimeStateSyncService } from "./application/runtimeStateSyncService.js";
+import { RuntimeViewProjector } from "./application/runtimeViewProjector.js";
+import { WorklineService } from "./application/worklineService.js";
 
 type Listener = () => void;
 type RuntimeEventListener = (event: RuntimeEvent) => void;
@@ -61,17 +61,18 @@ export class AgentManager {
   private readonly runtimeFactory: AgentRuntimeFactory;
   private readonly navigation: AgentNavigationService;
   private readonly lifecycle: AgentLifecycleService;
+  private readonly projector: RuntimeViewProjector;
   private readonly hookPipeline: HookPipeline;
+  private readonly executorService: ExecutorService;
+  private readonly bookmarkSessionFacade: BookmarkSessionFacade;
+  private readonly worklineService: WorklineService;
+  private readonly runtimeStateSync: RuntimeStateSyncService;
   private readonly lastAutoMemoryForkSourceHashByAgent = new Map<string, string>();
   private readonly autoCompactFailureCountByAgent = new Map<string, number>();
-  private readonly pendingPostRunJobKeys = new Set<string>();
-  private readonly postRunJobs: PostRunJob[] = [];
   private fetchMemoryHookEnabled = true;
   private saveMemoryHookEnabled = true;
   private autoCompactHookEnabled = true;
   private helperAgentAutoCleanupEnabled = true;
-  private drainingPostRunJobs = false;
-  private disposed = false;
 
   public constructor(
     private config: RuntimeConfig,
@@ -107,6 +108,30 @@ export class AgentManager {
         this.lastAutoMemoryForkSourceHashByAgent,
       autoCompactFailureCountByAgent: this.autoCompactFailureCountByAgent,
     });
+    this.projector = new RuntimeViewProjector(this.registry);
+    this.executorService = new ExecutorService(
+      this.registry,
+      this.navigation,
+      this.projector,
+    );
+    this.bookmarkSessionFacade = new BookmarkSessionFacade(
+      this.registry,
+      this.navigation,
+      this.runtimeFactory,
+      this.lifecycle,
+      this.sessionService,
+      this.projector,
+      () => this.createRuntimeCallbacks(),
+      () => this.emitChange(),
+    );
+    this.worklineService = new WorklineService(
+      this.registry,
+      this.navigation,
+      this.lifecycle,
+      this.executorService,
+      this.bookmarkSessionFacade,
+      this.projector,
+    );
     this.hookPipeline = new HookPipeline({
       config,
       coordinator: this,
@@ -119,6 +144,26 @@ export class AgentManager {
         this.lastAutoMemoryForkSourceHashByAgent,
       emitChange: () => this.emitChange(),
     });
+    this.runtimeStateSync = new RuntimeStateSyncService(
+      this.registry,
+      this.navigation,
+      this.runtimeFactory,
+      this.lifecycle,
+      this.hookPipeline,
+      this.sessionService,
+      this.projector,
+      this.autoCompactFailureCountByAgent,
+      () => this.emitChange(),
+      (event) => this.emitRuntimeEvent(event),
+      () => this.config,
+      (nextConfig) => {
+        this.config = nextConfig;
+      },
+      (nextClient) => {
+        this.modelClient = nextClient;
+      },
+      () => this.helperAgentAutoCleanupEnabled,
+    );
   }
 
   public subscribe(listener: Listener): () => void {
@@ -167,7 +212,6 @@ export class AgentManager {
     }
 
     this.registry.initializeActiveAgent(activeAgentId);
-
     this.emitChange();
     return initialized;
   }
@@ -232,140 +276,77 @@ export class AgentManager {
   }
 
   public listAgents(): AgentViewState[] {
-    return this.registry
-      .listAgentViews()
-      .filter((agent) => agent.status !== "closed")
-      .sort((left, right) => {
-        if (left.id === this.registry.getActiveAgentId()) {
-          return -1;
-        }
-        if (right.id === this.registry.getActiveAgentId()) {
-          return 1;
-        }
-        return left.name.localeCompare(right.name);
-      });
+    return this.executorService.listAgents();
   }
 
   public listHelperAgents(): AgentViewState[] {
-    return this.listAgents().filter((agent) => Boolean(agent.helperType));
+    return this.executorService.listHelperAgents();
   }
 
   public listLegacyAgents(): AgentViewState[] {
-    return this.listAgents().filter((agent) => {
-      return !agent.helperType && agent.name.startsWith("legacy-");
-    });
+    return this.executorService.listLegacyAgents();
   }
 
   public getAgentStatus(agentId?: string): AgentViewState {
-    const resolvedAgentId = agentId
-      ? this.navigation.resolveExecutorId(agentId)
-      : this.registry.getActiveAgentId();
-    return this.registry.requireRuntime(resolvedAgentId).getViewState();
+    return this.executorService.getAgentStatus(agentId);
   }
 
   public listExecutors(): ExecutorListView {
-    return {
-      executors: this.listAgents().map((agent) => this.toExecutorView(agent)),
-    };
+    return this.executorService.listExecutors();
   }
 
   public getExecutorStatus(executorId?: string): ExecutorView {
-    return this.toExecutorView(this.getAgentStatus(executorId));
+    return this.executorService.getExecutorStatus(executorId);
   }
 
   public listWorklines(): WorklineListView {
-    return {
-      worklines: this.listAgents()
-        .filter((agent) => !agent.helperType)
-        .map((agent) => this.toWorklineView(agent)),
-    };
+    return this.worklineService.listWorklines();
   }
 
   public getWorklineStatus(worklineId?: string): WorklineView {
-    const resolvedWorklineId = worklineId
-      ? this.navigation.resolveWorklineId(worklineId)
-      : this.registry.getActiveRuntime().headId;
-    return this.toWorklineView(this.registry.requireRuntimeByHeadId(resolvedWorklineId).getViewState());
+    return this.worklineService.getWorklineStatus(worklineId);
   }
 
   public async createWorkline(
     name: string,
     executorId = this.registry.getActiveAgentId(),
   ): Promise<WorklineView> {
-    const ref = await this.forkSessionBranch(name, executorId);
-    return this.getWorklineStatus(ref.workingHeadId);
+    return this.worklineService.createWorkline(name, executorId);
   }
 
   public async switchWorkline(
     worklineId: string,
     executorId = this.registry.getActiveAgentId(),
   ): Promise<WorklineView> {
-    const resolvedExecutorId = this.navigation.resolveExecutorId(executorId);
-    const agent = await this.navigation.switchWorkline(worklineId, resolvedExecutorId);
-    return this.toWorklineView(agent);
+    return this.worklineService.switchWorkline(worklineId, executorId);
   }
 
   public async switchWorklineRelative(
     offset: number,
     executorId = this.registry.getActiveAgentId(),
   ): Promise<WorklineView> {
-    this.registry.setActiveAgentId(this.navigation.resolveExecutorId(executorId));
-    const agent = await this.navigation.switchWorklineRelative(offset);
-    return this.toWorklineView(agent);
+    return this.worklineService.switchWorklineRelative(offset, executorId);
   }
 
   public async closeWorkline(worklineId: string): Promise<WorklineView> {
-    const resolvedWorklineId = this.navigation.resolveWorklineId(worklineId);
-    const runtime = this.registry.requireRuntimeByHeadId(resolvedWorklineId);
-    const agent = await this.closeAgent(runtime.agentId);
-    const closedRuntime = this.registry.getEntryByHeadId(resolvedWorklineId)?.runtime;
-    const ref = closedRuntime?.getRef();
-    return {
-      id: agent.headId,
-      sessionId: agent.sessionId,
-      name: agent.name,
-      attachmentMode: ref?.mode ?? "detached-node",
-      attachmentLabel: ref?.label ?? "closed",
-      shellCwd: agent.shellCwd,
-      dirty: agent.dirty,
-      writeLock: ref?.writerLeaseBranch,
-      status: agent.status,
-      detail: agent.detail,
-      executorKind: agent.kind,
-      helperType: agent.helperType,
-      pendingApproval: agent.pendingApproval,
-      queuedInputCount: agent.queuedInputCount,
-      lastUserPrompt: agent.lastUserPrompt,
-      active: false,
-    };
+    return this.worklineService.closeWorkline(worklineId);
   }
 
   public async detachWorkline(worklineId?: string): Promise<WorklineView> {
-    const resolvedWorklineId = worklineId
-      ? this.navigation.resolveWorklineId(worklineId)
-      : this.registry.getActiveRuntime().headId;
-    await this.detachSessionHead(resolvedWorklineId);
-    return this.getWorklineStatus(resolvedWorklineId);
+    return this.worklineService.detachWorkline(worklineId);
   }
 
   public async mergeWorkline(
     source: string,
     executorId = this.registry.getActiveAgentId(),
   ): Promise<WorklineView> {
-    await this.mergeSessionHead(source, executorId);
-    return this.getWorklineStatus(undefined);
+    return this.worklineService.mergeWorkline(source, executorId);
   }
 
   public async listBookmarks(
     executorId = this.registry.getActiveAgentId(),
   ): Promise<BookmarkListView> {
-    const refs = await this.listSessionRefs(executorId);
-    return {
-      bookmarks: [
-        ...refs.branches.map((branch) => this.toBookmarkView("branch", branch)),
-        ...refs.tags.map((tag) => this.toBookmarkView("tag", tag)),
-      ],
-    };
+    return this.bookmarkSessionFacade.listBookmarks(executorId);
   }
 
   public async getBookmarkStatus(
@@ -374,135 +355,70 @@ export class AgentManager {
     current?: string;
     bookmarks: BookmarkView[];
   }> {
-    const current = await this.getSessionGraphStatus(executorId);
-    const bookmarks = await this.listBookmarks(executorId);
-    return {
-      current: current.label,
-      bookmarks: bookmarks.bookmarks,
-    };
+    return this.bookmarkSessionFacade.getBookmarkStatus(executorId);
   }
 
   public async createBookmark(
     name: string,
     executorId = this.registry.getActiveAgentId(),
   ): Promise<SessionRefInfo> {
-    return this.createSessionBranch(name, executorId);
+    return this.bookmarkSessionFacade.createBookmark(name, executorId);
   }
 
   public async createTagBookmark(
     name: string,
     executorId = this.registry.getActiveAgentId(),
   ): Promise<SessionRefInfo> {
-    return this.createSessionTag(name, executorId);
+    return this.bookmarkSessionFacade.createTagBookmark(name, executorId);
   }
 
   public async switchBookmark(
     bookmark: string,
     executorId = this.registry.getActiveAgentId(),
   ): Promise<SessionCheckoutResult> {
-    return this.switchSessionRef(bookmark, executorId);
+    return this.bookmarkSessionFacade.switchBookmark(bookmark, executorId);
   }
 
   public async mergeBookmark(
     source: string,
     executorId = this.registry.getActiveAgentId(),
   ): Promise<SessionRefInfo> {
-    return this.mergeSessionRef(source, executorId);
+    return this.bookmarkSessionFacade.mergeBookmark(source, executorId);
   }
 
   public async interruptExecutor(executorId?: string): Promise<void> {
-    await this.interruptAgent(executorId);
+    await this.executorService.interruptExecutor(executorId);
   }
 
   public async resumeExecutor(executorId?: string): Promise<void> {
-    await this.resumeAgent(executorId);
+    await this.executorService.resumeExecutor(executorId);
   }
 
   public getActiveRuntime(): HeadAgentRuntime {
-    return this.registry.getActiveRuntime();
+    return this.executorService.getActiveRuntime();
   }
 
   public getRuntime(agentId: string): HeadAgentRuntime {
-    return this.registry.requireRuntime(agentId);
+    return this.executorService.getRuntime(agentId);
   }
 
   public getRuntimeByWorklineId(worklineId: string): HeadAgentRuntime {
-    return this.registry.requireRuntimeByHeadId(
-      this.navigation.resolveWorklineId(worklineId),
-    );
-  }
-
-  private toExecutorView(agent: AgentViewState): ExecutorView {
-    return {
-      ...agent,
-      executorId: agent.id,
-      worklineId: agent.headId,
-      worklineName: agent.name,
-      active: agent.id === this.registry.getActiveAgentId(),
-    };
-  }
-
-  private toWorklineView(agent: AgentViewState): WorklineView {
-    const runtime = this.registry.requireRuntime(agent.id);
-    const ref = runtime.getRef();
-    return {
-      id: agent.headId,
-      sessionId: agent.sessionId,
-      name: agent.name,
-      attachmentMode: ref?.mode ?? "detached-node",
-      attachmentLabel: ref?.label ?? "detached",
-      shellCwd: agent.shellCwd,
-      dirty: agent.dirty,
-      writeLock: ref?.writerLeaseBranch,
-      status: agent.status,
-      detail: agent.detail,
-      executorKind: agent.kind,
-      helperType: agent.helperType,
-      pendingApproval: agent.pendingApproval,
-      queuedInputCount: agent.queuedInputCount,
-      lastUserPrompt: agent.lastUserPrompt,
-      active: runtime.headId === this.registry.getActiveRuntime().headId,
-    };
-  }
-
-  private toBookmarkView(
-    kind: "branch" | "tag",
-    item: SessionListView["branches"][number],
-  ): BookmarkView {
-    return {
-      name: item.name,
-      kind,
-      targetNodeId: item.targetNodeId,
-      current: item.current,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-    };
+    return this.executorService.getRuntimeByWorklineId(worklineId);
   }
 
   public async rebuildModelRuntime(
     config: RuntimeConfig,
     modelClient: ModelClient,
   ): Promise<void> {
-    if (this.hasBusyAgents()) {
-      throw new Error("请先让所有 Agent 处于空闲状态，再修改模型配置。");
-    }
-    this.config = config;
-    this.modelClient = modelClient;
-    this.runtimeFactory.updateSharedDependencies(config, modelClient);
-    await Promise.all(
-      this.registry.getEntries().map(async (entry) => {
-        await this.runtimeFactory.refreshRuntime(entry.runtime, config, modelClient);
-      }),
-    );
-    this.emitChange();
+    await this.runtimeStateSync.rebuildModelRuntime(config, modelClient);
   }
 
   public hasBusyAgents(): boolean {
-    return this.registry.hasBusyAgents();
+    return this.runtimeStateSync.hasBusyAgents();
   }
 
   public async submitInputToActiveAgent(input: string): Promise<void> {
-    await this.submitInputToAgent(this.registry.getActiveAgentId(), input);
+    await this.runtimeStateSync.submitInputToActiveAgent(input);
   }
 
   public async submitInputToAgent(
@@ -514,21 +430,7 @@ export class AgentManager {
       approvalMode?: "interactive" | "checkpoint";
     },
   ): Promise<void> {
-    const resolvedAgentId = this.navigation.resolveExecutorId(agentId);
-    const runtime = this.registry.requireRuntime(resolvedAgentId);
-    if (options?.activate) {
-      await this.navigation.switchWorkline(runtime.headId);
-    }
-    await runtime.submitInput(input, {
-      buildModelInputAppendix: async () => {
-        return this.hookPipeline.buildModelInputAppendix(
-          runtime,
-          input,
-          options?.skipFetchMemoryHook,
-        );
-      },
-      approvalMode: options?.approvalMode,
-    });
+    await this.runtimeStateSync.submitInputToAgent(agentId, input, options);
   }
 
   public async runAgentPrompt(
@@ -544,65 +446,22 @@ export class AgentManager {
     checkpoint?: PendingApprovalCheckpoint;
     uiMessages: ReadonlyArray<UIMessage>;
   }> {
-    const targetAgentId = options?.agentId ?? this.registry.getActiveAgentId();
-    const runtime = this.registry.requireRuntime(targetAgentId);
-    const beforeUiCount = runtime.getSnapshot().uiMessages.length;
-    await this.submitInputToAgent(targetAgentId, input, {
-      activate: options?.activate,
-      approvalMode: options?.approvalMode ?? "checkpoint",
-    });
-    const uiMessages = runtime.getSnapshot().uiMessages.slice(beforeUiCount);
-    const checkpoint = runtime.getPendingApprovalCheckpoint();
-    const executor = this.toExecutorView(runtime.getViewState());
-    if (checkpoint) {
-      return {
-        settled: "approval_required",
-        executor,
-        checkpoint,
-        uiMessages,
-      };
-    }
-    if (executor.status === "error") {
-      return {
-        settled: "error",
-        executor,
-        uiMessages,
-      };
-    }
-    if (executor.status === "interrupted") {
-      return {
-        settled: "interrupted",
-        executor,
-        uiMessages,
-      };
-    }
-    return {
-      settled: "completed",
-      executor,
-      uiMessages,
-    };
+    return this.runtimeStateSync.runAgentPrompt(input, options);
   }
 
   public async interruptAgent(agentId?: string): Promise<void> {
-    const resolvedAgentId = agentId
-      ? this.navigation.resolveExecutorId(agentId)
-      : this.registry.getActiveAgentId();
-    await this.registry.requireRuntime(resolvedAgentId).interrupt();
+    await this.runtimeStateSync.interruptAgent(agentId);
   }
 
   public async resumeAgent(agentId?: string): Promise<void> {
-    const resolvedAgentId = agentId
-      ? this.navigation.resolveExecutorId(agentId)
-      : this.registry.getActiveAgentId();
-    await this.registry.requireRuntime(resolvedAgentId).resume();
+    await this.runtimeStateSync.resumeAgent(agentId);
   }
 
   public async approvePendingRequest(
     approved: boolean,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<void> {
-    const resolvedAgentId = this.navigation.resolveExecutorId(agentId);
-    await this.registry.requireRuntime(resolvedAgentId).resolveApproval(approved);
+    await this.runtimeStateSync.approvePendingRequest(approved, agentId);
   }
 
   public getPendingApprovalCheckpoint(input?: {
@@ -610,8 +469,7 @@ export class AgentManager {
     agentId?: string;
     headId?: string;
   }): PendingApprovalCheckpoint | undefined {
-    const runtime = this.findRuntimeForPendingApproval(input);
-    return runtime?.getPendingApprovalCheckpoint();
+    return this.runtimeStateSync.getPendingApprovalCheckpoint(input);
   }
 
   public async resolvePendingApprovalCheckpoint(
@@ -627,53 +485,13 @@ export class AgentManager {
     checkpoint?: PendingApprovalCheckpoint;
     uiMessages: ReadonlyArray<UIMessage>;
   }> {
-    const runtime = this.findRuntimeForPendingApproval(input);
-    if (!runtime) {
-      throw new Error("当前没有待处理的审批请求。");
-    }
-    const existingCheckpoint = runtime.getPendingApprovalCheckpoint()
-      ?? await this.sessionService.getPendingApprovalCheckpoint(runtime.headId);
-    if (!existingCheckpoint) {
-      throw new Error("当前没有待处理的审批请求。");
-    }
-    const beforeUiCount = runtime.getSnapshot().uiMessages.length;
-    await runtime.resolveApproval(approved);
-    const uiMessages = runtime.getSnapshot().uiMessages.slice(beforeUiCount);
-    const checkpoint = runtime.getPendingApprovalCheckpoint();
-    const executor = this.toExecutorView(runtime.getViewState());
-    if (checkpoint) {
-      return {
-        settled: "approval_required",
-        executor,
-        checkpoint,
-        uiMessages,
-      };
-    }
-    if (executor.status === "error") {
-      return {
-        settled: "error",
-        executor,
-        uiMessages,
-      };
-    }
-    if (executor.status === "interrupted") {
-      return {
-        settled: "interrupted",
-        executor,
-        uiMessages,
-      };
-    }
-    return {
-      settled: "completed",
-      executor,
-      uiMessages,
-    };
+    return this.runtimeStateSync.resolvePendingApprovalCheckpoint(approved, input);
   }
 
   public async clearActiveAgentUi(
     agentId = this.registry.getActiveAgentId(),
   ): Promise<void> {
-    await this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId)).clearUiMessages();
+    await this.runtimeStateSync.clearActiveAgentUi(agentId);
   }
 
   public async resetActiveAgentModelContext(
@@ -681,7 +499,7 @@ export class AgentManager {
   ): Promise<{
     resetEntryCount: number;
   }> {
-    return this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId)).resetModelContext();
+    return this.runtimeStateSync.resetActiveAgentModelContext(agentId);
   }
 
   public async recordSlashCommandOnActiveAgent(
@@ -692,46 +510,39 @@ export class AgentManager {
       includeInModelContext?: boolean;
     },
   ): Promise<void> {
-    await this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId))
-      .recordSlashCommand(command, messages, input);
+    await this.runtimeStateSync.recordSlashCommandOnActiveAgent(command, messages, agentId, input);
   }
 
   public async appendUiMessagesToActiveAgent(
     messages: ReadonlyArray<UIMessage>,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<void> {
-    await this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId))
-      .appendUiMessages(messages);
+    await this.runtimeStateSync.appendUiMessagesToActiveAgent(messages, agentId);
   }
 
   public async setUiContextEnabled(
     enabled: boolean,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<void> {
-    const resolvedAgentId = this.navigation.resolveExecutorId(agentId);
-    const runtime = this.registry.requireRuntime(resolvedAgentId);
-    await runtime.setUiContextEnabled(enabled);
-    this.emitChange();
+    await this.runtimeStateSync.setUiContextEnabled(enabled, agentId);
   }
 
   public async flushCheckpointsOnExit(): Promise<void> {
-    await this.lifecycle.flushCheckpointsOnExit();
+    await this.runtimeStateSync.flushCheckpointsOnExit();
   }
 
   public async dispose(): Promise<void> {
-    this.disposed = true;
-    this.postRunJobs.length = 0;
-    this.pendingPostRunJobKeys.clear();
+    this.runtimeStateSync.dispose();
     await this.lifecycle.disposeAll();
     await this.sessionService.dispose();
   }
 
   public async switchAgent(agentId: string): Promise<AgentViewState> {
-    return this.navigation.switchExecutor(agentId);
+    return this.executorService.switchAgent(agentId);
   }
 
   public async switchAgentRelative(offset: number): Promise<AgentViewState> {
-    return this.navigation.switchWorklineRelative(offset);
+    return this.executorService.switchAgentRelative(offset);
   }
 
   public async spawnInteractiveAgent(
@@ -754,7 +565,7 @@ export class AgentManager {
     limit?: number,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<MemoryRecord[]> {
-    return this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId)).listMemory(limit);
+    return this.bookmarkSessionFacade.listMemory(limit, agentId);
   }
 
   public async saveMemory(input: {
@@ -763,267 +574,149 @@ export class AgentManager {
     content: string;
     scope?: "project" | "global";
   }, agentId = this.registry.getActiveAgentId()): Promise<MemoryRecord> {
-    return this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId)).saveMemory(input);
+    return this.bookmarkSessionFacade.saveMemory(input, agentId);
   }
 
   public async showMemory(
     name: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<MemoryRecord | undefined> {
-    return this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId)).showMemory(name);
+    return this.bookmarkSessionFacade.showMemory(name, agentId);
   }
 
   public async getSessionGraphStatus(agentId?: string): Promise<SessionRefInfo> {
-    const resolvedAgentId = agentId
-      ? this.navigation.resolveExecutorId(agentId)
-      : this.registry.getActiveAgentId();
-    const runtime = this.registry.requireRuntime(resolvedAgentId);
-    const ref = runtime.getRef();
-    if (ref) {
-      return ref;
-    }
-    return this.sessionService.getHeadStatus(runtime.headId, runtime.getSnapshot());
+    return this.bookmarkSessionFacade.getSessionGraphStatus(agentId);
   }
 
   public async listSessionRefs(
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionListView> {
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    return this.sessionService.listRefs(runtime.getSnapshot());
+    return this.bookmarkSessionFacade.listSessionRefs(agentId);
   }
 
   public async listSessionHeads(
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionHeadListView> {
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    return this.sessionService.listHeads(
-      runtime.getSnapshot(),
-    );
+    return this.bookmarkSessionFacade.listSessionHeads(agentId);
   }
 
   public async listSessionCommits(
     limit?: number,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionCommitListView> {
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    return this.sessionService.listCommits(
-      limit,
-      runtime.getSnapshot(),
-    );
+    return this.bookmarkSessionFacade.listSessionCommits(limit, agentId);
   }
 
   public async listSessionGraphLog(limit?: number): Promise<SessionLogEntry[]> {
-    return this.sessionService.graphLog(limit);
+    return this.bookmarkSessionFacade.listSessionGraphLog(limit);
   }
 
   public async listSessionLog(limit?: number): Promise<SessionLogEntry[]> {
-    return this.listSessionGraphLog(limit);
+    return this.bookmarkSessionFacade.listSessionLog(limit);
   }
 
   public async compactSession(
     agentId = this.registry.getActiveAgentId(),
-  ): Promise<CompactSessionResult> {
-    const resolvedAgentId = this.navigation.resolveExecutorId(agentId);
-    const runtime = this.registry.requireRuntime(resolvedAgentId);
-    if (runtime.promptProfile !== "default") {
-      throw new Error("只有普通对话 agent 支持 compact。");
-    }
-    if (runtime.isRunning()) {
-      throw new Error("运行中的 agent 不能手动 compact，请先等待或中断。");
-    }
-    const result = await new CompactSessionService(this, this.config).run({
-      targetAgentId: runtime.agentId,
-      reason: "manual",
-      force: true,
-    });
-    this.autoCompactFailureCountByAgent.delete(runtime.agentId);
-    await runtime.refreshSessionState();
-    this.emitChange();
-    return result;
+  ): Promise<{
+    compacted: boolean;
+    agentId?: string;
+    beforeTokens: number;
+    afterTokens: number;
+    keptGroups: number;
+    removedGroups: number;
+    summary?: string;
+  }> {
+    return this.runtimeStateSync.compactSession(agentId);
   }
 
   public async createSessionBranch(
     name: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionRefInfo> {
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    const result = await this.sessionService.createBranch(
-      name,
-      runtime.getSnapshot(),
-    );
-    await runtime.refreshSessionState();
-    this.emitChange();
-    return result.ref;
+    return this.bookmarkSessionFacade.createSessionBranch(name, agentId);
   }
 
   public async forkSessionBranch(
     name: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionRefInfo> {
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    const result = await this.sessionService.forkBranch(
-      name,
-      runtime.getSnapshot(),
-    );
-    const nextRuntime = await this.runtimeFactory.createFromSessionState(
-      result.head,
-      result.snapshot,
-      this.createRuntimeCallbacks(),
-      result.ref,
-    );
-    this.registry.set(nextRuntime.agentId, {
-      runtime: nextRuntime,
-    });
-    this.registry.setActiveAgentId(nextRuntime.agentId);
-    this.emitChange();
-    return result.ref;
+    return this.bookmarkSessionFacade.forkSessionBranch(name, agentId);
   }
 
   public async switchSessionCreateBranch(
     name: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionRefInfo> {
-    return this.forkSessionBranch(name, agentId);
+    return this.bookmarkSessionFacade.switchSessionCreateBranch(name, agentId);
   }
 
   public async checkoutSessionRef(
     ref: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionCheckoutResult> {
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    const result = await this.sessionService.checkout(ref, runtime.getSnapshot());
-    await runtime.replaceSnapshot(result.snapshot, result.head, result.ref);
-    this.emitChange();
-    return result;
+    return this.bookmarkSessionFacade.checkoutSessionRef(ref, agentId);
   }
 
   public async switchSessionRef(
     ref: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionCheckoutResult> {
-    return this.checkoutSessionRef(ref, agentId);
+    return this.bookmarkSessionFacade.switchSessionRef(ref, agentId);
   }
 
   public async commitSession(
     message: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionCommitRecord> {
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    const result = await this.sessionService.createCommit(
-      message,
-      runtime.getSnapshot(),
-    );
-    await runtime.refreshSessionState();
-    this.emitChange();
-    return result.commit;
+    return this.bookmarkSessionFacade.commitSession(message, agentId);
   }
 
   public async createSessionTag(
     name: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionRefInfo> {
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    const result = await this.sessionService.createTag(name, runtime.getSnapshot());
-    await runtime.refreshSessionState();
-    this.emitChange();
-    return result.ref;
+    return this.bookmarkSessionFacade.createSessionTag(name, agentId);
   }
 
   public async mergeSessionRef(
     ref: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionRefInfo> {
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    const result = await this.sessionService.merge(ref, runtime.getSnapshot());
-    await runtime.refreshSessionState();
-    this.emitChange();
-    return result.ref;
+    return this.bookmarkSessionFacade.mergeSessionRef(ref, agentId);
   }
 
   public async forkSessionHead(name: string): Promise<SessionRefInfo> {
-    const active = this.registry.getActiveRuntime();
-    const result = await this.sessionService.forkHead(name, {
-      sourceHeadId: active.headId,
-      activate: false,
-      runtimeState: {
-        agentKind: "interactive",
-        autoMemoryFork: true,
-        retainOnCompletion: true,
-      },
-    });
-    const runtime = await this.runtimeFactory.createFromSessionState(
-      result.head,
-      result.snapshot,
-      this.createRuntimeCallbacks(),
-      result.ref,
-    );
-    this.registry.set(runtime.agentId, {
-      runtime,
-    });
-    this.emitChange();
-    return result.ref;
+    return this.bookmarkSessionFacade.forkSessionHead(name);
   }
 
   public async switchSessionHead(headId: string): Promise<SessionRefInfo> {
-    const view = await this.navigation.switchWorkline(headId);
-    return this.sessionService.getHeadStatus(view.headId);
+    return this.bookmarkSessionFacade.switchSessionHead(headId);
   }
 
   public async attachSessionHead(
     headId: string,
     ref: string,
   ): Promise<SessionRefInfo> {
-    const resolvedHeadId = this.navigation.resolveWorklineId(headId);
-    const runtime = this.registry.requireRuntimeByHeadId(resolvedHeadId);
-    const result = await this.sessionService.attachHead(
-      resolvedHeadId,
-      ref,
-      runtime.getSnapshot(),
-    );
-    await runtime.replaceSnapshot(result.snapshot, result.head, result.ref);
-    this.emitChange();
-    return result.ref;
+    return this.bookmarkSessionFacade.attachSessionHead(headId, ref);
   }
 
   public async detachSessionHead(headId: string): Promise<SessionRefInfo> {
-    const resolvedHeadId = this.navigation.resolveWorklineId(headId);
-    const runtime = this.registry.requireRuntimeByHeadId(resolvedHeadId);
-    const result = await this.sessionService.detachHead(resolvedHeadId);
-    await runtime.refreshSessionState();
-    this.emitChange();
-    return result.ref;
+    return this.bookmarkSessionFacade.detachSessionHead(headId);
   }
 
   public async mergeSessionHead(
     sourceHeadId: string,
     agentId = this.registry.getActiveAgentId(),
   ): Promise<SessionRefInfo> {
-    const resolvedSourceHeadId = this.navigation.resolveWorklineId(sourceHeadId);
-    const runtime = this.registry.requireRuntime(this.navigation.resolveExecutorId(agentId));
-    const result = await this.sessionService.mergeHeadIntoHead(
-      runtime.headId,
-      resolvedSourceHeadId,
-      ["digest", "memory"],
-      runtime.getSnapshot(),
-    );
-    await runtime.refreshSessionState();
-    this.emitChange();
-    return result.ref;
+    return this.bookmarkSessionFacade.mergeSessionHead(sourceHeadId, agentId);
   }
 
   public async closeSessionHead(headId: string): Promise<SessionRefInfo> {
-    const runtime = this.registry.requireRuntimeByHeadId(
-      this.navigation.resolveWorklineId(headId),
-    );
-    await this.lifecycle.closeAgent(runtime.agentId);
-    return this.sessionService.getHeadStatus(
-      this.registry.getActiveRuntime().headId,
-      this.registry.getActiveRuntime().getSnapshot(),
-    );
+    return this.bookmarkSessionFacade.closeSessionHead(headId);
   }
 
   public async cleanupCompletedAgent(agentId: string): Promise<void> {
-    await this.lifecycle.cleanupCompletedAgent(agentId);
+    await this.runtimeStateSync.cleanupCompletedAgent(agentId);
   }
 
   public shouldAutoCleanupHelperAgent(): boolean {
@@ -1034,27 +727,7 @@ export class AgentManager {
     cleared: number;
     skippedRunning: number;
   }> {
-    const helperAgents = this.listHelperAgents();
-    let cleared = 0;
-    let skippedRunning = 0;
-
-    for (const agent of helperAgents) {
-      const runtime = this.registry.requireRuntime(agent.id);
-      if (runtime.isRunning()) {
-        skippedRunning += 1;
-        continue;
-      }
-      await this.lifecycle.cleanupCompletedAgent(agent.id);
-      if (!this.registry.getEntry(agent.id)) {
-        cleared += 1;
-      }
-    }
-
-    this.emitChange();
-    return {
-      cleared,
-      skippedRunning,
-    };
+    return this.runtimeStateSync.clearHelperAgents(() => this.executorService.listHelperAgents());
   }
 
   public async clearLegacyAgents(): Promise<{
@@ -1062,55 +735,103 @@ export class AgentManager {
     skippedRunning: number;
     skippedActive: number;
   }> {
-    const legacyAgents = this.listLegacyAgents();
-    let cleared = 0;
-    let skippedRunning = 0;
-    let skippedActive = 0;
-
-    for (const agent of legacyAgents) {
-      if (agent.id === this.registry.getActiveAgentId()) {
-        skippedActive += 1;
-        continue;
-      }
-      const runtime = this.registry.requireRuntime(agent.id);
-      if (runtime.isRunning()) {
-        skippedRunning += 1;
-        continue;
-      }
-      await this.lifecycle.closeAgent(agent.id);
-      if (!this.registry.getEntry(agent.id)) {
-        cleared += 1;
-      }
-    }
-
-    this.emitChange();
-    return {
-      cleared,
-      skippedRunning,
-      skippedActive,
-    };
+    return this.runtimeStateSync.clearLegacyAgents(() => this.executorService.listLegacyAgents());
   }
 
-  private async handleRuntimeCompleted(runtime: HeadAgentRuntime): Promise<void> {
-    const entry = this.registry.getEntry(runtime.agentId);
-    if (!entry) {
+  private enqueuePostRunJobs(runtime: HeadAgentRuntime): void {
+    if (this.runtimeStateSync) {
+      this.runtimeStateSync.enqueuePostRunJobs(runtime);
       return;
     }
-
-    this.enqueuePostRunJobs(runtime);
-
-    if (runtime.kind === "task" && entry.mergeIntoAgentId && entry.mergePending) {
-      const targetRuntime = this.registry.requireRuntime(entry.mergeIntoAgentId);
-      await this.sessionService.mergeHeadIntoHead(
-        targetRuntime.headId,
-        runtime.headId,
-        entry.mergeAssets ?? ["digest", "memory"],
-        targetRuntime.getSnapshot(),
-      );
-      entry.mergePending = false;
-      await targetRuntime.refreshSessionState();
-      this.emitChange();
+    const self = this as unknown as {
+      hookPipeline: {
+        collectPostRunJobs(runtime: HeadAgentRuntime): Array<{
+          kind: string;
+          agentId: string;
+          sourceHash?: string;
+        }>;
+      };
+      pendingPostRunJobKeys: Set<string>;
+      postRunJobs: Array<unknown>;
+      drainingPostRunJobs: boolean;
+      getPostRunJobKey(job: { kind: string; agentId: string; sourceHash?: string }): string;
+      drainPostRunJobs(): Promise<void>;
+    };
+    for (const job of self.hookPipeline.collectPostRunJobs(runtime)) {
+      const key = self.getPostRunJobKey(job);
+      if (self.pendingPostRunJobKeys.has(key)) {
+        continue;
+      }
+      self.pendingPostRunJobKeys.add(key);
+      self.postRunJobs.push(job);
     }
+    if (self.drainingPostRunJobs || self.postRunJobs.length === 0) {
+      return;
+    }
+    self.drainingPostRunJobs = true;
+    void self.drainPostRunJobs();
+  }
+
+  private async drainPostRunJobs(): Promise<void> {
+    if (this.runtimeStateSync) {
+      await this.runtimeStateSync.drainPostRunJobs();
+      return;
+    }
+    const self = this as unknown as {
+      hookPipeline: {
+        runPostRunJob(job: unknown): Promise<void>;
+      };
+      pendingPostRunJobKeys: Set<string>;
+      postRunJobs: Array<unknown>;
+      drainingPostRunJobs: boolean;
+      disposed: boolean;
+      getPostRunJobKey(job: { kind: string; agentId: string; sourceHash?: string }): string;
+      drainPostRunJobs(): Promise<void>;
+      handlePostRunJobFailure(job: unknown, error: unknown): Promise<void>;
+    };
+    try {
+      while (!self.disposed && self.postRunJobs.length > 0) {
+        const job = self.postRunJobs.shift();
+        if (!job) {
+          continue;
+        }
+        try {
+          await self.hookPipeline.runPostRunJob(job);
+        } catch (error) {
+          await self.handlePostRunJobFailure(job, error);
+        } finally {
+          self.pendingPostRunJobKeys.delete(
+            self.getPostRunJobKey(job as { kind: string; agentId: string; sourceHash?: string }),
+          );
+        }
+      }
+    } finally {
+      self.drainingPostRunJobs = false;
+      if (!self.disposed && self.postRunJobs.length > 0) {
+        self.drainingPostRunJobs = true;
+        void self.drainPostRunJobs();
+      }
+    }
+  }
+
+  private async handlePostRunJobFailure(job: unknown, error: unknown): Promise<void> {
+    if (this.runtimeStateSync) {
+      await this.runtimeStateSync.handlePostRunJobFailure(job as never, error);
+    }
+  }
+
+  private getPostRunJobKey(job: {
+    kind: string;
+    agentId: string;
+    sourceHash?: string;
+  }): string {
+    if (this.runtimeStateSync) {
+      return this.runtimeStateSync.getPostRunJobKey(job as never);
+    }
+    if (job.kind === "auto-memory-fork") {
+      return `${job.kind}:${job.agentId}:${job.sourceHash}`;
+    }
+    return `${job.kind}:${job.agentId}`;
   }
 
   private createRuntimeCallbacks(): AgentRuntimeCallbacks {
@@ -1119,7 +840,7 @@ export class AgentManager {
         this.emitChange();
       },
       onRunLoopCompleted: async (runtime: HeadAgentRuntime) => {
-        await this.handleRuntimeCompleted(runtime);
+        await this.runtimeStateSync.handleRuntimeCompleted(runtime);
       },
       onBeforeModelTurn: async (runtime: HeadAgentRuntime) => {
         await this.hookPipeline.handleBeforeModelTurn(runtime);
@@ -1136,118 +857,5 @@ export class AgentManager {
 
   private emitRuntimeEvent(event: RuntimeEvent): void {
     this.events.emit("runtime-event", event);
-  }
-
-  private enqueuePostRunJobs(runtime: HeadAgentRuntime): void {
-    for (const job of this.hookPipeline.collectPostRunJobs(runtime)) {
-      const key = this.getPostRunJobKey(job);
-      if (this.pendingPostRunJobKeys.has(key)) {
-        continue;
-      }
-      this.pendingPostRunJobKeys.add(key);
-      this.postRunJobs.push(job);
-    }
-
-    if (this.drainingPostRunJobs || this.postRunJobs.length === 0) {
-      return;
-    }
-
-    this.drainingPostRunJobs = true;
-    void this.drainPostRunJobs();
-  }
-
-  private async drainPostRunJobs(): Promise<void> {
-    try {
-      while (!this.disposed && this.postRunJobs.length > 0) {
-        const job = this.postRunJobs.shift();
-        if (!job) {
-          continue;
-        }
-
-        try {
-          await this.hookPipeline.runPostRunJob(job);
-        } catch (error) {
-          await this.handlePostRunJobFailure(job, error);
-        } finally {
-          this.pendingPostRunJobKeys.delete(this.getPostRunJobKey(job));
-        }
-      }
-    } finally {
-      this.drainingPostRunJobs = false;
-      if (!this.disposed && this.postRunJobs.length > 0) {
-        this.drainingPostRunJobs = true;
-        void this.drainPostRunJobs();
-      }
-    }
-  }
-
-  private async handlePostRunJobFailure(
-    job: PostRunJob,
-    error: unknown,
-  ): Promise<void> {
-    if (job.kind !== "auto-memory-fork") {
-      return;
-    }
-
-    const runtime = this.registry.getEntry(job.agentId)?.runtime;
-    const message = error instanceof Error
-      ? error.message
-      : String(error);
-
-    if (!runtime || this.disposed) {
-      return;
-    }
-
-    await runtime.appendUiMessages([
-      {
-        id: createId("ui"),
-        role: "error",
-        content: `自动 memory fork 失败：${message}`,
-        createdAt: new Date().toISOString(),
-      },
-    ]);
-    this.emitRuntimeEvent({
-      id: createId("event"),
-      type: "runtime.warning",
-      createdAt: new Date().toISOString(),
-      sessionId: runtime.sessionId,
-      worklineId: runtime.headId,
-      executorId: runtime.agentId,
-      headId: runtime.headId,
-      agentId: runtime.agentId,
-      payload: {
-        message: `自动 memory fork 失败：${message}`,
-        source: "post-run.auto-memory-fork",
-      },
-    });
-    this.emitChange();
-  }
-
-  private getPostRunJobKey(job: PostRunJob): string {
-    if (job.kind === "auto-memory-fork") {
-      return `${job.kind}:${job.agentId}:${job.sourceHash}`;
-    }
-    return `${job.kind}:${job.agentId}`;
-  }
-
-  private findRuntimeForPendingApproval(input?: {
-    checkpointId?: string;
-    agentId?: string;
-    headId?: string;
-  }): HeadAgentRuntime | undefined {
-    if (input?.checkpointId) {
-      return this.registry.getEntries().find((entry) => {
-        return entry.runtime.getPendingApprovalCheckpoint()?.checkpointId === input.checkpointId;
-      })?.runtime;
-    }
-    if (input?.agentId) {
-      return this.registry.requireRuntime(this.navigation.resolveExecutorId(input.agentId));
-    }
-    if (input?.headId) {
-      return this.registry.getEntryByHeadId(input.headId)?.runtime;
-    }
-    return this.registry.getEntries().find((entry) => {
-      return Boolean(entry.runtime.getPendingApprovalCheckpoint());
-    })?.runtime;
   }
 }

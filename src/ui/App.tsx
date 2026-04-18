@@ -2,6 +2,12 @@ import { Box, Text, useApp, useInput } from "ink";
 import { useEffect, useRef, useState } from "react";
 
 import {
+  buildSlashHelpText,
+  type AppControllerLike,
+  type AppState,
+} from "../runtime/index.js";
+import type { UIMessage } from "../types.js";
+import {
   isNextAgentShortcut,
   isPreviousAgentShortcut,
 } from "./agentNavigationShortcuts.js";
@@ -16,14 +22,9 @@ import {
 } from "./inputEnhancements.js";
 import { MessageList } from "./MessageList.js";
 import { buildFooterHint } from "./presentation/footerHint.js";
+import { SessionGraphPanel } from "./SessionGraphPanel.js";
 import { StatusBar } from "./StatusBar.js";
 import { WorklineList } from "./WorklineList.js";
-import {
-  buildSlashHelpText,
-  type AppControllerLike,
-  type AppState,
-} from "../runtime/index.js";
-import type { UIMessage } from "../types.js";
 
 interface AppProps {
   controller: AppControllerLike;
@@ -116,14 +117,14 @@ export function App({ controller }: AppProps) {
 
     if (isPreviousAgentShortcut(value, key)) {
       if (state.worklines.length > 1) {
-        runControllerAction(controller.switchAgentRelative(-1), "切换工作线失败");
+        runControllerAction(controller.switchAgentRelative(-1), "切换工位失败");
       }
       return;
     }
 
     if (isNextAgentShortcut(value, key)) {
       if (state.worklines.length > 1) {
-        runControllerAction(controller.switchAgentRelative(1), "切换工作线失败");
+        runControllerAction(controller.switchAgentRelative(1), "切换工位失败");
       }
       return;
     }
@@ -279,6 +280,12 @@ export function App({ controller }: AppProps) {
         worklineCount={state.worklines.length}
       />
       <WorklineList worklines={state.worklines} activeWorklineId={state.activeWorklineId} />
+      <SessionGraphPanel
+        entries={state.sessionGraphEntries}
+        activeNodeId={state.sessionRef?.headNodeId}
+        activeRefLabel={state.activeBookmarkLabel}
+        activeWorklineName={state.activeWorklineName}
+      />
       {state.helperActivities.length > 0 ? (
         <Text color="cyan">helper: {state.helperActivities.join(" | ")}</Text>
       ) : null}

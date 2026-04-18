@@ -7,7 +7,7 @@ import type {
   RuntimeConfig,
   ToolCall,
 } from "../types.js";
-import { createId } from "../utils/index.js";
+import { createId, extractSseEventData, takeSseEvents } from "../utils/index.js";
 
 const DEFAULT_MODEL_REQUEST_TIMEOUT_MS = 120_000;
 
@@ -257,91 +257,95 @@ export class OpenAICompatibleModelClient implements ModelClient {
       let finishReason = "stop";
       let textStarted = false;
 
-    const handleData = (raw: string) => {
-      if (!raw) {
-        return;
-      }
-      if (raw === "[DONE]") {
-        finished = true;
-        return;
-      }
+      const handleData = (raw: string) => {
+        if (!raw) {
+          return;
+        }
+        if (raw === "[DONE]") {
+          finished = true;
+          return;
+        }
 
-      const payload = JSON.parse(raw) as {
-        choices?: Array<{
-          finish_reason?: string | null;
-          delta?: {
-            content?: string;
-            tool_calls?: Array<{
-              index: number;
-              id?: string;
-              function?: {
-                name?: string;
-                arguments?: string;
-              };
-            }>;
+        const payload = JSON.parse(raw) as {
+          choices?: Array<{
+            finish_reason?: string | null;
+            delta?: {
+              content?: string;
+              tool_calls?: Array<{
+                index: number;
+                id?: string;
+                function?: {
+                  name?: string;
+                  arguments?: string;
+                };
+              }>;
+            };
+          }>;
+        };
+
+        const choice = payload.choices?.[0];
+        if (!choice) {
+          return;
+        }
+
+        if (choice.finish_reason) {
+          finishReason = choice.finish_reason;
+        }
+
+        if (!choice.delta) {
+          return;
+        }
+
+        if (choice.delta.content) {
+          if (!textStarted) {
+            hooks?.onTextStart?.();
+            textStarted = true;
+          }
+          assistantText += choice.delta.content;
+          hooks?.onTextDelta?.(choice.delta.content);
+        }
+
+        for (const toolCall of choice.delta.tool_calls ?? []) {
+          const existing = toolBuffers.get(toolCall.index) ?? {
+            arguments: "",
           };
-        }>;
+          if (toolCall.id) {
+            existing.id = toolCall.id;
+          }
+          if (toolCall.function?.name) {
+            existing.name = toolCall.function.name;
+          }
+          if (toolCall.function?.arguments) {
+            existing.arguments += toolCall.function.arguments;
+          }
+          toolBuffers.set(toolCall.index, existing);
+        }
       };
 
-      const choice = payload.choices?.[0];
-      if (!choice?.delta) {
-        return;
-      }
-
-      if (choice.finish_reason) {
-        finishReason = choice.finish_reason;
-      }
-
-      if (choice.delta.content) {
-        if (!textStarted) {
-          hooks?.onTextStart?.();
-          textStarted = true;
+      const consumeBufferedEvents = (flush = false) => {
+        const drained = takeSseEvents(buffer, flush);
+        buffer = drained.remainder;
+        for (const rawEvent of drained.events) {
+          handleData(extractSseEventData(rawEvent));
         }
-        assistantText += choice.delta.content;
-        hooks?.onTextDelta?.(choice.delta.content);
-      }
+      };
 
-      for (const toolCall of choice.delta.tool_calls ?? []) {
-        const existing = toolBuffers.get(toolCall.index) ?? {
-          arguments: "",
-        };
-        if (toolCall.id) {
-          existing.id = toolCall.id;
+      while (!finished) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
         }
-        if (toolCall.function?.name) {
-          existing.name = toolCall.function.name;
-        }
-        if (toolCall.function?.arguments) {
-          existing.arguments += toolCall.function.arguments;
-        }
-        toolBuffers.set(toolCall.index, existing);
-      }
-    };
 
-    while (!finished) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
+        buffer += decoder.decode(value, { stream: true });
+        consumeBufferedEvents();
       }
 
-      buffer += decoder.decode(value, { stream: true });
-      let boundary = buffer.indexOf("\n\n");
-      while (boundary !== -1) {
-        const rawEvent = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        const data = rawEvent
-          .split("\n")
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trim())
-          .join("");
-        handleData(data);
-        boundary = buffer.indexOf("\n\n");
-      }
-    }
+      buffer += decoder.decode();
+      consumeBufferedEvents(true);
 
-    if (assistantText) {
-      hooks?.onTextComplete?.(assistantText);
-    }
+      if (assistantText) {
+        hooks?.onTextComplete?.(assistantText);
+      }
 
       return {
         assistantText,

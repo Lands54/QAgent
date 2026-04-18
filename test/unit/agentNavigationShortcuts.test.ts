@@ -42,8 +42,8 @@ describe("agentNavigationShortcuts", () => {
     expect(isNextAgentShortcut("", createKey({ meta: true, rightArrow: true }))).toBe(true);
   });
 
-  it("会按工作线数量返回更易懂的提示文案", () => {
-    expect(buildAgentShortcutHint(1)).toBe("工作线: 仅当前 1 条");
-    expect(buildAgentShortcutHint(2)).toBe("工作线: PgUp/PgDn 或 Alt+←/→");
+  it("会按工位数量返回更易懂的提示文案", () => {
+    expect(buildAgentShortcutHint(1)).toBe("工位: 仅当前 1 条");
+    expect(buildAgentShortcutHint(2)).toBe("工位: PgUp/PgDn 或 Alt+←/→");
   });
 });

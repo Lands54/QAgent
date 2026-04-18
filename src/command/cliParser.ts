@@ -298,6 +298,7 @@ export function parseCliInvocation(argv: string[]): ParsedCliInvocation {
       "debug",
       "memory",
       "skills",
+      "workline",
       "work",
       "bookmark",
       "executor",

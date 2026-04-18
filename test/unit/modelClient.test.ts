@@ -1,3 +1,5 @@
+import { ReadableStream } from "node:stream/web";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -9,6 +11,24 @@ import type { RuntimeConfig } from "../../src/types.js";
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+function createSseResponse(chunks: string[]): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk));
+      }
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream",
+    },
+  });
+}
 
 describe("buildModelHeaders", () => {
   it("为 OpenRouter 构建带专用 header 的请求头", () => {
@@ -106,5 +126,44 @@ describe("buildModelHeaders", () => {
         "cause=Error: connect ECONNREFUSED",
       ].join("\n"),
     );
+  });
+
+  it("流式响应兼容 CRLF 分隔，并在 EOF 时处理最后一个 SSE 事件", async () => {
+    const config: RuntimeConfig["model"] = {
+      provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "openai-key",
+      model: "gpt-4.1-mini",
+      temperature: 0.2,
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      createSseResponse([
+        "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\r\n\r\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\r\n\r\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\r\n\r\n",
+        "data: [DONE]",
+      ]),
+    );
+
+    const client = new OpenAICompatibleModelClient(config);
+    const hooks = {
+      onTextStart: vi.fn(),
+      onTextDelta: vi.fn(),
+      onTextComplete: vi.fn(),
+    };
+
+    const result = await client.runTurn({
+      systemPrompt: "test",
+      messages: [],
+      tools: [],
+    }, hooks);
+
+    expect(result.assistantText).toBe("你好");
+    expect(result.toolCalls).toEqual([]);
+    expect(result.finishReason).toBe("stop");
+    expect(hooks.onTextStart).toHaveBeenCalledOnce();
+    expect(hooks.onTextDelta).toHaveBeenNthCalledWith(1, "你");
+    expect(hooks.onTextDelta).toHaveBeenNthCalledWith(2, "好");
+    expect(hooks.onTextComplete).toHaveBeenCalledWith("你好");
   });
 });

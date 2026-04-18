@@ -300,6 +300,7 @@ export type CommandDomain =
   | "debug"
   | "memory"
   | "skills"
+  | "workline"
   | "work"
   | "bookmark"
   | "executor"
@@ -380,6 +381,22 @@ export type CommandRequest =
       domain: "skills";
       action: "list" | "show";
       key?: string;
+    }
+  | {
+      domain: "workline";
+      action:
+        | "status"
+        | "list"
+        | "switch"
+        | "next"
+        | "prev"
+        | "close"
+        | "new"
+        | "detach"
+        | "merge";
+      worklineId?: string;
+      name?: string;
+      source?: string;
     }
   | {
       domain: "work";

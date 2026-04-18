@@ -77,6 +77,7 @@ describe("BackendClientController", () => {
   });
 
   it("事件流意外关闭时会把断连状态反映到 UI", async () => {
+    vi.useFakeTimers();
     const transport = createTransportStub({
       openEventStream: async () => {},
     });
@@ -84,13 +85,44 @@ describe("BackendClientController", () => {
 
     try {
       await controller.startEventStreamForTest();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.advanceTimersByTimeAsync(10_000);
 
       const state = controller.getState();
       expect(state.status.mode).toBe("error");
       expect(state.uiMessages.at(-1)?.content).toContain("监听事件流失败");
     } finally {
       await controller.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("事件流短暂断开后会自动重连", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const transport = createTransportStub({
+      openEventStream: async (signal) => {
+        attempts += 1;
+        if (attempts === 1) {
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+    });
+    const controller = new TestBackendClientController(transport);
+
+    try {
+      await controller.startEventStreamForTest();
+      expect(transport.openEventStream).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(transport.openEventStream).toHaveBeenCalledTimes(2);
+      expect(controller.getState().status.mode).not.toBe("error");
+      expect(controller.getState().uiMessages.at(-1)?.content ?? "").not.toContain("监听事件流失败");
+    } finally {
+      await controller.dispose();
+      vi.useRealTimers();
     }
   });
 

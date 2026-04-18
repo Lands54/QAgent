@@ -68,15 +68,15 @@ export function buildSlashHelpText(): string {
     "/memory show <name>",
     "/skills list",
     "/skills show <name|id>",
-    "/work status [worklineId|name]",
-    "/work list",
-    "/work new <name>",
-    "/work switch <worklineId|name>",
-    "/work next",
-    "/work prev",
-    "/work close <worklineId|name>",
-    "/work detach [worklineId|name]",
-    "/work merge <sourceWorkline>",
+    "/workline status [worklineId|name]",
+    "/workline list",
+    "/workline new <name>",
+    "/workline switch <worklineId|name>",
+    "/workline next",
+    "/workline prev",
+    "/workline close <worklineId|name>",
+    "/workline detach [worklineId|name]",
+    "/workline merge <sourceWorkline>",
     "/bookmark status",
     "/bookmark list",
     "/bookmark save <name>",
@@ -323,11 +323,12 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
     };
   }
 
-  if (domain === "work") {
+  if (domain === "workline" || domain === "work") {
+    const requestDomain = domain;
     if (subcommand === "new") {
       return {
         request: {
-          domain: "work",
+          domain: requestDomain,
           action: "new",
           name: rest[0],
         },
@@ -336,7 +337,7 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
     if (subcommand === "switch" || subcommand === "close" || subcommand === "status" || subcommand === "detach") {
       return {
         request: {
-          domain: "work",
+          domain: requestDomain,
           action: subcommand,
           worklineId: rest[0],
         },
@@ -345,7 +346,7 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
     if (subcommand === "merge") {
       return {
         request: {
-          domain: "work",
+          domain: requestDomain,
           action: "merge",
           source: rest[0],
         },
@@ -354,14 +355,14 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
     if (subcommand === "next" || subcommand === "prev") {
       return {
         request: {
-          domain: "work",
+          domain: requestDomain,
           action: subcommand,
         },
       };
     }
     return {
       request: {
-        domain: "work",
+        domain: requestDomain,
         action: "list",
       },
     };
@@ -453,7 +454,7 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
     }
     if (subcommand === "status") {
       return {
-        error: "/session status 已移除。请改用 /work status。",
+        error: "/session status 已移除。请改用 /workline status。",
       };
     }
     if (subcommand === "branch") {
@@ -466,7 +467,7 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
     if (subcommand === "switch") {
       return {
         error: rest[0] === "-c"
-          ? "/session switch -c <branch> 已移除。请改用 /work new <name>。"
+          ? "/session switch -c <branch> 已移除。请改用 /workline new <name>。"
           : "/session switch <ref> 已移除。请改用 /bookmark switch <name>。",
       };
     }
@@ -484,7 +485,7 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
     }
     if (subcommand === "head") {
       return {
-        error: "/session head 系列命令已移除。请改用 /work ...。",
+        error: "/session head 系列命令已移除。请改用 /workline ...。",
       };
     }
     if (subcommand === "list") {
@@ -494,7 +495,7 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
     }
     if (subcommand === "fork") {
       return {
-        error: "/session fork 已移除。请改用 /work new <name>。",
+        error: "/session fork 已移除。请改用 /workline new <name>。",
       };
     }
     if (subcommand === "checkout") {
@@ -509,7 +510,7 @@ export function parseCommandTokens(tokens: string[]): ParsedCommandTokensResult 
 
   if (domain === "agent") {
     return {
-      error: "/agent 系列命令已移除。请改用 /work 或 /executor。",
+      error: "/agent 系列命令已移除。请改用 /workline 或 /executor。",
     };
   }
 

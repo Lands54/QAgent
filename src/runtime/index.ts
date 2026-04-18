@@ -4,6 +4,14 @@ export { AgentManager } from "./agentManager.js";
 export { AgentRuntimeFactory } from "./agentRuntimeFactory.js";
 export { AppStateAssembler } from "./application/appStateAssembler.js";
 export {
+  AppStateRefresher,
+  type AppStateSource,
+  type AppStateSupplementalFailure,
+  type AppStateSupplementalState,
+  type BuildAppStateFromSourceInput,
+  type LoadAppStateSupplementalInput,
+} from "./application/appStateRefresher.js";
+export {
   AutoMemoryForkService,
   type AutoMemoryForkInput,
   type AutoMemoryForkResult,

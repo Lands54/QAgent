@@ -38,6 +38,8 @@ interface SseClient {
   response: ServerResponse;
 }
 
+const SSE_KEEPALIVE_MS = 15_000;
+
 interface PendingRpc {
   resolve: (message: EdgeGatewayRpcResult) => void;
   reject: (error: Error) => void;
@@ -59,6 +61,10 @@ function writeSse(response: ServerResponse, event: GatewaySseEvent): void {
   response.write(`id: ${event.id}\n`);
   response.write(`event: ${event.type}\n`);
   response.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+function writeSseComment(response: ServerResponse, comment: string): void {
+  response.write(`: ${comment}\n\n`);
 }
 
 function nowIso(): string {
@@ -507,7 +513,7 @@ export class EdgeServer {
           "cache-control": "no-cache, no-transform",
           connection: "keep-alive",
         });
-        response.write(": connected\n\n");
+        writeSseComment(response, "connected");
         const client: SseClient = {
           workspaceId,
           clientId,
@@ -515,7 +521,12 @@ export class EdgeServer {
           response,
         };
         this.sseClients.add(client);
+        const keepaliveTimer = setInterval(() => {
+          writeSseComment(response, "keepalive");
+        }, SSE_KEEPALIVE_MS);
+        keepaliveTimer.unref?.();
         request.on("close", () => {
+          clearInterval(keepaliveTimer);
           this.sseClients.delete(client);
         });
         return;

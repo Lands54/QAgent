@@ -15,7 +15,7 @@ export function WorklineList({ worklines, activeWorklineId }: WorklineListProps)
       paddingX={1}
       flexDirection="column"
     >
-      <Text color="cyan">Worklines · {worklines.length}</Text>
+      <Text color="cyan">工位 · {worklines.length}</Text>
       {worklines.map((workline) => (
         <Box key={workline.id} flexDirection="column" marginTop={1}>
           <Text color={workline.id === activeWorklineId ? "green" : undefined}>

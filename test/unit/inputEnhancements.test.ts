@@ -129,12 +129,12 @@ describe("inputEnhancements", () => {
     expect(candidates).toContain("/memory save --name= --description=");
   });
 
-  it("会包含新的 work / bookmark 命令模板", () => {
+  it("会包含新的 workline / bookmark 命令模板", () => {
     const candidates = buildAutocompleteCandidates([]);
 
     expect(candidates).toContain("/session commit -m ");
-    expect(candidates).toContain("/work status");
-    expect(candidates).toContain("/work new ");
+    expect(candidates).toContain("/workline status");
+    expect(candidates).toContain("/workline new ");
     expect(candidates).toContain("/bookmark switch ");
     expect(candidates).toContain("/session graph log --limit=");
     expect(candidates).not.toContain("/session fork ");
@@ -177,14 +177,14 @@ describe("inputEnhancements", () => {
 
     expect(preview.mode).toBe("idle");
     expect(preview.suggestions.map((item) => item.value)).toContain("/help");
-    expect(preview.suggestions.map((item) => item.value)).toContain("/work status");
+    expect(preview.suggestions.map((item) => item.value)).toContain("/workline status");
     expect(preview.hint).toContain("待机态");
   });
 
   it("重复按 Tab 时会在多个候选之间轮换", () => {
-    const step1 = completeInput("/work ", [], 0);
+    const step1 = completeInput("/workline ", [], 0);
     const step2 = completeInput(
-      "/work ",
+      "/workline ",
       [],
       step1.nextSuggestionIndex,
       step1.cycleQuery,
@@ -196,8 +196,8 @@ describe("inputEnhancements", () => {
       step2.cycleQuery,
     );
 
-    expect(step1.nextValue).toBe("/work ");
-    expect(step1.cycleQuery).toBe("/work ");
+    expect(step1.nextValue).toBe("/workline ");
+    expect(step1.cycleQuery).toBe("/workline ");
     expect(step2.nextValue).not.toBe(step1.nextValue);
     expect(step3.nextValue).not.toBe(step2.nextValue);
     expect(step2.hint).toContain("补全:");
